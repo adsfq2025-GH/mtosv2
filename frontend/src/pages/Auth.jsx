@@ -41,7 +41,7 @@ export function Login() {
           <label className="label">Password</label>
           <input type="password" className="input mt-1.5 mb-2" value={password} onChange={(e) => setPassword(e.target.value)} required data-testid="login-password-input" />
           {err && <div className="text-red-400 text-sm my-2" data-testid="login-error">{err}</div>}
-          <button className="btn-primary w-full mt-4 flex items-center justify-center gap-2" disabled={loading} data-testid="login-submit-btn">
+          <button type="submit" className="btn-primary w-full mt-4 flex items-center justify-center gap-2" disabled={loading} data-testid="login-submit-btn">
             {loading ? "Signing in…" : "Sign in"} <ArrowRight size={16} weight="bold" />
           </button>
           <div className="text-center mt-5 text-sm text-slate-400">
@@ -87,7 +87,7 @@ export function Register() {
           <option value="admin">Admin</option>
         </select>
         {err && <div className="text-red-400 text-sm" data-testid="register-error">{err}</div>}
-        <button className="btn-primary w-full mt-4" disabled={loading} data-testid="register-submit-btn">{loading ? "Creating…" : "Create account"}</button>
+        <button type="submit" className="btn-primary w-full mt-4" disabled={loading} data-testid="register-submit-btn">{loading ? "Creating…" : "Create account"}</button>
         <div className="text-center mt-5 text-sm text-slate-400">
           Already have an account? <Link className="text-[#3FA9F5] hover:underline" to="/login" data-testid="go-login-link">Sign in</Link>
         </div>

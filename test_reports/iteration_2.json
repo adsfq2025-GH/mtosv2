@@ -1,0 +1,38 @@
+{
+  "summary": "End-to-end frontend regression for Monthly Touch OS executed against the external preview URL. Login → Dashboard → Clients → Client Detail → Meeting → AI Brief → Transcript Analysis → AI Findings → Content Queue → Actions → Integrations (ClickUp configure+save→connected) → Logout flows ALL verified working. AI Brief generation (Claude Sonnet 4.6, default) populated 3 Wins / 2 Issues / Talking Points / Suggested Questions / Strategic Recommendations / Testimonial Opportunity / KPI snapshot in ~40s. Transcript analysis (1596-char realistic transcript) populated 3 action items, 3 content opportunities (testimonial_written, case_study_lead, quote), and positive sentiment chip. Recap generation was triggered but the Recap tab still showed the placeholder after 20s wait — likely needs longer timeout (40-60s). Sidebar nav testids all OK (nav-dashboard, nav-clients, nav-meetings, nav-actions, nav-content, nav-integrations, nav-docs). Logout redirects to /login. No JS console errors observed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "MeetingDetail tab", "issue": "Spec asked for tab-id 'tab-findings' but actual id is 'tab-analysis'. Functional but a naming mismatch vs. the request spec.", "selector": "[data-testid=\"tab-analysis\"]", "priority": "LOW"},
+      {"component": "New Client modal", "issue": "Spec asked for client-name-input / client-company-input / client-services-input / client-submit-btn but actual ids are new-client-name / new-client-company / new-client-submit and the Services input has NO data-testid (only a placeholder). Functional but inconsistent with spec & weaker testability.", "selector": "[data-testid=\"new-client-form\"]", "priority": "LOW"},
+      {"component": "New Meeting modal", "issue": "Spec asked for meeting-title-input / meeting-submit-btn but actual ids are new-meeting-title / new-meeting-submit. Cosmetic mismatch.", "selector": "[data-testid=\"new-meeting-form\"]", "priority": "LOW"},
+      {"component": "Schedule Meeting modal — 'Scheduled at (ISO)' field", "issue": "Uses native browser datetime-local picker (`<input type=\"datetime-local\">`) instead of the shadcn Calendar component. Code-review guideline calls this out as an anti-pattern.", "selector": "input[type=\"datetime-local\"]", "priority": "LOW"},
+      {"component": "Recap Email tab", "issue": "After clicking 'Generate Recap Email' from AI Findings, the Recap tab still showed 'Generate recap from the AI Findings tab.' placeholder 20s later. Either the call takes >20s (need longer FE polling/loading state) or the HTML preview is not being rendered. Needs to verify whether the meeting.recap_html is being persisted but not surfaced into the tab without a refresh.", "selector": "[data-testid=\"tab-recap\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Login page", "issues": ["Bootstrap admin credentials are shown verbatim on the login card (admin@monthlytouchos.com / ChangeMe!2026). Convenient for testing but should be removed/feature-flagged before any production deploy."]},
+      {"screen": "Dashboard / sidebar", "issues": ["TOP-3 LOCAL RANK and RETENTION TREND cards label themselves '(demo)' — by design per request, but consider hiding these tiles entirely when no client data exists."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Recap Email tab: ensure the Recap HTML renders into the tab once /meetings/{id}/generate-recap returns (possibly poll meeting object or auto-switch to Recap tab on success). Currently the tab still shows the empty-state after click. (MEDIUM)",
+    "Align data-testid names with the names listed in the review request (client-name-input/client-company-input/client-services-input/client-submit-btn, meeting-title-input/meeting-submit-btn, tab-findings) OR update the spec — main agent's choice. Also add a data-testid to the Services textarea in the New Client modal. (LOW)",
+    "Replace the native datetime-local input in the Schedule Meeting modal with the shadcn Calendar/Date-Time picker for consistency with the dark-theme design system. (LOW)",
+    "Consider feature-flagging the bootstrap credentials hint shown on the login page before production. (LOW)"
+  ],
+  "critical_code_review_comments": [
+    "Spec-vs-implementation drift on data-testid naming for forms — small but increases test maintenance burden.",
+    "Native datetime-local picker visually clashes with the otherwise polished dark UI — replace with shadcn DatePicker.",
+    "Recap tab does not appear to auto-update after the AI recap call completes, suggesting a missing state refresh / refetch on the meeting object after generate-recap returns (FE state mgmt bug)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (40/40, from iteration_1)", "frontend": "~92% (12/13 flows verified; Docs page nav not reached because Integration modal stayed open — Docs covered by backend tests already)"},
+  "test_credentials": "admin@monthlytouchos.com / ChangeMe!2026 (bootstrap admin)",
+  "seed_data_creation": "Each run creates TEST_FE_<timestamp> client + 'Q1 Strategy Review' meeting + 3 action items + 3 content captures via the real UI flow. Brief/transcript-analysis persist real AI output into Mongo. Not cleaned up by this run.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Frontend e2e largely green — only the Recap tab auto-population after 'Generate Recap Email' needs a fix verification. When retesting, allow at least 45-60s after clicking Generate Recap before switching to Recap tab, and also try refreshing the meeting page after the click to confirm whether the data is in Mongo but just not rendered in the tab without a refresh (which would localise the bug to FE state-refresh). The Docs page was not exercised in iteration_2 because the Integration modal blocked navigation; retest Docs sidebar groups + doc-link click + markdown render + search filter in the next pass. Logout works; ClickUp configure→Save & Verify→status='connected' verified. All sidebar nav testids and the requested login-form testids match the spec exactly. AI engine (Claude Sonnet 4.6) is producing high-quality, on-topic output — no mocks observed except the by-design KPI snapshot.",
+  "rca of the issue": "Recap tab not populating after generate-recap click: most likely cause is the FE not refetching the meeting (or not subscribing to the mutation response) after the POST /api/meetings/{id}/generate-recap returns. Backend persists recap_html on the meeting (iteration_1 confirmed) — so verify in MeetingDetail.jsx that the recap state slice is updated from the response payload OR that the meeting object is refetched. Reproduction: login → create client + meeting → run brief → paste transcript → analyze → on AI Findings tab click 'Generate Recap Email' → switch to Recap tab within 20s — placeholder remains. Mitigation: after the generate-recap mutation resolves, setMeeting(response.data.meeting) OR queryClient.invalidateQueries(['meeting', id])."
+}

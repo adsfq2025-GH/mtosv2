@@ -61,9 +61,9 @@ async def root():
 # ===================== AUTH =====================
 @api.post("/auth/register")
 async def register(data: RegisterIn):
-    # First user becomes admin if no users exist
+    # First user becomes admin if no users exist; otherwise role is forced to manager
     user_count = await db.users.count_documents({})
-    role = "admin" if user_count == 0 else (data.role or "manager")
+    role = "admin" if user_count == 0 else "manager"
     if await db.users.find_one({"email": data.email}):
         raise HTTPException(409, "Email already registered")
     user = User(
@@ -95,7 +95,7 @@ async def me(user: User = Depends(get_current_user)):
 
 
 @api.get("/users")
-async def list_users(_: User = Depends(get_current_user)):
+async def list_users(_: User = Depends(require_admin)):
     docs = await db.users.find({}, {"password_hash": 0}).to_list(500)
     return [
         {
@@ -205,7 +205,11 @@ async def update_meeting(meeting_id: str, patch: MeetingPatch, _: User = Depends
 
 @api.delete("/meetings/{meeting_id}")
 async def delete_meeting(meeting_id: str, _: User = Depends(get_current_user)):
-    await db.meetings.delete_one({"_id": meeting_id})
+    res = await db.meetings.delete_one({"_id": meeting_id})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Meeting not found")
+    await db.action_items.delete_many({"meeting_id": meeting_id})
+    await db.content_captures.delete_many({"meeting_id": meeting_id})
     return {"ok": True}
 
 
