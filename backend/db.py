@@ -11,10 +11,21 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 
 # ---------- Mongo client ----------
-_mongo_url = os.environ["MONGO_URL"]
-_db_name = os.environ["DB_NAME"]
-_client = AsyncIOMotorClient(_mongo_url)
-db = _client[_db_name]
+_mongo_url = os.environ.get("MONGO_URL", "").strip()
+_db_name = os.environ.get("DB_NAME", "").strip()
+_mongo_timeout_ms = int(os.environ.get("MONGO_TIMEOUT_MS", "5000"))
+
+
+class _MissingDB:
+    def __getattr__(self, name: str):
+        raise RuntimeError("MongoDB is not configured. Set MONGO_URL and DB_NAME.")
+
+
+if _mongo_url and _db_name:
+    _client = AsyncIOMotorClient(_mongo_url, serverSelectionTimeoutMS=_mongo_timeout_ms)
+    db = _client[_db_name]
+else:
+    db = _MissingDB()
 
 
 # ---------- ObjectId support ----------

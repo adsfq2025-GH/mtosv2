@@ -616,7 +616,16 @@ async def ai_models(_: User = Depends(get_current_user)):
 # ===================== BOOT =====================
 @app.on_event("startup")
 async def _startup():
-    await bootstrap_admin()
+    try:
+        await db.command("ping")
+    except Exception as exc:
+        logger.error("MongoDB connection failed: %s", exc)
+        logger.error("Set MONGO_URL and DB_NAME to a reachable MongoDB instance.")
+        return
+    try:
+        await bootstrap_admin()
+    except Exception as exc:
+        logger.error("bootstrap_admin failed: %s", exc)
     logger.info("Monthly Touch OS API ready")
 
 
