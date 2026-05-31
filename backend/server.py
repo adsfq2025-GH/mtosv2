@@ -49,6 +49,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("mtos")
 
 app = FastAPI(title="Monthly Touch OS")
+
+# ===================== CORS MIDDLEWARE =====================
+# Allows your independent Vercel frontend to safely communicate with this Render backend.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict this to your specific Vercel URL later for tighter security
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 api = APIRouter(prefix="/api")
 
 
@@ -595,26 +606,19 @@ async def ai_models(_: User = Depends(get_current_user)):
         {"key": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "provider": "Google"},
     ]
 
-
 # ===================== BOOT =====================
-app.include_router(api)
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 @app.on_event("startup")
 async def _startup():
     await bootstrap_admin()
     logger.info("Monthly Touch OS API ready")
+    
+# ===================== ROUTER ATTACHMENT =====================
+app.include_router(api)
 
 
+# ===================== PRODUCTION ENTRYPOINT =====================
+# Ensures Render binds natively to the host infrastructure via Python execution fallback.
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
-
