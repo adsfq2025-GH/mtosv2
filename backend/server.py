@@ -51,13 +51,37 @@ logger = logging.getLogger("mtos")
 
 app = FastAPI(title="Monthly Touch OS")
 api = APIRouter(prefix="/api")
+DB_READY = False
+
+
+async def _ensure_db_ready() -> bool:
+    global DB_READY
+    if DB_READY:
+        return True
+    try:
+        await db.command("ping")
+        DB_READY = True
+        return True
+    except Exception as exc:
+        logger.error("MongoDB connection failed: %s", exc)
+        return False
+
+
+async def require_db_ready():
+    ok = await _ensure_db_ready()
+    if not ok:
+        raise HTTPException(503, "Database unavailable. Check MONGO_URL/DB_NAME and Atlas IP allowlist.")
 
 # ===================== CORS MIDDLEWARE =====================
 # Allows your independent Vercel frontend to safely communicate with this Render backend.
+_cors_origins_raw = os.environ.get("CORS_ORIGINS", "*")
+_cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+if not _cors_origins:
+    _cors_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -67,38 +91,51 @@ app.include_router(api)
 # ===================== HEALTH =====================
 @api.get("/")
 async def root():
-    return {"name": "Monthly Touch OS API", "version": "1.0.0", "status": "ok"}
+    await _ensure_db_ready()
+    return {"name": "Monthly Touch OS API", "version": "1.0.0", "status": "ok", "db_ready": DB_READY}
 
 
 # ===================== AUTH =====================
 @api.post("/auth/register")
-async def register(data: RegisterIn):
+async def register(data: RegisterIn, _: None = Depends(require_db_ready)):
     # First user becomes admin if no users exist; otherwise role is forced to manager
-    user_count = await db.users.count_documents({})
-    role = "admin" if user_count == 0 else "manager"
-    if await db.users.find_one({"email": data.email}):
-        raise HTTPException(409, "Email already registered")
-    user = User(
-        email=data.email,
-        name=data.name,
-        role=role,
-        password_hash=hash_password(data.password),
-    )
-    await db.users.insert_one(user.to_mongo())
-    token = create_token(user.id, user.role)
-    return {"token": token, "user": to_public(user).model_dump()}
+    try:
+        user_count = await db.users.count_documents({})
+        role = "admin" if user_count == 0 else "manager"
+        if await db.users.find_one({"email": data.email}):
+            raise HTTPException(409, "Email already registered")
+        user = User(
+            email=data.email,
+            name=data.name,
+            role=role,
+            password_hash=hash_password(data.password),
+        )
+        await db.users.insert_one(user.to_mongo())
+        token = create_token(user.id, user.role)
+        return {"token": token, "user": to_public(user).model_dump()}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("register failed: %s", exc)
+        raise HTTPException(503, "Database unavailable. Check Atlas Network Access / connection string.") from exc
 
 
 @api.post("/auth/login")
-async def login(data: LoginIn):
-    doc = await db.users.find_one({"email": data.email})
-    if not doc:
-        raise HTTPException(401, "Invalid credentials")
-    user = User.from_mongo(doc)
-    if not user.active or not verify_password(data.password, user.password_hash):
-        raise HTTPException(401, "Invalid credentials")
-    token = create_token(user.id, user.role)
-    return {"token": token, "user": to_public(user).model_dump()}
+async def login(data: LoginIn, _: None = Depends(require_db_ready)):
+    try:
+        doc = await db.users.find_one({"email": data.email})
+        if not doc:
+            raise HTTPException(401, "Invalid credentials")
+        user = User.from_mongo(doc)
+        if not user.active or not verify_password(data.password, user.password_hash):
+            raise HTTPException(401, "Invalid credentials")
+        token = create_token(user.id, user.role)
+        return {"token": token, "user": to_public(user).model_dump()}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("login failed: %s", exc)
+        raise HTTPException(503, "Database unavailable. Check Atlas Network Access / connection string.") from exc
 
 
 @api.get("/auth/me")
@@ -616,12 +653,7 @@ async def ai_models(_: User = Depends(get_current_user)):
 # ===================== BOOT =====================
 @app.on_event("startup")
 async def _startup():
-    try:
-        await db.command("ping")
-    except Exception as exc:
-        logger.error("MongoDB connection failed: %s", exc)
-        logger.error("Set MONGO_URL and DB_NAME to a reachable MongoDB instance.")
-        return
+    await _ensure_db_ready()
     try:
         await bootstrap_admin()
     except Exception as exc:
