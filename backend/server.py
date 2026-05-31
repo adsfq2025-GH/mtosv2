@@ -85,7 +85,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(api)
 
 
 # ===================== HEALTH =====================
@@ -649,6 +648,8 @@ async def ai_models(_: User = Depends(get_current_user)):
             }
         )
     return items
+
+app.include_router(api)
 
 # ===================== BOOT =====================
 @app.on_event("startup")
