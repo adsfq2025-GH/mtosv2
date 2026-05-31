@@ -1,0 +1,44 @@
+import React, { createContext, useContext, useEffect, useState } from "react";
+import { auth as authApi } from "./api";
+
+const AuthCtx = createContext(null);
+
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(() => {
+    const raw = localStorage.getItem("mtos_user");
+    return raw ? JSON.parse(raw) : null;
+  });
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const t = localStorage.getItem("mtos_token");
+    if (!t) { setLoading(false); return; }
+    authApi.me().then((u) => { setUser(u); localStorage.setItem("mtos_user", JSON.stringify(u)); }).catch(() => {
+      localStorage.removeItem("mtos_token"); localStorage.removeItem("mtos_user"); setUser(null);
+    }).finally(() => setLoading(false));
+  }, []);
+
+  const login = async (email, password) => {
+    const r = await authApi.login(email, password);
+    localStorage.setItem("mtos_token", r.token);
+    localStorage.setItem("mtos_user", JSON.stringify(r.user));
+    setUser(r.user);
+    return r.user;
+  };
+  const register = async (payload) => {
+    const r = await authApi.register(payload);
+    localStorage.setItem("mtos_token", r.token);
+    localStorage.setItem("mtos_user", JSON.stringify(r.user));
+    setUser(r.user);
+    return r.user;
+  };
+  const logout = () => {
+    localStorage.removeItem("mtos_token");
+    localStorage.removeItem("mtos_user");
+    setUser(null);
+  };
+
+  return <AuthCtx.Provider value={{ user, loading, login, register, logout }}>{children}</AuthCtx.Provider>;
+}
+
+export const useAuth = () => useContext(AuthCtx);

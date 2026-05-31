@@ -1,0 +1,47 @@
+{
+  "summary": "Comprehensive backend regression for Monthly Touch OS. 40/40 pytest tests PASSED on the external preview URL covering: auth (bootstrap admin login, register, /me, role assignment, dup-email 409, no-token 401/403), dashboard overview (schema + auth guard), Clients CRUD (create/list/get/patch/delete with cascade verified via 404 on subsequent GET), Meetings CRUD, AI Brief generation (Claude Sonnet 4.6 — exactly 3 wins, 2 issues, talking_points, suggested_questions, strategic_recommendations, testimonial_opportunity, health_signal, kpi_snapshot persisted, status='prep'), AI Transcript analysis (real ~500-word transcript — sentiment correctly classified as 'positive', action_items + content_captures auto-created in MongoDB & verified via GET endpoints, client.sentiment + health_score updated), AI Recap (subject/html/plain returned), Action-Items list/patch/delete, Content-Captures list/patch (routed_to_marketing), Integrations catalog (13 platforms verified), Integrations status, configure→test→disconnect for clickup with encrypted credential storage (no secrets leaked in /api/integrations response — only configured_field_keys exposed), Docs list (>=14 docs incl. mtm-framework) + detail body + 404, AI models list (3 entries). Total runtime ~125s (AI endpoints took ~5-30s each).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/register", "issue": "When role is provided on registration, it is accepted from client input (data.role) for non-first users — any user can self-elevate to 'admin' via register payload. Should ignore role from public registration and only allow admin to create admin users."},
+      {"endpoint": "DELETE /api/meetings/{id}", "issue": "Hard-deletes meeting but does NOT cascade-delete associated action_items / content_captures (only DELETE /api/clients/{id} does cascade). Could leave orphan rows referencing a non-existent meeting_id."},
+      {"endpoint": "PATCH /api/clients/{id} & PATCH /api/action-items/{id} & PATCH /api/content-captures/{id}", "issue": "Accept raw dict payloads with no Pydantic validation — clients can write arbitrary fields (e.g., health_score=99999, role) directly into Mongo documents. Should use typed Pydantic patch models like MeetingPatch."},
+      {"endpoint": "GET /api/users", "issue": "Any authenticated user (not just admin) can list every user incl. their emails and roles. Should be admin-only or scoped."},
+      {"endpoint": "DELETE /api/meetings/{id} & DELETE /api/action-items/{id} & DELETE /api/content-captures/{id}", "issue": "Return 200 with {ok:true} even when the resource does not exist (no 404). Inconsistent with /clients/{id} which 404s on GET but also silently succeeds on DELETE."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Harden POST /api/auth/register so role cannot be set by request body for non-first users (force role='manager' regardless of payload).",
+    "Replace untyped `patch: dict` parameters in PATCH client/action-item/content-capture handlers with explicit Pydantic patch models to prevent arbitrary field writes.",
+    "Cascade-delete action_items + content_captures when deleting a meeting (mirror /clients delete behavior).",
+    "Restrict GET /api/users to admin role only.",
+    "Return 404 on DELETE of missing resources for consistency."
+  ],
+  "critical_code_review_comments": [
+    "server.py is ~610 lines — acceptable now but trending toward the 700 line guideline; consider splitting routers (auth, clients, meetings, integrations, docs) into separate modules.",
+    "Untyped `patch: dict` accepted by 3 PATCH endpoints — security & data-integrity risk; use Pydantic models.",
+    "`POST /api/auth/register` trusts client-supplied `role` field — privilege escalation vector.",
+    "`/api/users` lists all users to any authenticated caller — broaden access control.",
+    "Meeting deletion lacks cascade; orphan action_items/content_captures possible.",
+    "ai.py `_extract_json` is defensive but `_raw` is returned in response when parse succeeds (`None`) — fine; when it fails the entire response is degraded silently. Consider logging the raw on parse failure.",
+    "BaseDocument._id ObjectId handling — observed all responses use 'id' (string uuid via new_id) — _id is not leaking, good.",
+    "All endpoints properly use async/await; MongoDB queries are non-blocking — good.",
+    "Encrypted credentials via Fernet — verified secrets never leak to /api/integrations (only configured_field_keys exposed) — good."
+  ],
+  "updated_files": [
+    "/app/backend/tests/__init__.py (created)",
+    "/app/backend/tests/backend_test.py (created — 40 pytest tests)"
+  ],
+  "success_rate": {"backend": "100% (40/40)", "frontend": "n/a (backend-only request)"},
+  "test_credentials": "admin@monthlytouchos.com / ChangeMe!2026 (bootstrap admin, seeded on startup)",
+  "seed_data_creation": "Each test run creates a TEST_ prefixed client + meeting + action items + content captures; teardown tests delete the meeting and client (cascade deletes action_items / content_captures via client delete). Per-run TEST_ user is registered via /auth/register and not cleaned up (no delete user endpoint exists).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend is fully green via /app/backend/tests/backend_test.py — re-run with `cd /app && python -m pytest backend/tests/backend_test.py -v --junitxml=/app/test_reports/pytest/pytest_results.xml`. AI tests (brief/analyze-transcript/recap) hit the real Emergent LLM key and take 5-30s each — keep AI_TIMEOUT >=90s. TEST_ prefix used for created data. Frontend has NOT been tested per the request scope. Mocked: KPI snapshot in /meetings/{id}/generate-brief is seeded demo data — that is by design and called out by the main agent.",
+  "rca of the issue": "n/a — no bugs blocking; only hardening recommendations listed under minor backend_issues."
+}
