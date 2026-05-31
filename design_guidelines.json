@@ -1,0 +1,129 @@
+{
+  "theme": "dark",
+  "archetype": "Archetype 4 (Swiss & High-Contrast) + Dark Tech",
+  "brand": {
+    "name": "Monthly Touch OS",
+    "vibe": "Professional, modern, slightly futuristic, agency/SaaS operations vibe"
+  },
+  "colors": {
+    "background": "#0A0E1A",
+    "surface": "#121A2F",
+    "surface_glass": "bg-black/40 backdrop-blur-xl border border-white/10 saturate-150",
+    "primary": "#3FA9F5",
+    "primary_hover": "#5CBAF6",
+    "secondary": "#2FE0C2",
+    "text_main": "#F8FAFC",
+    "text_muted": "#94A3B8",
+    "border": "#1E293B",
+    "success": "#2FE0C2",
+    "warning": "#F59E0B",
+    "danger": "#EF4444",
+    "chart_palette": [
+      "#3FA9F5",
+      "#2FE0C2",
+      "#818CF8",
+      "#F472B6"
+    ]
+  },
+  "typography": {
+    "headings": {
+      "family": "Outfit",
+      "weights": [
+        "400",
+        "600",
+        "700"
+      ],
+      "tracking": "tracking-tight"
+    },
+    "body": {
+      "family": "Figtree",
+      "weights": [
+        "400",
+        "500",
+        "600"
+      ]
+    },
+    "mono": {
+      "family": "JetBrains Mono",
+      "usage": "Data points, integration IDs, timers, health scores"
+    }
+  },
+  "layout_and_spacing": {
+    "strategy": "The 'Control Room' Grid (Density, Data Correlation, Scanability)",
+    "container_padding": "p-6 md:p-8",
+    "gap": "gap-4 md:gap-6",
+    "border_radius": "rounded-md",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 or grid-cols-12 for complex views",
+    "general": "Mobile-first responsive. Use subgrids where nested layout density is required. Avoid padding overload in data tables."
+  },
+  "surfaces_and_micro_themes": {
+    "headers": "Crystal Glass - bg-black/40 backdrop-blur-xl border-b border-white/10 saturate-150",
+    "cards": "Grid Borders pattern - flat background (#121A2F), 1px subtle border (#1E293B), no heavy drop shadows. Hover: -translate-y-[1px] shadow-[0_8px_30px_rgba(0,0,0,0.5)]",
+    "active_states": "The 'Tracing Beam' - subtle glowing borders for active meeting or recording states, blur-md behind for light bleed."
+  },
+  "components_strategy": {
+    "general": "Shadcn/UI components heavily customized for dark navy theme. Strip default Vercel look. Write code in .js / .jsx (not TypeScript).",
+    "buttons": "Flat, text-white, primary color bg (#3FA9F5). Sharp or slightly rounded edges (rounded-md). robust focus states (focus-visible:ring-2 focus-visible:ring-primary/50).",
+    "inputs": "bg-transparent, border-white/10, text-white, focus:border-primary",
+    "charts": "Recharts. Use custom tooltip with glassmorphism. Lines/bars use primary and secondary colors.",
+    "tables": "Dense, text-sm. Hover on rows: bg-white/5. Sticky headers with crystal glass effect.",
+    "badges": "Subtle background opacity (bg-opacity-20) with solid text color. e.g., bg-[#2FE0C2]/20 text-[#2FE0C2] for Health=Good."
+  },
+  "page_specific_patterns": {
+    "roster_dashboard": "Modified F-pattern. Core metric (Account Health) top-left. Avatar list in grid.",
+    "meeting_mode": "Split screen layout. Timer and Agenda on left (sticky), Meeting Brief and Transcript capture on right.",
+    "integration_settings": "Bento grid of 12+ floating glass tiles. Use logo icons with status indicator dot (Green/Red) in top right of each tile.",
+    "doc_hub": "Two-column layout: sidebar navigation for SOPs/Checklists, main content area utilizing typography hierarchy."
+  },
+  "motion_and_interactions": {
+    "hover": "Transition transform 0.2s ease, opacity 0.2s ease. Explicit text color changes.",
+    "lists": "Staggered fade-up (Framer Motion) for client roster and integration lists.",
+    "meeting_mode": "Pulse animation (opacity shift) for active timer or recording state."
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "style": "Duotone or Regular weight, matching text size or primary/secondary colors for emphasis.",
+    "installation": "yarn add @phosphor-icons/react"
+  },
+  "accessibility": {
+    "contrast": "APCA compliant. Use text-shadow on text over images/gradients. Never use pure transparent backgrounds under text.",
+    "focus": "focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0E1A]",
+    "test_ids": "All interactive elements MUST have data-testid in kebab-case (e.g. data-testid='start-meeting-btn')."
+  },
+  "media": {
+    "images": [
+      {
+        "category": "backgrounds",
+        "description": "Abstract dark navy texture with very subtle, diffuse volumetric light bleed in bright blue. Used for login or empty states.",
+        "url": "https://static.prod-images.emergentagent.com/jobs/750d18a6-600c-4fd8-a8d4-19338aa6ebe2/images/3395e3c6b5b6023e2fe9e7b4be6324d29eb3e2d478f56b8020f2027735643095.png"
+      },
+      {
+        "category": "hero",
+        "description": "Modern tech abstract visual representing data integrations, floating glass tiles on dark navy. For empty states or docs hero.",
+        "url": "https://static.prod-images.emergentagent.com/jobs/750d18a6-600c-4fd8-a8d4-19338aa6ebe2/images/bcf4b1551a7c2d80811dd7b1a4a5577c8e86d0cc10db385d46b57557fd566ca4.png"
+      },
+      {
+        "category": "avatars",
+        "description": "Business professional avatars for roster dashboard client representatives.",
+        "urls": [
+          "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzNzl8MHwxfHNlYXJjaHwxfHxidXNpbmVzcyUyMHByb2Zlc3Npb25hbCUyMGF2YXRhciUyMHBvcnRyYWl0fGVufDB8fHx8MTc4MDIxNTEwNHww&ixlib=rb-4.1.0&q=85",
+          "https://images.unsplash.com/photo-1581065178047-8ee15951ede6?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzNzl8MHwxfHNlYXJjaHwyfHxidXNpbmVzcyUyMHByb2Zlc3Npb25hbCUyMGF2YXRhciUyMHBvcnRyYWl0fGVufDB8fHx8MTc4MDIxNTEwNHww&ixlib=rb-4.1.0&q=85",
+          "https://images.unsplash.com/photo-1584940120505-117038d90b05?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzNzl8MHwxfHNlYXJjaHwzfHxidXNpbmVzcyUyMHByb2Zlc3Npb25hbCUyMGF2YXRhciUyMHBvcnRyYWl0fGVufDB8fHx8MTc4MDIxNTEwNHww&ixlib=rb-4.1.0&q=85",
+          "https://images.unsplash.com/photo-1744956581253-abfd023141b1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzNzl8MHwxfHNlYXJjaHw0fHxidXNpbmVzcyUyMHByb2Zlc3Npb25hbCUyMGF2YXRhciUyMHBvcnRyYWl0fGVufDB8fHx8MTc4MDIxNTEwNHww&ixlib=rb-4.1.0&q=85"
+        ]
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Strictly adhere to the dark theme colors (#0A0E1A background, #3FA9F5 primary, #2FE0C2 secondary). Never invert light UI for dark mode; design dark-first.",
+    "Use ONLY JavaScript (.js/.jsx) for all components, do NOT use TypeScript.",
+    "Use @phosphor-icons/react for icons to give a premium technical look.",
+    "Implement the layout with the 'Control Room' grid strategy. Dashboards must look dense and data-rich.",
+    "Ensure ALL interactive elements and key informational areas have kebab-case data-testid attributes.",
+    "Use 'Outfit' for headings, 'Figtree' for body text, and 'JetBrains Mono' for numbers/data.",
+    "Create a navigation header with Crystal Glass effect (bg-black/60, backdrop-blur-xl, border-white/10) over scrolling content.",
+    "Do not use generic teal (#1B93A4). Use the specified brand teal (#2FE0C2) carefully for health scores, success states, or data accents.",
+    "Integrate the provided generated background and avatar images in appropriate placeholder locations instead of gray boxes.",
+    "Ensure inputs and textareas (like for Meeting Transcript upload) have distinct borders and focus states to stand out on dark backgrounds."
+  ]
+}
