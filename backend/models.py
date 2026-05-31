@@ -218,14 +218,14 @@ class IntegrationConfigureIn(BaseModel):
 
 # ===== AI GENERATE =====
 class GenerateBriefIn(BaseModel):
-    model: Optional[str] = "claude-sonnet-4-6"  # claude-sonnet-4-6 | gpt-5.2 | gemini-3.1-pro-preview
+    model: Optional[str] = None
     extra_context: Optional[str] = None
 
 
 class AnalyzeTranscriptIn(BaseModel):
     transcript: str
-    model: Optional[str] = "claude-sonnet-4-6"
+    model: Optional[str] = None
 
 
 class GenerateRecapIn(BaseModel):
-    model: Optional[str] = "claude-sonnet-4-6"
+    model: Optional[str] = None

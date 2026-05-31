@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { clients, meetings, actionItems } from "../api";
 import { PageHead } from "../Layout";
@@ -10,8 +10,8 @@ export function ClientsList() {
   const [list, setList] = useState([]); const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState({ name: "", company: "", industry: "", email: "", phone: "", location: "", services: "" });
   const navigate = useNavigate();
-  const load = () => clients.list().then(setList);
-  useEffect(() => { load(); }, []);
+  const load = useCallback(() => clients.list().then(setList), []);
+  useEffect(() => { load(); }, [load]);
 
   const create = async (e) => {
     e.preventDefault();
@@ -81,8 +81,11 @@ export function ClientDetail() {
   const [showMeet, setShowMeet] = useState(false);
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
 
-  const reload = () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id })]).then(([c, m, a]) => { setClient(c); setMeets(m); setActions(a); });
-  useEffect(() => { reload(); }, [id]);
+  const reload = useCallback(
+    () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id })]).then(([c, m, a]) => { setClient(c); setMeets(m); setActions(a); }),
+    [id],
+  );
+  useEffect(() => { reload(); }, [reload]);
 
   const createMeeting = async (e) => {
     e.preventDefault();

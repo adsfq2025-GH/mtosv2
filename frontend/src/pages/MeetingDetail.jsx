@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { meetings, aiModels, actionItems, contentCaptures } from "../api";
 import { PageHead } from "../Layout";
@@ -9,7 +9,8 @@ import {
 
 function ModelSelect({ value, onChange }) {
   const [models, setModels] = useState([]);
-  useEffect(() => { aiModels.list().then(setModels).catch(() => {}); }, []);
+  const loadModels = useCallback(() => { aiModels.list().then(setModels).catch(() => {}); }, []);
+  useEffect(() => { loadModels(); }, [loadModels]);
   return (
     <select className="input !w-auto !py-2 !px-3 text-sm" value={value} onChange={(e) => onChange(e.target.value)} data-testid="ai-model-select">
       {models.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
@@ -22,7 +23,7 @@ const sevChip = (s) => s === "high" ? "chip-danger" : s === "low" ? "chip-succes
 export default function MeetingDetail() {
   const { id } = useParams();
   const [m, setM] = useState(null);
-  const [model, setModel] = useState("claude-sonnet-4-6");
+  const [model, setModel] = useState("llama-fast");
   const [tab, setTab] = useState("brief");
   const [transcript, setTranscript] = useState("");
   const [busy, setBusy] = useState("");
@@ -31,18 +32,21 @@ export default function MeetingDetail() {
   const [recap, setRecap] = useState(null);
   const [checklist, setChecklist] = useState({});
 
-  const reload = () => Promise.all([
-    meetings.get(id),
-    actionItems.list({ meeting_id: id }),
-    contentCaptures.list(),
-  ]).then(([meeting, a, c]) => {
-    setM(meeting); setActions(a);
-    setContent(c.filter(cap => cap.meeting_id === id));
-    setChecklist(meeting.checklist || {});
-    if (meeting.transcript) setTranscript(meeting.transcript);
-    if (meeting.recap_html) setRecap({ html: meeting.recap_html, plain: meeting.recap_email });
-  });
-  useEffect(() => { reload(); }, [id]);
+  const reload = useCallback(
+    () => Promise.all([
+      meetings.get(id),
+      actionItems.list({ meeting_id: id }),
+      contentCaptures.list(),
+    ]).then(([meeting, a, c]) => {
+      setM(meeting); setActions(a);
+      setContent(c.filter(cap => cap.meeting_id === id));
+      setChecklist(meeting.checklist || {});
+      if (meeting.transcript) setTranscript(meeting.transcript);
+      if (meeting.recap_html) setRecap({ html: meeting.recap_html, plain: meeting.recap_email });
+    }),
+    [id],
+  );
+  useEffect(() => { reload(); }, [reload]);
 
   const genBrief = async () => {
     setBusy("brief");
