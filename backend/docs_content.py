@@ -356,7 +356,7 @@ Every Monthly Touch Meeting must include:
 - Final testimonial ask + permission capture
 
 ## Minimum Software Stack
-**Required**: Monthly Touch OS + Emergent LLM Key + ClickUp + GHL + Google Workspace.
+**Required**: Monthly Touch OS + AI Provider Key(s) + ClickUp + GHL + Google Workspace.
 **Optional but high-ROI**: Ahrefs, Map Check-ins, Meta Ads.
 """,
     },

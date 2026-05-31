@@ -8,10 +8,7 @@ Advanced Monthly Touch Meeting Operating System + Automation Framework. Transfor
 ## Architecture
 - **Frontend**: React (CRA) + React Router + Tailwind + Phosphor Icons
 - **Backend**: FastAPI + Motor (MongoDB async)
-- **AI Engine**: `emergentintegrations.llm.chat` with model picker:
-  - Claude Sonnet 4.6 (default)
-  - GPT-5.2
-  - Gemini 3.1 Pro
+- **AI Engine**: Provider router (`backend/ai.py`) with automatic failover (Groq → OpenRouter → OpenAI)
 - **Auth**: JWT (HS256) + bcrypt; first user auto-promotes to admin
 - **Integration credentials**: Fernet-encrypted at rest
 
@@ -39,7 +36,7 @@ Advanced Monthly Touch Meeting Operating System + Automation Framework. Transfor
 - ✅ Full backend API (40/40 tests passed in `iteration_1.json`)
 - ✅ End-to-end frontend flows (12/13 verified in `iteration_2.json`)
 - ✅ Bootstrap admin auto-seeded on backend startup
-- ✅ AI engine producing real, high-quality, on-topic output via Emergent LLM Key
+- ✅ AI engine producing real, high-quality, on-topic output via direct provider API keys
 - ✅ 13 integration modules wired (credential capture + encryption + status; live data pulls deferred)
 - ✅ Documentation Hub with 14 deeply-written guides covering framework, retention psychology, SOPs (prep / during / post), playbooks (testimonial, difficult convos), checklists, scorecards, automation architecture, Google Meet pipeline, Map Check-ins spec
 - ✅ Security hardening applied (registration role escalation closed, /users admin-only, meeting cascade delete)

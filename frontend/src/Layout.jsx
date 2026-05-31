@@ -50,7 +50,7 @@ export default function Layout({ children }) {
           <div className="card-flat p-3 mb-3">
             <div className="flex items-center gap-2 text-xs text-slate-400 mb-2"><Sparkle size={14} weight="duotone" /> AI Engine</div>
             <div className="text-[12.5px] text-slate-300">Claude · GPT-5.2 · Gemini 3</div>
-            <div className="text-[11px] text-slate-500 mt-1">Powered by Emergent Universal Key</div>
+            <div className="text-[11px] text-slate-500 mt-1">Bring-your-own API keys</div>
           </div>
           <div className="flex items-center justify-between">
             <div className="text-[13px]">

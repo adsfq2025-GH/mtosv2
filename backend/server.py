@@ -50,10 +50,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("mtos")
 
 app = FastAPI(title="Monthly Touch OS")
+api = APIRouter(prefix="/api")
 
 # ===================== CORS MIDDLEWARE =====================
 # Allows your independent Vercel frontend to safely communicate with this Render backend.
-app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -61,8 +61,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-api = APIRouter(prefix="/api")
+app.include_router(api)
 
 
 # ===================== HEALTH =====================
@@ -602,20 +601,23 @@ async def dashboard_overview(_: User = Depends(get_current_user)):
 # ===================== MODELS LIST =====================
 @api.get("/ai/models")
 async def ai_models(_: User = Depends(get_current_user)):
-    return [
-        {"key": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "Anthropic", "recommended": True},
-        {"key": "gpt-5.2", "label": "GPT-5.2", "provider": "OpenAI"},
-        {"key": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro", "provider": "Google"},
-    ]
+    items = []
+    for key, entry in ai.MODEL_REGISTRY.items():
+        items.append(
+            {
+                "key": key,
+                "label": entry.get("model", key),
+                "provider": entry.get("provider", "unknown"),
+                "recommended": key == ai.DEFAULT_MODEL,
+            }
+        )
+    return items
 
 # ===================== BOOT =====================
 @app.on_event("startup")
 async def _startup():
     await bootstrap_admin()
     logger.info("Monthly Touch OS API ready")
-    
-# ===================== ROUTER ATTACHMENT =====================
-app.include_router(api)
 
 
 # ===================== PRODUCTION ENTRYPOINT =====================

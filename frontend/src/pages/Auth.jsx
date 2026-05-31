@@ -21,8 +21,13 @@ export function Login() {
 
   return (
     <div className="app-bg min-h-screen grid lg:grid-cols-2">
-      <div className="hidden lg:flex flex-col justify-between p-10 relative border-r border-white/5"
-        style={{ backgroundImage: "url(https://static.prod-images.emergentagent.com/jobs/750d18a6-600c-4fd8-a8d4-19338aa6ebe2/images/3395e3c6b5b6023e2fe9e7b4be6324d29eb3e2d478f56b8020f2027735643095.png)", backgroundSize: "cover", backgroundPosition: "center" }}>
+      <div
+        className="hidden lg:flex flex-col justify-between p-10 relative border-r border-white/5"
+        style={{
+          background:
+            "radial-gradient(900px 600px at 12% 18%, rgba(63,169,245,0.22), transparent 55%), radial-gradient(900px 600px at 82% 78%, rgba(47,224,194,0.18), transparent 52%), linear-gradient(180deg, rgba(2,6,23,0.92), rgba(2,6,23,0.92))",
+        }}
+      >
         <Brand />
         <div>
           <div className="chip chip-info mb-3"><Sparkle size={12} weight="fill" /> Senior Client Success OS</div>
