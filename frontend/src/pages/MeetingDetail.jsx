@@ -54,8 +54,8 @@ export default function MeetingDetail() {
     try { await meetings.analyzeTranscript(id, { transcript, model }); await reload(); setTab("analysis"); } finally { setBusy(""); }
   };
   const genRecap = async () => {
-    setBusy("recap");
-    try { const r = await meetings.generateRecap(id, { model }); setRecap(r); setTab("recap"); await reload(); } finally { setBusy(""); }
+    setBusy("recap"); setTab("recap"); setRecap(null);
+    try { const r = await meetings.generateRecap(id, { model }); setRecap(r); await reload(); } finally { setBusy(""); }
   };
   const toggleCheck = async (key) => {
     const nl = { ...checklist, [key]: !checklist[key] };
@@ -301,12 +301,18 @@ export default function MeetingDetail() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
           <div className="card-flat p-5">
             <h3 className="font-semibold mb-3">Recap Email (HTML preview)</h3>
-            {!recap && <EmptyHint label="Generate recap from the AI Findings tab." />}
-            {recap && <div className="prose-doc max-h-[600px] overflow-auto p-4 bg-white/[0.02] rounded border border-white/5" dangerouslySetInnerHTML={{ __html: recap.html }} />}
+            {busy === "recap" && (
+              <div className="flex items-center gap-3 text-sm text-slate-300 py-10 justify-center border border-dashed border-white/10 rounded-md" data-testid="recap-loading">
+                <ArrowsClockwise size={16} className="animate-spin" /> Generating recap email…
+              </div>
+            )}
+            {!recap && busy !== "recap" && <EmptyHint label="Generate recap from the AI Findings tab." />}
+            {recap && <div className="prose-doc max-h-[600px] overflow-auto p-4 bg-white/[0.02] rounded border border-white/5" data-testid="recap-html" dangerouslySetInnerHTML={{ __html: recap.html }} />}
           </div>
           <div className="card-flat p-5">
             <h3 className="font-semibold mb-3">Plain Text</h3>
             {recap && <textarea className="input !min-h-[600px] font-mono text-[12.5px]" defaultValue={recap.plain} data-testid="recap-plain-text" />}
+            {!recap && <EmptyHint label="Plain text version appears here after generation." />}
           </div>
         </div>
       )}
