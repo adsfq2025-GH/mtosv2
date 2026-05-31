@@ -611,3 +611,10 @@ app.add_middleware(
 async def _startup():
     await bootstrap_admin()
     logger.info("Monthly Touch OS API ready")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
+
