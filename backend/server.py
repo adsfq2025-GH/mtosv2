@@ -1,6 +1,7 @@
 """Monthly Touch OS — FastAPI backend."""
 import logging
 import os
+import uvicorn
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -52,10 +53,11 @@ app = FastAPI(title="Monthly Touch OS")
 
 # ===================== CORS MIDDLEWARE =====================
 # Allows your independent Vercel frontend to safely communicate with this Render backend.
+app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict this to your specific Vercel URL later for tighter security
     allow_credentials=True,
+    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )
