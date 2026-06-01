@@ -15,10 +15,12 @@ async def _get_integration_doc(platform: str) -> Optional[dict]:
 
 async def get_credentials(platform: str) -> Dict[str, str]:
     doc = await _get_integration_doc(platform)
-    if not doc or not doc.get("credentials_encrypted"):
+    if not doc:
         return {}
     enc = doc.get("credentials_encrypted") or {}
-    return {k: decrypt_secret(v) for k, v in enc.items()}
+    meta = doc.get("metadata") or {}
+    dec = {k: decrypt_secret(v) for k, v in enc.items()} if enc else {}
+    return {**meta, **dec}
 
 
 async def get_client_binding(client_id: str, platform: str) -> Optional[dict]:
@@ -39,8 +41,30 @@ def _fmt_mmddyyyy(d: date) -> str:
     return d.strftime("%m-%d-%Y")
 
 
+def _strip_bearer(token: str) -> str:
+    t = (token or "").strip()
+    if t.lower().startswith("bearer "):
+        return t[7:].strip()
+    return t
+
+
+def _safe_err_detail(resp: httpx.Response) -> str:
+    try:
+        data = resp.json() or {}
+        if isinstance(data, dict):
+            if data.get("message"):
+                return str(data.get("message"))
+            if data.get("err"):
+                return str(data.get("err"))
+            if data.get("error"):
+                return str(data.get("error"))
+        return str(data)[:300]
+    except Exception:
+        return (resp.text or "")[:300]
+
+
 async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[str, Any]:
-    token = (creds or {}).get("api_token", "").strip()
+    token = _strip_bearer((creds or {}).get("api_token", ""))
     list_id = (binding.get("external_ids") or {}).get("list_id") or (binding.get("config") or {}).get("list_id")
     if not token or not list_id:
         return {}
@@ -52,7 +76,7 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[st
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers=headers, params=params)
     if resp.status_code != 200:
-        return {"error": f"clickup_http_{resp.status_code}"}
+        return {"error": f"clickup_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
 
     data = resp.json() or {}
     tasks = data.get("tasks") or []
@@ -95,8 +119,12 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[st
 
 
 async def fetch_gohighlevel_monthly(creds: Dict[str, str], binding: dict) -> Dict[str, Any]:
-    api_key = (creds or {}).get("api_key", "").strip()
-    location_id = (binding.get("external_ids") or {}).get("location_id") or (binding.get("config") or {}).get("location_id")
+    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+    location_id = (
+        (binding.get("external_ids") or {}).get("location_id")
+        or (binding.get("config") or {}).get("location_id")
+        or (creds or {}).get("location_id")
+    )
     if not api_key or not location_id:
         return {}
 
@@ -120,7 +148,7 @@ async def fetch_gohighlevel_monthly(creds: Dict[str, str], binding: dict) -> Dic
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(url, headers=headers, params=params)
         if resp.status_code != 200:
-            return {"error": f"gohighlevel_http_{resp.status_code}"}
+            return {"error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
         return resp.json() or {}
 
     open_res, won_res, lost_res = await fetch_status("open"), await fetch_status("won"), await fetch_status("lost")
@@ -128,6 +156,7 @@ async def fetch_gohighlevel_monthly(creds: Dict[str, str], binding: dict) -> Dic
         return {
             "location_id": str(location_id),
             "error": open_res.get("error") or won_res.get("error") or lost_res.get("error"),
+            "error_detail": open_res.get("error_detail") or won_res.get("error_detail") or lost_res.get("error_detail"),
         }
 
     def get_total(res: dict) -> int:
@@ -163,16 +192,60 @@ async def build_kpi_snapshot(client_id: str, client_name: str = "") -> Dict[str,
 
     clickup_creds = await get_credentials("clickup")
     clickup_binding = await get_client_binding(client_id, "clickup")
-    if clickup_creds and clickup_binding:
+    if (clickup_creds or {}).get("api_token") and clickup_binding:
         clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding)
         if clickup_data:
             snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
+    elif (clickup_creds or {}).get("api_token") and not clickup_binding:
+        snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_missing_client_mapping", "error_detail": "Missing ClickUp List ID mapping for this client."}
 
     ghl_creds = await get_credentials("gohighlevel")
     ghl_binding = await get_client_binding(client_id, "gohighlevel")
-    if ghl_creds and ghl_binding:
-        ghl_data = await fetch_gohighlevel_monthly(ghl_creds, ghl_binding)
+    if (ghl_creds or {}).get("api_key"):
+        ghl_data = await fetch_gohighlevel_monthly(ghl_creds, ghl_binding or {"external_ids": {}, "config": {}})
         if ghl_data:
             snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
+        else:
+            snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), "error": "gohighlevel_missing_location_id", "error_detail": "Missing GoHighLevel location_id (set it in the client mapping or integration settings)."}
 
     return snapshot
+
+
+async def test_clickup() -> Dict[str, Any]:
+    creds = await get_credentials("clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return {"ok": False, "error": "missing_api_token"}
+    headers = {"Authorization": token, "Accept": "application/json"}
+    url = "https://api.clickup.com/api/v2/user"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"clickup_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    return {"ok": True, "user": (data.get("user") or {}).get("username") or (data.get("user") or {}).get("email")}
+
+
+async def test_gohighlevel() -> Dict[str, Any]:
+    creds = await get_credentials("gohighlevel")
+    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+    location_id = (creds or {}).get("location_id")
+    if not api_key:
+        return {"ok": False, "error": "missing_api_key"}
+    if not location_id:
+        return {"ok": False, "error": "missing_location_id"}
+    start_d, end_d = _last_30_days_range()
+    url = "https://services.leadconnectorhq.com/opportunities/search"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Version": "2023-02-21",
+    }
+    params = {"location_id": str(location_id), "status": "all", "date": _fmt_mmddyyyy(start_d), "endDate": _fmt_mmddyyyy(end_d), "limit": 1, "page": 1}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    meta = data.get("meta") or {}
+    return {"ok": True, "total": meta.get("total")}

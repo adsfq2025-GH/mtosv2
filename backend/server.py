@@ -678,19 +678,33 @@ async def test_integration(platform: str, _: User = Depends(require_admin)):
     doc = await db.integrations.find_one({"platform": platform})
     if not doc or not doc.get("credentials_encrypted"):
         raise HTTPException(400, "No credentials configured")
-    # MVP test: confirm required fields decrypt cleanly. Real API tests will be wired per-platform.
     creds = {k: decrypt_secret(v) for k, v in doc.get("credentials_encrypted", {}).items()}
-    if not all(creds.values()):
+    if not all(v is not None and str(v).strip() != "" for v in creds.values()):
         await db.integrations.update_one(
             {"platform": platform},
             {"$set": {"status": "error", "last_error": "Credential decryption failed", "updated_at": utcnow().isoformat()}},
         )
         raise HTTPException(500, "Credential decryption failed")
+
+    if platform == "clickup":
+        res = await connectors.test_clickup()
+    elif platform == "gohighlevel":
+        res = await connectors.test_gohighlevel()
+    else:
+        res = {"ok": True, "note": "Credentials stored & verified. Live API sync runs on next scheduled job."}
+
+    if not res.get("ok"):
+        await db.integrations.update_one(
+            {"platform": platform},
+            {"$set": {"status": "error", "last_error": res.get("error_detail") or res.get("error") or "Integration test failed", "updated_at": utcnow().isoformat()}},
+        )
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "Integration test failed")
+
     await db.integrations.update_one(
         {"platform": platform},
         {"$set": {"status": "connected", "last_synced_at": utcnow().isoformat(), "last_error": None, "updated_at": utcnow().isoformat()}},
     )
-    return {"ok": True, "platform": platform, "status": "connected", "note": "Credentials stored & verified. Live API sync runs on next scheduled job."}
+    return {"ok": True, "platform": platform, "status": "connected", **res}
 
 
 @api.delete("/integrations/{platform}")
