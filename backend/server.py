@@ -285,6 +285,8 @@ async def generate_monthly_touch(client_id: str, data: GenerateBriefIn, user: Us
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except ai.AIProviderError as e:
+        raise HTTPException(400, str(e))
     return meeting.model_dump()
 
 
@@ -403,13 +405,16 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, user: User = De
     client = Client.from_mongo(c_doc) if c_doc else None
     client_d = client.model_dump() if client else {"name": meeting.client_name}
     kpi = await connectors.build_kpi_snapshot(meeting.client_id, client_d.get("company", ""))
-    brief = await ai.generate_meeting_brief(
-        client=client_d,
-        kpi_snapshot=kpi,
-        extra_context=data.extra_context,
-        model_key=data.model or ai.DEFAULT_MODEL,
-        session_id=f"brief-{meeting_id}",
-    )
+    try:
+        brief = await ai.generate_meeting_brief(
+            client=client_d,
+            kpi_snapshot=kpi,
+            extra_context=data.extra_context,
+            model_key=data.model or ai.DEFAULT_MODEL,
+            session_id=f"brief-{meeting_id}",
+        )
+    except ai.AIProviderError as e:
+        raise HTTPException(400, str(e))
     update = {
         "wins": brief["wins"],
         "issues": brief["issues"],
@@ -512,16 +517,19 @@ async def generate_recap(meeting_id: str, data: GenerateRecapIn, _: User = Depen
     client = Client.from_mongo(c_doc) if c_doc else None
     actions = await db.action_items.find({"meeting_id": meeting_id}).to_list(100)
     actions_p = [ActionItem.from_mongo(a).model_dump() for a in actions]
-    recap = await ai.generate_recap(
-        client_name=client.name if client else (meeting.client_name or ""),
-        company=client.company if client else "",
-        title=meeting.title,
-        wins=[w.model_dump() if hasattr(w, "model_dump") else w for w in meeting.wins],
-        issues=[i.model_dump() if hasattr(i, "model_dump") else i for i in meeting.issues],
-        actions=actions_p,
-        model_key=data.model or ai.DEFAULT_MODEL,
-        session_id=f"recap-{meeting_id}",
-    )
+    try:
+        recap = await ai.generate_recap(
+            client_name=client.name if client else (meeting.client_name or ""),
+            company=client.company if client else "",
+            title=meeting.title,
+            wins=[w.model_dump() if hasattr(w, "model_dump") else w for w in meeting.wins],
+            issues=[i.model_dump() if hasattr(i, "model_dump") else i for i in meeting.issues],
+            actions=actions_p,
+            model_key=data.model or ai.DEFAULT_MODEL,
+            session_id=f"recap-{meeting_id}",
+        )
+    except ai.AIProviderError as e:
+        raise HTTPException(400, str(e))
     await db.meetings.update_one(
         {"_id": meeting_id},
         {

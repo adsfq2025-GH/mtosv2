@@ -50,7 +50,16 @@ export default function MeetingDetail() {
 
   const genBrief = async () => {
     setBusy("brief");
-    try { await meetings.generateBrief(id, { model }); await reload(); } finally { setBusy(""); }
+    try {
+      const meeting = await meetings.generateBrief(id, { model });
+      setM(meeting);
+      setChecklist(meeting.checklist || {});
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Brief generation failed");
+    } finally {
+      setBusy("");
+    }
   };
   const exportHtml = async () => {
     setBusy("export");
@@ -77,7 +86,15 @@ export default function MeetingDetail() {
   };
   const genRecap = async () => {
     setBusy("recap"); setTab("recap"); setRecap(null);
-    try { const r = await meetings.generateRecap(id, { model }); setRecap(r); await reload(); } finally { setBusy(""); }
+    try {
+      const r = await meetings.generateRecap(id, { model });
+      setRecap(r);
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Recap generation failed");
+    } finally {
+      setBusy("");
+    }
   };
   const toggleCheck = async (key) => {
     const nl = { ...checklist, [key]: !checklist[key] };
