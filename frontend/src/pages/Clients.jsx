@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { clients, meetings, actionItems } from "../api";
 import { PageHead } from "../Layout";
-import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash } from "@phosphor-icons/react";
+import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle } from "@phosphor-icons/react";
 
 const healthChip = (h) => h >= 80 ? "chip-success" : h >= 60 ? "chip-info" : h >= 40 ? "chip-warn" : "chip-danger";
 
@@ -78,11 +78,18 @@ export function ClientDetail() {
   const [client, setClient] = useState(null);
   const [meets, setMeets] = useState([]);
   const [actions, setActions] = useState([]);
+  const [clickupListId, setClickupListId] = useState("");
+  const [savingBindings, setSavingBindings] = useState(false);
   const [showMeet, setShowMeet] = useState(false);
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
 
   const reload = useCallback(
-    () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id })]).then(([c, m, a]) => { setClient(c); setMeets(m); setActions(a); }),
+    () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
+      setClient(c); setMeets(m); setActions(a);
+      const clickup = (b || []).find((x) => x.platform === "clickup");
+      const listId = clickup?.external_ids?.list_id || clickup?.config?.list_id || "";
+      setClickupListId(listId ? String(listId) : "");
+    }),
     [id],
   );
   useEffect(() => { reload(); }, [reload]);
@@ -99,6 +106,23 @@ export function ClientDetail() {
     await clients.remove(id); navigate("/clients");
   };
 
+  const generateMonthlyTouch = async () => {
+    const m = await clients.generateMonthlyTouch(id, {});
+    navigate(`/meetings/${m.id}`);
+  };
+
+  const saveClickupBinding = async () => {
+    setSavingBindings(true);
+    try {
+      await clients.upsertBinding(id, "clickup", { enabled: true, external_ids: { list_id: clickupListId } });
+      await reload();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save ClickUp binding");
+    } finally {
+      setSavingBindings(false);
+    }
+  };
+
   if (!client) return <div className="text-slate-400">Loading…</div>;
   return (
     <div>
@@ -109,6 +133,7 @@ export function ClientDetail() {
         actions={
           <>
             <button className="btn-ghost flex items-center gap-1" onClick={remove} data-testid="delete-client-btn"><Trash size={14} /> Delete</button>
+            <button className="btn-ghost flex items-center gap-2" onClick={generateMonthlyTouch} data-testid="generate-monthly-touch-btn"><Sparkle size={14} weight="duotone" /> Generate Monthly Touch</button>
             <button className="btn-primary flex items-center gap-2" onClick={() => setShowMeet(true)} data-testid="new-meeting-btn"><Plus size={14} weight="bold" /> New Meeting</button>
           </>
         }
@@ -136,6 +161,11 @@ export function ClientDetail() {
             <span className="chip chip-info">{client.sentiment}</span>
             <span className="chip chip-muted">{client.status}</span>
           </div>
+          <div className="divider my-4" />
+          <div className="label mb-2">ClickUp Mapping</div>
+          <label className="text-[11px] text-slate-500">List ID</label>
+          <input className="input mt-1.5" value={clickupListId} onChange={(e) => setClickupListId(e.target.value)} placeholder="123456789" data-testid="clickup-list-id" />
+          <button className="btn-ghost w-full mt-2" onClick={saveClickupBinding} disabled={savingBindings} data-testid="save-clickup-binding">{savingBindings ? "Saving…" : "Save ClickUp List"}</button>
         </div>
 
         <div className="lg:col-span-2 space-y-6">

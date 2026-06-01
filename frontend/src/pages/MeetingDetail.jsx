@@ -52,6 +52,24 @@ export default function MeetingDetail() {
     setBusy("brief");
     try { await meetings.generateBrief(id, { model }); await reload(); } finally { setBusy(""); }
   };
+  const exportHtml = async () => {
+    setBusy("export");
+    try {
+      const res = await meetings.exportHtml(id);
+      const html = res?.html || "";
+      const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${m?.title || "meeting"}.html`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setBusy("");
+    }
+  };
   const analyze = async () => {
     if (!transcript.trim()) return;
     setBusy("analyze");
@@ -92,6 +110,9 @@ export default function MeetingDetail() {
             <ModelSelect value={model} onChange={setModel} />
             <button className="btn-ghost flex items-center gap-2" onClick={genBrief} disabled={busy === "brief"} data-testid="generate-brief-btn">
               {busy === "brief" ? <ArrowsClockwise size={14} className="animate-spin" /> : <Sparkle size={14} weight="duotone" />} {m.brief_generated_at ? "Regenerate Brief" : "Generate Brief"}
+            </button>
+            <button className="btn-ghost flex items-center gap-2" onClick={exportHtml} disabled={busy === "export"} data-testid="export-html-btn">
+              {busy === "export" ? <ArrowsClockwise size={14} className="animate-spin" /> : <FileText size={14} weight="duotone" />} Export HTML
             </button>
             {m.google_meet_url && <a href={m.google_meet_url} target="_blank" rel="noreferrer" className="btn-primary flex items-center gap-2" data-testid="open-meet-link">Open Meet</a>}
           </>

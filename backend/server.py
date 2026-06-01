@@ -29,6 +29,8 @@ from models import (  # noqa: E402
     AnalyzeTranscriptIn,
     Client,
     ClientIn,
+    ClientIntegrationBinding,
+    ClientIntegrationBindingIn,
     ContentCapture,
     ContentCaptureIn,
     GenerateBriefIn,
@@ -45,6 +47,7 @@ from models import (  # noqa: E402
 from integrations_meta import INTEGRATIONS, list_integrations, demo_kpi_snapshot
 from docs_content import get_categories, get_doc, get_docs_summary
 import ai
+import connectors
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("mtos")
@@ -204,6 +207,43 @@ async def delete_client(client_id: str, _: User = Depends(require_admin)):
     return {"ok": True}
 
 
+@api.get("/clients/{client_id}/bindings")
+async def list_client_bindings(client_id: str, _: User = Depends(get_current_user)):
+    docs = await db.client_bindings.find({"client_id": client_id}).to_list(100)
+    return [ClientIntegrationBinding.from_mongo(d).model_dump() for d in docs]
+
+
+@api.put("/clients/{client_id}/bindings/{platform}")
+async def upsert_client_binding(
+    client_id: str,
+    platform: str,
+    data: ClientIntegrationBindingIn,
+    _: User = Depends(require_admin),
+):
+    if platform not in INTEGRATIONS:
+        raise HTTPException(404, "Unknown integration")
+    existing = await db.client_bindings.find_one({"client_id": client_id, "platform": platform})
+    update = {
+        "enabled": bool(data.enabled),
+        "external_ids": data.external_ids or {},
+        "config": data.config or {},
+        "updated_at": utcnow().isoformat(),
+    }
+    if existing:
+        await db.client_bindings.update_one({"_id": existing["_id"]}, {"$set": update})
+        doc = await db.client_bindings.find_one({"_id": existing["_id"]})
+        return ClientIntegrationBinding.from_mongo(doc).model_dump()
+    binding = ClientIntegrationBinding(client_id=client_id, platform=platform, **update)
+    await db.client_bindings.insert_one(binding.to_mongo())
+    return binding.model_dump()
+
+
+@api.delete("/clients/{client_id}/bindings/{platform}")
+async def delete_client_binding(client_id: str, platform: str, _: User = Depends(require_admin)):
+    await db.client_bindings.delete_one({"client_id": client_id, "platform": platform})
+    return {"ok": True}
+
+
 # ===================== MEETINGS =====================
 @api.get("/meetings")
 async def list_meetings(client_id: Optional[str] = None, _: User = Depends(get_current_user)):
@@ -232,12 +272,133 @@ async def create_meeting(data: MeetingIn, user: User = Depends(get_current_user)
     return m.model_dump()
 
 
+@api.post("/clients/{client_id}/monthly-touch")
+async def generate_monthly_touch(client_id: str, data: GenerateBriefIn, user: User = Depends(get_current_user)):
+    c_doc = await db.clients.find_one({"_id": client_id})
+    if not c_doc:
+        raise HTTPException(404, "Client not found")
+    client = Client.from_mongo(c_doc)
+
+    now = utcnow()
+    title = f"Monthly Touch — {now.strftime('%B %Y')}"
+
+    existing = await db.meetings.find_one({"client_id": client_id, "title": title})
+    if existing:
+        meeting = Meeting.from_mongo(existing)
+    else:
+        meeting = Meeting(
+            client_id=client.id,
+            client_name=client.name,
+            account_manager_id=user.id,
+            account_manager_name=user.name,
+            title=title,
+            scheduled_at=None,
+            google_meet_url=None,
+            duration_minutes=60,
+            status="prep",
+        )
+        await db.meetings.insert_one(meeting.to_mongo())
+
+    client_d = client.model_dump()
+    kpi = await connectors.build_kpi_snapshot(client_id, client.company)
+    brief = await ai.generate_meeting_brief(
+        client=client_d,
+        kpi_snapshot=kpi,
+        extra_context=data.extra_context,
+        model_key=data.model or ai.DEFAULT_MODEL,
+        session_id=f"monthly-touch-{meeting.id}",
+    )
+
+    update = {
+        "wins": brief["wins"],
+        "issues": brief["issues"],
+        "talking_points": brief["talking_points"],
+        "suggested_questions": brief["suggested_questions"],
+        "testimonial_opportunity": brief["testimonial_opportunity"],
+        "strategic_recommendations": brief["strategic_recommendations"],
+        "health_signal": brief["health_signal"],
+        "kpi_snapshot": kpi,
+        "brief_generated_at": utcnow().isoformat(),
+        "brief_model": data.model or ai.DEFAULT_MODEL,
+        "status": "prep",
+        "updated_at": utcnow().isoformat(),
+    }
+    await db.meetings.update_one({"_id": meeting.id}, {"$set": update})
+    doc = await db.meetings.find_one({"_id": meeting.id})
+    return Meeting.from_mongo(doc).model_dump()
+
+
 @api.get("/meetings/{meeting_id}")
 async def get_meeting(meeting_id: str, _: User = Depends(get_current_user)):
     doc = await db.meetings.find_one({"_id": meeting_id})
     if not doc:
         raise HTTPException(404, "Meeting not found")
     return Meeting.from_mongo(doc).model_dump()
+
+
+@api.get("/meetings/{meeting_id}/export/html")
+async def export_meeting_html(meeting_id: str, _: User = Depends(get_current_user)):
+    doc = await db.meetings.find_one({"_id": meeting_id})
+    if not doc:
+        raise HTTPException(404, "Meeting not found")
+    m = Meeting.from_mongo(doc)
+
+    def esc(s: Any) -> str:
+        if s is None:
+            return ""
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    wins = "".join(f"<li><strong>{esc(w.get('title'))}</strong> — {esc(w.get('description'))}</li>" for w in (m.wins or []))
+    issues = "".join(f"<li><strong>{esc(i.get('title'))}</strong> — {esc(i.get('description'))}</li>" for i in (m.issues or []))
+    tps = "".join(f"<li><strong>{esc(t.get('topic'))}</strong>: {esc(t.get('angle'))}</li>" for t in (m.talking_points or []))
+    qs = "".join(f"<li>{esc(q)}</li>" for q in (m.suggested_questions or []))
+    recs = "".join(f"<li>{esc(r)}</li>" for r in (m.strategic_recommendations or []))
+
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{esc(m.title)}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {{ font-family: Inter, Arial, sans-serif; line-height: 1.45; color: #0f172a; padding: 28px; max-width: 920px; margin: 0 auto; }}
+    h1 {{ font-size: 22px; margin: 0 0 4px; }}
+    h2 {{ font-size: 15px; margin: 22px 0 8px; text-transform: uppercase; letter-spacing: .06em; color: #334155; }}
+    .meta {{ color: #475569; font-size: 13px; margin: 0 0 18px; }}
+    ul {{ margin: 0; padding-left: 18px; }}
+    li {{ margin: 6px 0; }}
+    .box {{ border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px; background: #f8fafc; }}
+  </style>
+</head>
+<body>
+  <h1>{esc(m.title)}</h1>
+  <p class="meta">{esc(m.client_name)} · {esc(m.scheduled_at or "Unscheduled")} · {esc(m.duration_minutes)} min</p>
+
+  <div class="box">
+    <h2>3 Wins</h2>
+    <ul>{wins or "<li>—</li>"}</ul>
+    <h2>2 Issues</h2>
+    <ul>{issues or "<li>—</li>"}</ul>
+  </div>
+
+  <h2>Talking Points</h2>
+  <ul>{tps or "<li>—</li>"}</ul>
+
+  <h2>Suggested Questions</h2>
+  <ul>{qs or "<li>—</li>"}</ul>
+
+  <h2>Strategic Recommendations</h2>
+  <ul>{recs or "<li>—</li>"}</ul>
+
+  <h2>Testimonial Opportunity</h2>
+  <p>{esc(m.testimonial_opportunity or "—")}</p>
+
+  <h2>Health Signal</h2>
+  <p>{esc(m.health_signal or "—")}</p>
+</body>
+</html>"""
+
+    return {"html": html}
 
 
 @api.patch("/meetings/{meeting_id}")
@@ -270,7 +431,7 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, user: User = De
     c_doc = await db.clients.find_one({"_id": meeting.client_id})
     client = Client.from_mongo(c_doc) if c_doc else None
     client_d = client.model_dump() if client else {"name": meeting.client_name}
-    kpi = demo_kpi_snapshot(client_d.get("company", ""))
+    kpi = await connectors.build_kpi_snapshot(meeting.client_id, client_d.get("company", ""))
     brief = await ai.generate_meeting_brief(
         client=client_d,
         kpi_snapshot=kpi,

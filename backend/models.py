@@ -216,6 +216,20 @@ class IntegrationConfigureIn(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ClientIntegrationBinding(BaseDocument):
+    client_id: str
+    platform: str
+    enabled: bool = True
+    external_ids: Dict[str, Any] = Field(default_factory=dict)
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ClientIntegrationBindingIn(BaseModel):
+    enabled: Optional[bool] = True
+    external_ids: Dict[str, Any] = Field(default_factory=dict)
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ===== AI GENERATE =====
 class GenerateBriefIn(BaseModel):
     model: Optional[str] = None

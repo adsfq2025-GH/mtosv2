@@ -38,6 +38,10 @@ export const clients = {
   get: (id) => api.get(`/clients/${id}`).then((r) => r.data),
   update: (id, patch) => api.patch(`/clients/${id}`, patch).then((r) => r.data),
   remove: (id) => api.delete(`/clients/${id}`).then((r) => r.data),
+  listBindings: (id) => api.get(`/clients/${id}/bindings`).then((r) => r.data),
+  upsertBinding: (id, platform, payload) => api.put(`/clients/${id}/bindings/${platform}`, payload).then((r) => r.data),
+  deleteBinding: (id, platform) => api.delete(`/clients/${id}/bindings/${platform}`).then((r) => r.data),
+  generateMonthlyTouch: (id, payload = {}) => api.post(`/clients/${id}/monthly-touch`, payload).then((r) => r.data),
 };
 
 export const meetings = {
@@ -49,6 +53,7 @@ export const meetings = {
   generateBrief: (id, body) => api.post(`/meetings/${id}/generate-brief`, body).then((r) => r.data),
   analyzeTranscript: (id, body) => api.post(`/meetings/${id}/analyze-transcript`, body).then((r) => r.data),
   generateRecap: (id, body) => api.post(`/meetings/${id}/generate-recap`, body).then((r) => r.data),
+  exportHtml: (id) => api.get(`/meetings/${id}/export/html`).then((r) => r.data),
 };
 
 export const actionItems = {
