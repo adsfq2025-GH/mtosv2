@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { clients, meetings, actionItems } from "../api";
+import { clients, meetings, actionItems, integrations } from "../api";
 import { PageHead } from "../Layout";
 import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle } from "@phosphor-icons/react";
 
@@ -82,6 +82,16 @@ export function ClientDetail() {
   const [gohighlevelLocationId, setGohighlevelLocationId] = useState("");
   const [savingBindings, setSavingBindings] = useState(false);
   const [savingGhlBinding, setSavingGhlBinding] = useState(false);
+  const [showClickupPicker, setShowClickupPicker] = useState(false);
+  const [clickupWorkspaces, setClickupWorkspaces] = useState([]);
+  const [clickupTeamId, setClickupTeamId] = useState("");
+  const [clickupLists, setClickupLists] = useState([]);
+  const [clickupQ, setClickupQ] = useState("");
+  const [loadingClickup, setLoadingClickup] = useState(false);
+  const [showGhlPicker, setShowGhlPicker] = useState(false);
+  const [ghlLocations, setGhlLocations] = useState([]);
+  const [ghlQ, setGhlQ] = useState("");
+  const [loadingGhl, setLoadingGhl] = useState(false);
   const [showMeet, setShowMeet] = useState(false);
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
 
@@ -140,6 +150,59 @@ export function ClientDetail() {
     }
   };
 
+  const openClickupPicker = async () => {
+    setShowClickupPicker(true);
+    setClickupQ("");
+    setLoadingClickup(true);
+    try {
+      const ws = await integrations.clickupWorkspaces();
+      const list = ws?.workspaces || [];
+      setClickupWorkspaces(list);
+      const teamId = list?.[0]?.id ? String(list[0].id) : "";
+      setClickupTeamId(teamId);
+      if (teamId) {
+        const res = await integrations.clickupLists(teamId);
+        setClickupLists(res?.lists || []);
+      } else {
+        setClickupLists([]);
+      }
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to load ClickUp data");
+      setClickupWorkspaces([]); setClickupLists([]); setClickupTeamId("");
+    } finally {
+      setLoadingClickup(false);
+    }
+  };
+
+  const changeClickupTeam = async (teamId) => {
+    setClickupTeamId(teamId);
+    setLoadingClickup(true);
+    try {
+      const res = await integrations.clickupLists(teamId);
+      setClickupLists(res?.lists || []);
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to load ClickUp lists");
+      setClickupLists([]);
+    } finally {
+      setLoadingClickup(false);
+    }
+  };
+
+  const openGhlPicker = async () => {
+    setShowGhlPicker(true);
+    setGhlQ("");
+    setLoadingGhl(true);
+    try {
+      const res = await integrations.gohighlevelLocations();
+      setGhlLocations(res?.locations || []);
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to load GoHighLevel locations");
+      setGhlLocations([]);
+    } finally {
+      setLoadingGhl(false);
+    }
+  };
+
   if (!client) return <div className="text-slate-400">Loading…</div>;
   return (
     <div>
@@ -181,12 +244,18 @@ export function ClientDetail() {
           <div className="divider my-4" />
           <div className="label mb-2">ClickUp Mapping</div>
           <label className="text-[11px] text-slate-500">List ID</label>
-          <input className="input mt-1.5" value={clickupListId} onChange={(e) => setClickupListId(e.target.value)} placeholder="123456789" data-testid="clickup-list-id" />
+          <div className="flex gap-2 mt-1.5">
+            <input className="input flex-1" value={clickupListId} onChange={(e) => setClickupListId(e.target.value)} placeholder="123456789" data-testid="clickup-list-id" />
+            <button type="button" className="btn-ghost whitespace-nowrap" onClick={openClickupPicker} data-testid="browse-clickup-lists">Browse</button>
+          </div>
           <button className="btn-ghost w-full mt-2" onClick={saveClickupBinding} disabled={savingBindings} data-testid="save-clickup-binding">{savingBindings ? "Saving…" : "Save ClickUp List"}</button>
           <div className="divider my-4" />
           <div className="label mb-2">GoHighLevel Mapping</div>
           <label className="text-[11px] text-slate-500">Location ID</label>
-          <input className="input mt-1.5" value={gohighlevelLocationId} onChange={(e) => setGohighlevelLocationId(e.target.value)} placeholder="ve9EPM428h8vShlRW1KT" data-testid="gohighlevel-location-id" />
+          <div className="flex gap-2 mt-1.5">
+            <input className="input flex-1" value={gohighlevelLocationId} onChange={(e) => setGohighlevelLocationId(e.target.value)} placeholder="ve9EPM428h8vShlRW1KT" data-testid="gohighlevel-location-id" />
+            <button type="button" className="btn-ghost whitespace-nowrap" onClick={openGhlPicker} data-testid="browse-ghl-locations">Browse</button>
+          </div>
           <button className="btn-ghost w-full mt-2" onClick={saveGhlBinding} disabled={savingGhlBinding} data-testid="save-gohighlevel-binding">{savingGhlBinding ? "Saving…" : "Save GoHighLevel Location"}</button>
         </div>
 
@@ -238,6 +307,79 @@ export function ClientDetail() {
             <input className="input mt-1.5 mb-4" type="number" value={meetForm.duration_minutes} onChange={(e) => setMeetForm({ ...meetForm, duration_minutes: parseInt(e.target.value) })} />
             <button type="submit" className="btn-primary w-full" data-testid="new-meeting-submit">Create Meeting</button>
           </form>
+        </div>
+      )}
+
+      {showClickupPicker && (
+        <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowClickupPicker(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="card-flat p-6 w-full max-w-2xl" data-testid="clickup-picker">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="text-lg font-semibold">Pick ClickUp List</div>
+                <div className="text-xs text-slate-400">Choose the List that represents this client.</div>
+              </div>
+              <button type="button" className="btn-ghost !p-2" onClick={() => setShowClickupPicker(false)}><X size={14} /></button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-1">
+                <label className="label">Workspace</label>
+                <select className="input mt-1.5" value={clickupTeamId} onChange={(e) => changeClickupTeam(e.target.value)} disabled={loadingClickup}>
+                  {(clickupWorkspaces || []).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+                </select>
+                <label className="label mt-3">Search</label>
+                <input className="input mt-1.5" value={clickupQ} onChange={(e) => setClickupQ(e.target.value)} placeholder="Client name…" />
+              </div>
+              <div className="md:col-span-2">
+                <div className="label">Lists</div>
+                <div className="mt-2 max-h-[55vh] overflow-y-auto scroll-thin border border-white/5 rounded-md">
+                  {loadingClickup && <div className="p-4 text-sm text-slate-400">Loading…</div>}
+                  {!loadingClickup && (clickupLists || []).filter((l) => !clickupQ || `${l.name} ${l.space || ""} ${l.folder || ""}`.toLowerCase().includes(clickupQ.toLowerCase())).map((l) => (
+                    <button
+                      key={l.id}
+                      type="button"
+                      className="w-full text-left p-3 border-b border-white/5 hover:bg-white/[0.03]"
+                      onClick={() => { setClickupListId(String(l.id)); setShowClickupPicker(false); }}
+                    >
+                      <div className="text-sm font-medium">{l.name}</div>
+                      <div className="text-xs text-slate-500 mt-0.5">{[l.space, l.folder].filter(Boolean).join(" · ")} · <span className="mono">{l.id}</span></div>
+                    </button>
+                  ))}
+                  {!loadingClickup && (clickupLists || []).length === 0 && <div className="p-4 text-sm text-slate-400">No lists found.</div>}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGhlPicker && (
+        <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowGhlPicker(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="card-flat p-6 w-full max-w-2xl" data-testid="ghl-picker">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="text-lg font-semibold">Pick GoHighLevel Location</div>
+                <div className="text-xs text-slate-400">Choose the GHL client location for this account.</div>
+              </div>
+              <button type="button" className="btn-ghost !p-2" onClick={() => setShowGhlPicker(false)}><X size={14} /></button>
+            </div>
+            <label className="label">Search</label>
+            <input className="input mt-1.5" value={ghlQ} onChange={(e) => setGhlQ(e.target.value)} placeholder="Client name…" />
+            <div className="mt-3 max-h-[60vh] overflow-y-auto scroll-thin border border-white/5 rounded-md">
+              {loadingGhl && <div className="p-4 text-sm text-slate-400">Loading…</div>}
+              {!loadingGhl && (ghlLocations || []).filter((l) => !ghlQ || `${l.name} ${l.email || ""} ${l.phone || ""}`.toLowerCase().includes(ghlQ.toLowerCase())).map((l) => (
+                <button
+                  key={l.id}
+                  type="button"
+                  className="w-full text-left p-3 border-b border-white/5 hover:bg-white/[0.03]"
+                  onClick={() => { setGohighlevelLocationId(String(l.id)); setShowGhlPicker(false); }}
+                >
+                  <div className="text-sm font-medium">{l.name}</div>
+                  <div className="text-xs text-slate-500 mt-0.5">{[l.email, l.phone].filter(Boolean).join(" · ")} · <span className="mono">{l.id}</span></div>
+                </button>
+              ))}
+              {!loadingGhl && (ghlLocations || []).length === 0 && <div className="p-4 text-sm text-slate-400">No locations found.</div>}
+            </div>
+          </div>
         </div>
       )}
     </div>

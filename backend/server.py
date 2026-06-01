@@ -713,6 +713,41 @@ async def disconnect_integration(platform: str, _: User = Depends(require_admin)
     return {"ok": True}
 
 
+@api.get("/integrations/clickup/workspaces")
+async def clickup_workspaces(_: User = Depends(require_admin)):
+    res = await connectors.list_clickup_workspaces()
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
+    return res
+
+
+@api.get("/integrations/clickup/lists")
+async def clickup_lists(team_id: Optional[str] = Query(default=None), _: User = Depends(require_admin)):
+    if not team_id:
+        doc = await db.integrations.find_one({"platform": "clickup"})
+        team_id = ((doc or {}).get("metadata") or {}).get("team_id")
+    if not team_id:
+        res = await connectors.list_clickup_workspaces()
+        if not res.get("ok"):
+            raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
+        ws = (res.get("workspaces") or [])
+        team_id = (ws[0] or {}).get("id") if ws else None
+    if not team_id:
+        raise HTTPException(400, "Missing ClickUp team_id")
+    res = await connectors.list_clickup_lists(str(team_id))
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
+    return res
+
+
+@api.get("/integrations/gohighlevel/locations")
+async def ghl_locations(_: User = Depends(require_admin)):
+    res = await connectors.list_gohighlevel_locations()
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
+    return res
+
+
 # ===================== DOCS =====================
 @api.get("/docs")
 async def docs_list(_: User = Depends(get_current_user)):

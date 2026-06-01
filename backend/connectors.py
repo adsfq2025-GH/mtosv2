@@ -229,18 +229,27 @@ async def test_clickup() -> Dict[str, Any]:
 async def test_gohighlevel() -> Dict[str, Any]:
     creds = await get_credentials("gohighlevel")
     api_key = _strip_bearer((creds or {}).get("api_key", ""))
+    company_id = (creds or {}).get("company_id")
     location_id = (creds or {}).get("location_id")
     if not api_key:
         return {"ok": False, "error": "missing_api_key"}
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}", "Version": "2023-02-21"}
+    if company_id:
+        url = "https://services.leadconnectorhq.com/locations/search"
+        params = {"companyId": str(company_id), "limit": 1, "skip": 0}
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+        data = resp.json() or {}
+        locs = data.get("locations") or []
+        return {"ok": True, "locations_found": len(locs)}
+
     if not location_id:
-        return {"ok": False, "error": "missing_location_id"}
+        return {"ok": False, "error": "missing_company_id_or_location_id"}
+
     start_d, end_d = _last_30_days_range()
     url = "https://services.leadconnectorhq.com/opportunities/search"
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {api_key}",
-        "Version": "2023-02-21",
-    }
     params = {"location_id": str(location_id), "status": "all", "date": _fmt_mmddyyyy(start_d), "endDate": _fmt_mmddyyyy(end_d), "limit": 1, "page": 1}
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers=headers, params=params)
@@ -249,3 +258,87 @@ async def test_gohighlevel() -> Dict[str, Any]:
     data = resp.json() or {}
     meta = data.get("meta") or {}
     return {"ok": True, "total": meta.get("total")}
+
+
+async def list_clickup_workspaces() -> Dict[str, Any]:
+    creds = await get_credentials("clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return {"ok": False, "error": "missing_api_token"}
+    headers = {"Authorization": token, "Accept": "application/json"}
+    url = "https://api.clickup.com/api/v2/team"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"clickup_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    teams = data.get("teams") or []
+    return {"ok": True, "workspaces": [{"id": str(t.get("id")), "name": t.get("name")} for t in teams if t.get("id")]}
+
+
+async def list_clickup_lists(team_id: str) -> Dict[str, Any]:
+    creds = await get_credentials("clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return {"ok": False, "error": "missing_api_token"}
+    if not team_id:
+        return {"ok": False, "error": "missing_team_id"}
+    headers = {"Authorization": token, "Accept": "application/json"}
+
+    async def get_json(url: str):
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params={"archived": "false"})
+        if r.status_code != 200:
+            raise HTTPException(400, f"ClickUp error {r.status_code}: {_safe_err_detail(r)}")
+        return r.json() or {}
+
+    spaces = (await get_json(f"https://api.clickup.com/api/v2/team/{team_id}/space")).get("spaces") or []
+
+    lists: List[dict] = []
+    for s in spaces:
+        sid = s.get("id")
+        sname = s.get("name")
+        if not sid:
+            continue
+        direct_lists = (await get_json(f"https://api.clickup.com/api/v2/space/{sid}/list")).get("lists") or []
+        for l in direct_lists:
+            if l.get("id"):
+                lists.append({"id": str(l.get("id")), "name": l.get("name"), "space": sname})
+        folders = (await get_json(f"https://api.clickup.com/api/v2/space/{sid}/folder")).get("folders") or []
+        for f in folders:
+            fid = f.get("id")
+            fname = f.get("name")
+            if not fid:
+                continue
+            folder_lists = (await get_json(f"https://api.clickup.com/api/v2/folder/{fid}/list")).get("lists") or []
+            for l in folder_lists:
+                if l.get("id"):
+                    lists.append({"id": str(l.get("id")), "name": l.get("name"), "space": sname, "folder": fname})
+
+    uniq = {}
+    for l in lists:
+        uniq[l["id"]] = l
+    out = list(uniq.values())
+    out.sort(key=lambda x: (x.get("space") or "", x.get("folder") or "", x.get("name") or ""))
+    return {"ok": True, "lists": out}
+
+
+async def list_gohighlevel_locations() -> Dict[str, Any]:
+    creds = await get_credentials("gohighlevel")
+    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+    company_id = (creds or {}).get("company_id")
+    if not api_key:
+        return {"ok": False, "error": "missing_api_key"}
+    if not company_id:
+        return {"ok": False, "error": "missing_company_id"}
+    headers = {"Accept": "application/json", "Authorization": f"Bearer {api_key}", "Version": "2023-02-21"}
+    url = "https://services.leadconnectorhq.com/locations/search"
+    params = {"companyId": str(company_id), "limit": 200, "skip": 0}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    locs = data.get("locations") or []
+    out = [{"id": str(l.get("id")), "name": l.get("name"), "email": l.get("email"), "phone": l.get("phone")} for l in locs if l.get("id")]
+    return {"ok": True, "locations": out}

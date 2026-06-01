@@ -79,6 +79,9 @@ export const integrations = {
   configure: (platform, data) => api.post(`/integrations/${platform}/configure`, data).then((r) => r.data),
   test: (platform) => api.post(`/integrations/${platform}/test`).then((r) => r.data),
   disconnect: (platform) => api.delete(`/integrations/${platform}`).then((r) => r.data),
+  clickupWorkspaces: () => api.get("/integrations/clickup/workspaces").then((r) => r.data),
+  clickupLists: (teamId) => api.get(`/integrations/clickup/lists${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`).then((r) => r.data),
+  gohighlevelLocations: () => api.get("/integrations/gohighlevel/locations").then((r) => r.data),
 };
 
 export const docs = {

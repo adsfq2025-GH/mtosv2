@@ -19,8 +19,8 @@ INTEGRATIONS: Dict[str, Dict[str, Any]] = {
         "icon": "Lightning",
         "description": "CRM pipelines, leads, communications, workflows.",
         "fields": [
-            {"key": "api_key", "label": "API Key (Sub-Account)", "secret": True, "help": "Use a Sub-Account Private Integration Token (not agency). Settings → Business Profile → API"},
-            {"key": "location_id", "label": "Location ID", "secret": False, "help": "Used for integration test. Per-client mapping is recommended."},
+            {"key": "api_key", "label": "API Key (Agency or Sub-Account)", "secret": True, "help": "Private Integration Token. If using Agency token, also set Company ID and pick client locations in the Client record."},
+            {"key": "company_id", "label": "Company ID (Agency ID)", "secret": False, "help": "Required to look up locations under an Agency token."},
         ],
     },
     "google_ads": {
