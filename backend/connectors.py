@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -27,6 +27,16 @@ async def get_client_binding(client_id: str, platform: str) -> Optional[dict]:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _last_30_days_range() -> Tuple[date, date]:
+    end = _utc_now().date()
+    start = end - timedelta(days=30)
+    return start, end
+
+
+def _fmt_mmddyyyy(d: date) -> str:
+    return d.strftime("%m-%d-%Y")
 
 
 async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[str, Any]:
@@ -89,7 +99,63 @@ async def fetch_gohighlevel_monthly(creds: Dict[str, str], binding: dict) -> Dic
     location_id = (binding.get("external_ids") or {}).get("location_id") or (binding.get("config") or {}).get("location_id")
     if not api_key or not location_id:
         return {}
-    return {"location_id": str(location_id)}
+
+    start_d, end_d = _last_30_days_range()
+    url = "https://services.leadconnectorhq.com/opportunities/search"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Version": "2023-02-21",
+    }
+
+    async def fetch_status(status: str) -> dict:
+        params = {
+            "location_id": str(location_id),
+            "status": status,
+            "date": _fmt_mmddyyyy(start_d),
+            "endDate": _fmt_mmddyyyy(end_d),
+            "limit": 20,
+            "page": 1,
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers, params=params)
+        if resp.status_code != 200:
+            return {"error": f"gohighlevel_http_{resp.status_code}"}
+        return resp.json() or {}
+
+    open_res, won_res, lost_res = await fetch_status("open"), await fetch_status("won"), await fetch_status("lost")
+    if any(isinstance(r, dict) and r.get("error") for r in (open_res, won_res, lost_res)):
+        return {
+            "location_id": str(location_id),
+            "error": open_res.get("error") or won_res.get("error") or lost_res.get("error"),
+        }
+
+    def get_total(res: dict) -> int:
+        meta = res.get("meta") or {}
+        if isinstance(meta.get("total"), int):
+            return meta["total"]
+        opps = res.get("opportunities") or []
+        return len(opps)
+
+    def sum_won_value(res: dict) -> float:
+        opps = res.get("opportunities") or []
+        total = 0.0
+        for o in opps:
+            try:
+                total += float(o.get("monetaryValue") or 0)
+            except Exception:
+                pass
+        return total
+
+    return {
+        "location_id": str(location_id),
+        "opportunities_open": get_total(open_res),
+        "opportunities_won": get_total(won_res),
+        "opportunities_lost": get_total(lost_res),
+        "won_value": sum_won_value(won_res),
+        "period_start": start_d.isoformat(),
+        "period_end": end_d.isoformat(),
+    }
 
 
 async def build_kpi_snapshot(client_id: str, client_name: str = "") -> Dict[str, Any]:
@@ -110,4 +176,3 @@ async def build_kpi_snapshot(client_id: str, client_name: str = "") -> Dict[str,
             snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
 
     return snapshot
-

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from starlette.middleware.cors import CORSMiddleware
 
 ROOT = Path(__file__).parent
@@ -48,6 +48,7 @@ from integrations_meta import INTEGRATIONS, list_integrations, demo_kpi_snapshot
 from docs_content import get_categories, get_doc, get_docs_summary
 import ai
 import connectors
+import monthly_touch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("mtos")
@@ -274,58 +275,28 @@ async def create_meeting(data: MeetingIn, user: User = Depends(get_current_user)
 
 @api.post("/clients/{client_id}/monthly-touch")
 async def generate_monthly_touch(client_id: str, data: GenerateBriefIn, user: User = Depends(get_current_user)):
-    c_doc = await db.clients.find_one({"_id": client_id})
-    if not c_doc:
-        raise HTTPException(404, "Client not found")
-    client = Client.from_mongo(c_doc)
-
-    now = utcnow()
-    title = f"Monthly Touch — {now.strftime('%B %Y')}"
-
-    existing = await db.meetings.find_one({"client_id": client_id, "title": title})
-    if existing:
-        meeting = Meeting.from_mongo(existing)
-    else:
-        meeting = Meeting(
-            client_id=client.id,
-            client_name=client.name,
-            account_manager_id=user.id,
-            account_manager_name=user.name,
-            title=title,
-            scheduled_at=None,
-            google_meet_url=None,
-            duration_minutes=60,
-            status="prep",
+    try:
+        meeting = await monthly_touch.generate_for_client(
+            client_id,
+            user=user,
+            model_key=data.model,
+            extra_context=data.extra_context,
+            push_clickup_actions=True,
         )
-        await db.meetings.insert_one(meeting.to_mongo())
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return meeting.model_dump()
 
-    client_d = client.model_dump()
-    kpi = await connectors.build_kpi_snapshot(client_id, client.company)
-    brief = await ai.generate_meeting_brief(
-        client=client_d,
-        kpi_snapshot=kpi,
-        extra_context=data.extra_context,
-        model_key=data.model or ai.DEFAULT_MODEL,
-        session_id=f"monthly-touch-{meeting.id}",
-    )
 
-    update = {
-        "wins": brief["wins"],
-        "issues": brief["issues"],
-        "talking_points": brief["talking_points"],
-        "suggested_questions": brief["suggested_questions"],
-        "testimonial_opportunity": brief["testimonial_opportunity"],
-        "strategic_recommendations": brief["strategic_recommendations"],
-        "health_signal": brief["health_signal"],
-        "kpi_snapshot": kpi,
-        "brief_generated_at": utcnow().isoformat(),
-        "brief_model": data.model or ai.DEFAULT_MODEL,
-        "status": "prep",
-        "updated_at": utcnow().isoformat(),
-    }
-    await db.meetings.update_one({"_id": meeting.id}, {"$set": update})
-    doc = await db.meetings.find_one({"_id": meeting.id})
-    return Meeting.from_mongo(doc).model_dump()
+@api.post("/admin/monthly-touch/run-all")
+async def run_monthly_touch_all(request: Request):
+    secret = os.environ.get("CRON_SECRET", "")
+    header_secret = request.headers.get("x-cron-secret", "")
+    if not secret or header_secret != secret:
+        raise HTTPException(403, "Forbidden")
+    model_key = request.query_params.get("model")
+    extra_context = request.query_params.get("extra_context")
+    return await monthly_touch.generate_for_all(model_key=model_key, extra_context=extra_context)
 
 
 @api.get("/meetings/{meeting_id}")

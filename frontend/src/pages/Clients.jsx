@@ -79,7 +79,9 @@ export function ClientDetail() {
   const [meets, setMeets] = useState([]);
   const [actions, setActions] = useState([]);
   const [clickupListId, setClickupListId] = useState("");
+  const [gohighlevelLocationId, setGohighlevelLocationId] = useState("");
   const [savingBindings, setSavingBindings] = useState(false);
+  const [savingGhlBinding, setSavingGhlBinding] = useState(false);
   const [showMeet, setShowMeet] = useState(false);
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
 
@@ -89,6 +91,9 @@ export function ClientDetail() {
       const clickup = (b || []).find((x) => x.platform === "clickup");
       const listId = clickup?.external_ids?.list_id || clickup?.config?.list_id || "";
       setClickupListId(listId ? String(listId) : "");
+      const ghl = (b || []).find((x) => x.platform === "gohighlevel");
+      const locId = ghl?.external_ids?.location_id || ghl?.config?.location_id || "";
+      setGohighlevelLocationId(locId ? String(locId) : "");
     }),
     [id],
   );
@@ -120,6 +125,18 @@ export function ClientDetail() {
       alert(e?.response?.data?.detail || "Failed to save ClickUp binding");
     } finally {
       setSavingBindings(false);
+    }
+  };
+
+  const saveGhlBinding = async () => {
+    setSavingGhlBinding(true);
+    try {
+      await clients.upsertBinding(id, "gohighlevel", { enabled: true, external_ids: { location_id: gohighlevelLocationId } });
+      await reload();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save GoHighLevel binding");
+    } finally {
+      setSavingGhlBinding(false);
     }
   };
 
@@ -166,6 +183,11 @@ export function ClientDetail() {
           <label className="text-[11px] text-slate-500">List ID</label>
           <input className="input mt-1.5" value={clickupListId} onChange={(e) => setClickupListId(e.target.value)} placeholder="123456789" data-testid="clickup-list-id" />
           <button className="btn-ghost w-full mt-2" onClick={saveClickupBinding} disabled={savingBindings} data-testid="save-clickup-binding">{savingBindings ? "Saving…" : "Save ClickUp List"}</button>
+          <div className="divider my-4" />
+          <div className="label mb-2">GoHighLevel Mapping</div>
+          <label className="text-[11px] text-slate-500">Location ID</label>
+          <input className="input mt-1.5" value={gohighlevelLocationId} onChange={(e) => setGohighlevelLocationId(e.target.value)} placeholder="ve9EPM428h8vShlRW1KT" data-testid="gohighlevel-location-id" />
+          <button className="btn-ghost w-full mt-2" onClick={saveGhlBinding} disabled={savingGhlBinding} data-testid="save-gohighlevel-binding">{savingGhlBinding ? "Saving…" : "Save GoHighLevel Location"}</button>
         </div>
 
         <div className="lg:col-span-2 space-y-6">

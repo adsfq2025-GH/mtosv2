@@ -105,6 +105,8 @@ class ActionItem(BaseDocument):
     status: Literal["open", "in_progress", "completed", "blocked"] = "open"
     priority: Literal["low", "medium", "high"] = "medium"
     pushed_to: Optional[str] = None  # "clickup" | "ghl"
+    external_id: Optional[str] = None
+    external_url: Optional[str] = None
 
 
 class ActionItemIn(BaseModel):
