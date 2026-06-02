@@ -54,7 +54,11 @@ export function Login() {
           await loginWithGoogle(resp.credential);
           navigate("/");
         } catch (e) {
-          setErr(e?.response?.data?.detail || "Google sign-in failed");
+          const detail = e?.response?.data?.detail;
+          const status = e?.response?.status;
+          if (detail) setErr(String(detail));
+          else if (status) setErr(`Google sign-in failed (HTTP ${status})`);
+          else setErr(`Google sign-in failed (${e?.message || "Network/CORS error"})`);
         }
       },
     });
