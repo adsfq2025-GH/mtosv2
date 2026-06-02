@@ -163,10 +163,35 @@ export function Integrations() {
       const res = await integrations.oauthGoogleStart(platform);
       const url = res?.url;
       if (!url) throw new Error("Missing OAuth URL");
-      window.open(url, "google_oauth", "width=520,height=720");
+      const popup = window.open(url, "google_oauth", "width=520,height=720");
+      const startedAt = Date.now();
+      const poll = async () => {
+        try {
+          const st = await integrations.oauthGoogleStatus(platform);
+          if (st?.connected) {
+            setEdit(null);
+            load();
+            try { popup?.close(); } catch { }
+            return true;
+          }
+        } catch { }
+        return false;
+      };
+      const timer = window.setInterval(async () => {
+        if (Date.now() - startedAt > 90_000) {
+          window.clearInterval(timer);
+          setOauthBusy(false);
+          alert("Google connection timed out. If you see “Connected” in the popup, close it and try again.");
+          return;
+        }
+        const done = await poll();
+        if (done) {
+          window.clearInterval(timer);
+          setOauthBusy(false);
+        }
+      }, 1200);
     } catch (err) {
       alert(err?.response?.data?.detail || err?.message || "Failed to start Google OAuth");
-    } finally {
       setOauthBusy(false);
     }
   };
