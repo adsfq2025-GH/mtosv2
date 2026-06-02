@@ -36,8 +36,38 @@ class LoginIn(BaseModel):
     password: str
 
 
+# ===== TENANTS / WHITE LABEL =====
+class Tenant(BaseDocument):
+    slug: str
+    name: str
+    status: Literal["active", "suspended"] = "active"
+
+
+class TenantMembership(BaseDocument):
+    tenant_id: str
+    user_id: str
+    role: Literal["owner", "admin", "member", "viewer"] = "member"
+    status: Literal["active", "invited", "disabled"] = "active"
+
+
+class TenantSettings(BaseDocument):
+    tenant_id: str
+    branding: Dict[str, Any] = Field(default_factory=dict)
+    terminology: Dict[str, Any] = Field(default_factory=dict)
+    workflows: Dict[str, Any] = Field(default_factory=dict)
+    analysis: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TenantSettingsIn(BaseModel):
+    branding: Dict[str, Any] = Field(default_factory=dict)
+    terminology: Dict[str, Any] = Field(default_factory=dict)
+    workflows: Dict[str, Any] = Field(default_factory=dict)
+    analysis: Dict[str, Any] = Field(default_factory=dict)
+
+
 # ===== CLIENTS =====
 class Client(BaseDocument):
+    tenant_id: Optional[str] = None
     name: str
     company: str
     industry: Optional[str] = None
@@ -95,6 +125,7 @@ class TalkingPoint(BaseModel):
 
 
 class ActionItem(BaseDocument):
+    tenant_id: Optional[str] = None
     meeting_id: Optional[str] = None
     client_id: str
     title: str
@@ -121,6 +152,7 @@ class ActionItemIn(BaseModel):
 
 
 class ContentCapture(BaseDocument):
+    tenant_id: Optional[str] = None
     meeting_id: Optional[str] = None
     client_id: str
     type: Literal["testimonial_video", "testimonial_written", "quote", "case_study_lead", "clip"] = "quote"
@@ -144,6 +176,7 @@ class ContentCaptureIn(BaseModel):
 
 
 class Meeting(BaseDocument):
+    tenant_id: Optional[str] = None
     client_id: str
     client_name: Optional[str] = None
     account_manager_id: Optional[str] = None
@@ -158,12 +191,21 @@ class Meeting(BaseDocument):
     brief_generated_at: Optional[str] = None
     brief_model: Optional[str] = None
     wins: List[Win] = Field(default_factory=list)
+    wins_library: List[Win] = Field(default_factory=list)
     issues: List[Issue] = Field(default_factory=list)
+    issues_library: List[Issue] = Field(default_factory=list)
     talking_points: List[TalkingPoint] = Field(default_factory=list)
+    talking_points_library: List[TalkingPoint] = Field(default_factory=list)
     suggested_questions: List[str] = Field(default_factory=list)
+    prep_checklist: List[str] = Field(default_factory=list)
+    ace_up_the_sleeve: List[Dict[str, Any]] = Field(default_factory=list)
     testimonial_opportunity: Optional[str] = None
     strategic_recommendations: List[str] = Field(default_factory=list)
     health_signal: Optional[str] = None
+
+    automation_draft: Dict[str, Any] = Field(default_factory=dict)
+    automation_draft_generated_at: Optional[str] = None
+    automation_approved_at: Optional[str] = None
 
     # KPI snapshot used to generate the brief
     kpi_snapshot: Dict[str, Any] = Field(default_factory=dict)
@@ -204,6 +246,7 @@ class MeetingPatch(BaseModel):
 
 # ===== INTEGRATIONS =====
 class Integration(BaseDocument):
+    tenant_id: Optional[str] = None
     platform: str  # e.g. clickup, gohighlevel
     label: str
     status: Literal["not_connected", "connected", "error", "coming_soon"] = "not_connected"
@@ -219,6 +262,7 @@ class IntegrationConfigureIn(BaseModel):
 
 
 class ClientIntegrationBinding(BaseDocument):
+    tenant_id: Optional[str] = None
     client_id: str
     platform: str
     enabled: bool = True
@@ -245,3 +289,37 @@ class AnalyzeTranscriptIn(BaseModel):
 
 class GenerateRecapIn(BaseModel):
     model: Optional[str] = None
+
+
+# ===== TICKETS / QA =====
+class Ticket(BaseDocument):
+    tenant_id: Optional[str] = None
+    meeting_id: str
+    client_id: str
+    department: str
+    title: str
+    description: Optional[str] = None
+    priority: Literal["low", "medium", "high"] = "medium"
+    status: Literal["open", "in_progress", "completed", "blocked"] = "open"
+    external_id: Optional[str] = None
+    external_url: Optional[str] = None
+
+
+class TicketIn(BaseModel):
+    meeting_id: str
+    client_id: str
+    department: str
+    title: str
+    description: Optional[str] = None
+    priority: Optional[Literal["low", "medium", "high"]] = "medium"
+
+
+class QAScorecard(BaseDocument):
+    tenant_id: Optional[str] = None
+    meeting_id: str
+    client_id: str
+    account_manager_id: Optional[str] = None
+    account_manager_name: Optional[str] = None
+    total_score: int
+    dimensions: Dict[str, Any] = Field(default_factory=dict)
+    feedback: Optional[str] = None

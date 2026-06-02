@@ -2,7 +2,7 @@ import React from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
   House, Users, CalendarCheck, CheckSquare, Megaphone, Plugs, BookOpen,
-  SignOut, Sparkle, CaretRight,
+  SignOut, Sparkle, CaretRight, Trophy, Lightbulb,
 } from "@phosphor-icons/react";
 import { useAuth } from "./auth";
 
@@ -25,8 +25,11 @@ const NAV = [
   { to: "/clients", label: "Clients", icon: Users, testid: "nav-clients" },
   { to: "/meetings", label: "Meetings", icon: CalendarCheck, testid: "nav-meetings" },
   { to: "/actions", label: "Action Items", icon: CheckSquare, testid: "nav-actions" },
-  { to: "/content", label: "Content Queue", icon: Megaphone, testid: "nav-content" },
+  { to: "/opportunities", label: "Opportunities", icon: Megaphone, testid: "nav-opportunities" },
+  { to: "/testimonials", label: "Testimonials", icon: Trophy, testid: "nav-testimonials" },
+  { to: "/strategy", label: "Strategy", icon: Lightbulb, testid: "nav-strategy" },
   { to: "/integrations", label: "Integrations", icon: Plugs, testid: "nav-integrations" },
+  { to: "/white-label", label: "White Label", icon: Sparkle, testid: "nav-white-label" },
   { to: "/docs", label: "Documentation", icon: BookOpen, testid: "nav-docs" },
 ];
 

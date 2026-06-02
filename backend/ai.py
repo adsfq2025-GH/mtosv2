@@ -298,16 +298,33 @@ Return a JSON object with EXACTLY this shape:
   "wins": [
     {{ "title": "...", "description": "client-friendly 1-2 sentences", "metric": "GBP Calls", "delta": "+28% MoM" }}
   ],
+  "wins_library": [
+    {{ "title": "...", "description": "client-friendly 1-2 sentences", "metric": "GBP Calls", "delta": "+28% MoM" }}
+  ],
   "issues": [
+    {{ "title": "...", "description": "what's happening, transparent but not alarming",
+       "action_plan": "what we're already doing + next step", "severity": "low|medium|high" }}
+  ],
+  "issues_library": [
     {{ "title": "...", "description": "what's happening, transparent but not alarming",
        "action_plan": "what we're already doing + next step", "severity": "low|medium|high" }}
   ],
   "talking_points": [
     {{ "topic": "...", "angle": "how to frame it strategically in 1 sentence" }}
   ],
+  "talking_points_library": [
+    {{ "topic": "...", "angle": "how to frame it strategically in 1 sentence" }}
+  ],
   "suggested_questions": [
     "open-ended engagement question 1",
     "..."
+  ],
+  "prep_checklist": [
+    "prep item 1",
+    "..."
+  ],
+  "ace_up_the_sleeve": [
+    {{ "scenario": "client pushes back on price", "response": "what to say in 2-4 sentences", "follow_up_question": "one question" }}
   ],
   "testimonial_opportunity": "1-2 sentences naming whether this client is ready for testimonial ask and how to ask naturally — or 'Not yet, focus on results first'",
   "strategic_recommendations": [
@@ -318,8 +335,11 @@ Return a JSON object with EXACTLY this shape:
 }}
 
 wins: EXACTLY 3 items · issues: EXACTLY 2 items · talking_points: 4-6 items
+wins_library: 8-15 items · issues_library: 6-12 items · talking_points_library: 10-18 items
 suggested_questions: 4-6 items (mix experience / emotional / outcome / future)
 strategic_recommendations: 3-5 items
+prep_checklist: 8-14 items
+ace_up_the_sleeve: 5-10 items
 """
 
 
@@ -339,9 +359,14 @@ async def generate_meeting_brief(
     data = _extract_json(raw)
     return {
         "wins":                      (data.get("wins") or [])[:3],
+        "wins_library":              data.get("wins_library") or (data.get("wins") or []),
         "issues":                    (data.get("issues") or [])[:2],
+        "issues_library":            data.get("issues_library") or (data.get("issues") or []),
         "talking_points":            data.get("talking_points") or [],
+        "talking_points_library":    data.get("talking_points_library") or [],
         "suggested_questions":       data.get("suggested_questions") or [],
+        "prep_checklist":            data.get("prep_checklist") or [],
+        "ace_up_the_sleeve":         data.get("ace_up_the_sleeve") or [],
         "testimonial_opportunity":   data.get("testimonial_opportunity") or "",
         "strategic_recommendations": data.get("strategic_recommendations") or [],
         "health_signal":             data.get("health_signal") or "",
@@ -480,6 +505,130 @@ async def generate_recap(
         "subject": data.get("subject", f"Recap — {title}"),
         "html":    data.get("html", ""),
         "plain":   data.get("plain", ""),
+    }
+
+
+WORKFLOW_SYSTEM = """You are an expert account management operations engine.
+You convert meeting transcripts into a structured post-meeting workflow.
+You ALWAYS return a single valid JSON object only (no markdown, no commentary)."""
+
+WORKFLOW_USER_TEMPLATE = """Generate post-meeting workflow outputs.
+
+CLIENT: {client_name} ({company})
+MEETING TITLE: {title}
+
+TRANSCRIPT:
+\"\"\"
+{transcript}
+\"\"\"
+
+Return JSON:
+{{
+  "meeting_summary": "5-10 sentence summary",
+  "client_recap_email": {{
+    "subject": "...",
+    "plain": "client-facing recap email, plain text"
+  }},
+  "follow_up_action_items": [
+    {{ "title": "...", "description": "...", "owner_type": "agency|client", "due_date": "YYYY-MM-DD or null", "priority": "low|medium|high" }}
+  ],
+  "department_tickets": [
+    {{ "department": "SEO|Ads|Web|Design|GBP|Support|Other", "title": "...", "description": "...", "priority": "low|medium|high" }}
+  ],
+  "internal_recommendations": [ "internal note 1", "..." ],
+  "escalation_requests": [ "escalation 1", "..." ],
+  "client_voice_moments": [ "exact quote or key feedback 1", "..." ]
+}}
+"""
+
+
+async def generate_meeting_workflow(
+    client_name: str,
+    company: str,
+    title: str,
+    transcript: str,
+    model_key: str = DEFAULT_MODEL,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    user_text = WORKFLOW_USER_TEMPLATE.format(
+        client_name=client_name or "Client",
+        company=company or "",
+        title=title or "Monthly Touch",
+        transcript=(transcript or "")[:18_000],
+    )
+    raw = await run_chat(WORKFLOW_SYSTEM, user_text, model_key, session_id)
+    data = _extract_json(raw)
+    return {
+        "meeting_summary": data.get("meeting_summary", ""),
+        "client_recap_email": data.get("client_recap_email") or {},
+        "follow_up_action_items": data.get("follow_up_action_items") or [],
+        "department_tickets": data.get("department_tickets") or [],
+        "internal_recommendations": data.get("internal_recommendations") or [],
+        "escalation_requests": data.get("escalation_requests") or [],
+        "client_voice_moments": data.get("client_voice_moments") or [],
+        "_raw": raw if not data else None,
+    }
+
+
+QA_SYSTEM = """You are a QA coach for account managers.
+Score the meeting process quality and effectiveness.
+You ALWAYS return a single valid JSON object only."""
+
+QA_USER_TEMPLATE = """Score this Monthly Touch Meeting.
+
+ACCOUNT MANAGER: {am_name}
+CLIENT: {client_name} ({company})
+MEETING TITLE: {title}
+
+CHECKLIST:
+{checklist_json}
+
+TRANSCRIPT:
+\"\"\"
+{transcript}
+\"\"\"
+
+Return JSON:
+{{
+  "total_score": 0,
+  "dimensions": {{
+    "meeting_quality": 0,
+    "client_engagement": 0,
+    "process_compliance": 0,
+    "follow_up_clarity": 0,
+    "communication_effectiveness": 0,
+    "upsell_identification": 0
+  }},
+  "feedback": "short coaching feedback, 4-8 sentences"
+}}
+"""
+
+
+async def score_meeting_qa(
+    am_name: str,
+    client_name: str,
+    company: str,
+    title: str,
+    transcript: str,
+    checklist: Dict[str, Any],
+    model_key: str = DEFAULT_MODEL,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    user_text = QA_USER_TEMPLATE.format(
+        am_name=am_name or "Account Manager",
+        client_name=client_name or "Client",
+        company=company or "",
+        title=title or "Monthly Touch",
+        transcript=(transcript or "")[:18_000],
+        checklist_json=json.dumps(checklist or {}, default=str),
+    )
+    raw = await run_chat(QA_SYSTEM, user_text, model_key, session_id)
+    data = _extract_json(raw)
+    return {
+        "total_score": int(data.get("total_score") or 0),
+        "dimensions": data.get("dimensions") or {},
+        "feedback": data.get("feedback") or "",
+        "_raw": raw if not data else None,
     }
 
 

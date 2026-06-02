@@ -31,18 +31,24 @@ export default function MeetingDetail() {
   const [content, setContent] = useState([]);
   const [recap, setRecap] = useState(null);
   const [checklist, setChecklist] = useState({});
+  const [automation, setAutomation] = useState(null);
+  const [qaScorecard, setQaScorecard] = useState(null);
 
   const reload = useCallback(
     () => Promise.all([
       meetings.get(id),
       actionItems.list({ meeting_id: id }),
       contentCaptures.list(),
-    ]).then(([meeting, a, c]) => {
+      meetings.automation(id).catch(() => null),
+      meetings.qa(id).catch(() => null),
+    ]).then(([meeting, a, c, autoRes, qaRes]) => {
       setM(meeting); setActions(a);
       setContent(c.filter(cap => cap.meeting_id === id));
       setChecklist(meeting.checklist || {});
       if (meeting.transcript) setTranscript(meeting.transcript);
       if (meeting.recap_html) setRecap({ html: meeting.recap_html, plain: meeting.recap_email });
+      setAutomation(autoRes);
+      setQaScorecard(qaRes?.scorecard || null);
     }),
     [id],
   );
@@ -92,6 +98,45 @@ export default function MeetingDetail() {
       await reload().catch(() => {});
     } catch (e) {
       alert(e?.response?.data?.detail || "Recap generation failed");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const genAutomation = async () => {
+    setBusy("automation");
+    try {
+      const r = await meetings.generateAutomation(id);
+      setAutomation(r);
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Automation generation failed");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const approveAutomation = async () => {
+    if (!window.confirm("Approve this automation draft and create internal tasks/tickets?")) return;
+    setBusy("approve_automation");
+    try {
+      await meetings.approveAutomation(id);
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Automation approval failed");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const scoreQa = async () => {
+    setBusy("qa");
+    try {
+      const r = await meetings.scoreQa(id);
+      setQaScorecard(r?.scorecard || null);
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "QA scoring failed");
     } finally {
       setBusy("");
     }
@@ -167,6 +212,20 @@ export default function MeetingDetail() {
                   </div>
                 ))}
               </div>
+              {(m.wins_library || []).length > 3 && (
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-xs text-[#3FA9F5]">View full wins library</summary>
+                  <div className="mt-3 space-y-2">
+                    {(m.wins_library || []).map((w, i) => (
+                      <div key={i} className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="text-[10px] mono text-slate-400 uppercase tracking-wider">{w.metric || "WIN"} · {w.delta || ""}</div>
+                        <div className="font-medium text-sm mt-1">{w.title}</div>
+                        <div className="text-xs text-slate-300 mt-1.5">{w.description}</div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </section>
 
             <section className="card-flat p-5">
@@ -181,12 +240,34 @@ export default function MeetingDetail() {
                   </div>
                 ))}
               </div>
+              {(m.issues_library || []).length > 2 && (
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-xs text-[#3FA9F5]">View full issues library</summary>
+                  <div className="mt-3 space-y-2">
+                    {(m.issues_library || []).map((iss, i) => (
+                      <div key={i} className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="flex items-center justify-between"><div className="font-medium text-sm">{iss.title}</div><span className={`chip ${sevChip(iss.severity)}`}>{iss.severity}</span></div>
+                        <div className="text-xs text-slate-300 mt-1.5">{iss.description}</div>
+                        {iss.action_plan && <div className="text-xs text-slate-300 mt-2 p-2 rounded bg-[#3FA9F5]/10 border border-[#3FA9F5]/15"><strong className="text-[#3FA9F5]">Action plan:</strong> {iss.action_plan}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
             </section>
 
             <section className="card-flat p-5">
               <div className="flex items-center gap-2 mb-3"><Lightbulb size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Talking Points</h3></div>
               {(m.talking_points || []).length === 0 && <EmptyHint />}
               <ul className="space-y-2">{(m.talking_points || []).map((t, i) => <li key={i} className="text-sm"><strong className="text-white">{t.topic}:</strong> <span className="text-slate-300">{t.angle}</span></li>)}</ul>
+              {(m.talking_points_library || []).length > (m.talking_points || []).length && (
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-xs text-[#3FA9F5]">View full talking points library</summary>
+                  <ul className="mt-3 space-y-2">
+                    {(m.talking_points_library || []).map((t, i) => <li key={i} className="text-sm"><strong className="text-white">{t.topic}:</strong> <span className="text-slate-300">{t.angle}</span></li>)}
+                  </ul>
+                </details>
+              )}
             </section>
 
             <section className="card-flat p-5">
@@ -194,15 +275,43 @@ export default function MeetingDetail() {
               {(m.suggested_questions || []).length === 0 && <EmptyHint />}
               <ul className="space-y-2 list-disc pl-5">{(m.suggested_questions || []).map((q, i) => <li key={i} className="text-sm text-slate-300">{q}</li>)}</ul>
             </section>
+
+            <section className="card-flat p-5">
+              <div className="flex items-center gap-2 mb-3"><ListChecks size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Preparation Checklist</h3></div>
+              {(m.prep_checklist || []).length === 0 && <EmptyHint label="Generate the brief to get a tailored pre-meeting checklist." />}
+              <ul className="space-y-2 list-disc pl-5">{(m.prep_checklist || []).map((p, i) => <li key={i} className="text-sm text-slate-300">{p}</li>)}</ul>
+            </section>
+
+            <section className="card-flat p-5">
+              <div className="flex items-center gap-2 mb-3"><Robot size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">Ace Up The Sleeve</h3></div>
+              {(m.ace_up_the_sleeve || []).length === 0 && <EmptyHint label="Generate the brief to get backup responses and pivots for difficult moments." />}
+              <div className="space-y-3">
+                {(m.ace_up_the_sleeve || []).map((a, i) => (
+                  <div key={i} className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="text-xs text-slate-400 mono uppercase tracking-wider">Scenario</div>
+                    <div className="text-sm text-slate-200 mt-1">{a.scenario || "—"}</div>
+                    <div className="text-xs text-slate-400 mono uppercase tracking-wider mt-3">Response</div>
+                    <div className="text-sm text-slate-300 mt-1">{a.response || "—"}</div>
+                    {a.follow_up_question && <div className="text-sm text-slate-300 mt-2"><strong className="text-white">Follow-up:</strong> {a.follow_up_question}</div>}
+                  </div>
+                ))}
+              </div>
+            </section>
           </div>
 
           <div className="space-y-5">
             <section className="card-flat p-5">
-              <div className="flex items-center gap-2 mb-3"><Megaphone size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">Testimonial Opportunity</h3></div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2"><Megaphone size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">Testimonial Opportunity</h3></div>
+                <Link to="/testimonials" className="text-xs text-[#3FA9F5] hover:underline">View all</Link>
+              </div>
               <div className="text-sm text-slate-300 leading-relaxed">{m.testimonial_opportunity || "—"}</div>
             </section>
             <section className="card-flat p-5">
-              <div className="flex items-center gap-2 mb-3"><Sparkle size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Strategic Recommendations</h3></div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2"><Sparkle size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Strategic Recommendations</h3></div>
+                <Link to="/strategy" className="text-xs text-[#3FA9F5] hover:underline">View all</Link>
+              </div>
               <ul className="space-y-2 list-disc pl-5">{(m.strategic_recommendations || []).map((r, i) => <li key={i} className="text-sm text-slate-300">{r}</li>)}</ul>
               {(m.strategic_recommendations || []).length === 0 && <EmptyHint />}
             </section>
@@ -212,7 +321,7 @@ export default function MeetingDetail() {
               {m.brief_generated_at && <div className="mt-3 text-[11px] text-slate-500 mono">Brief generated · {new Date(m.brief_generated_at).toLocaleString()} · {m.brief_model}</div>}
             </section>
             <section className="card-flat p-5">
-              <div className="label mb-2">KPI Snapshot (demo data)</div>
+              <div className="label mb-2">KPI Snapshot</div>
               <details className="text-xs text-slate-300">
                 <summary className="cursor-pointer text-[#3FA9F5]">View raw snapshot</summary>
                 <pre className="mt-2 max-h-72 overflow-auto p-3 bg-black/40 rounded mono text-[11px]">{JSON.stringify(m.kpi_snapshot || {}, null, 2)}</pre>
@@ -333,6 +442,63 @@ export default function MeetingDetail() {
                   {busy === "recap" ? <ArrowsClockwise size={14} className="animate-spin" /> : <EnvelopeSimple size={14} weight="duotone" />} Generate Recap Email
                 </button>
               </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <div className="card-flat p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-semibold">Meeting Automation</h3>
+                    <div className="flex items-center gap-2">
+                      <button className="btn-ghost text-xs" onClick={genAutomation} disabled={busy === "automation"} data-testid="gen-automation-btn">
+                        {busy === "automation" ? <ArrowsClockwise size={12} className="animate-spin" /> : "Generate draft"}
+                      </button>
+                      <button className="btn-primary text-xs" onClick={approveAutomation} disabled={busy === "approve_automation" || !(automation?.draft)} data-testid="approve-automation-btn">
+                        {busy === "approve_automation" ? <ArrowsClockwise size={12} className="animate-spin" /> : "Approve"}
+                      </button>
+                    </div>
+                  </div>
+                  {!(automation?.draft) && <div className="text-sm text-slate-500 py-6 text-center">Generate a draft to create recap, action items, department tickets, and escalations.</div>}
+                  {automation?.draft && (
+                    <div className="space-y-3">
+                      <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="label mb-1">Meeting summary</div>
+                        <div className="text-sm text-slate-300">{automation.draft.meeting_summary || "—"}</div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <MiniStat label="Actions" value={(automation.draft.follow_up_action_items || []).length} />
+                        <MiniStat label="Tickets" value={(automation.draft.department_tickets || []).length} />
+                        <MiniStat label="Escalations" value={(automation.draft.escalation_requests || []).length} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="card-flat p-5">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-semibold">QA Scorecard</h3>
+                    <button className="btn-ghost text-xs" onClick={scoreQa} disabled={busy === "qa"} data-testid="score-qa-btn">
+                      {busy === "qa" ? <ArrowsClockwise size={12} className="animate-spin" /> : "Score meeting"}
+                    </button>
+                  </div>
+                  {!qaScorecard && <div className="text-sm text-slate-500 py-6 text-center">Score the meeting to get coaching feedback and KPI scoring.</div>}
+                  {qaScorecard && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="label">Total score</div>
+                        <span className="chip chip-info mono">{qaScorecard.total_score}</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {Object.entries(qaScorecard.dimensions || {}).map(([k, v]) => (
+                          <div key={k} className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                            <div className="text-[11px] text-slate-500 uppercase tracking-wider">{k.replaceAll("_", " ")}</div>
+                            <div className="text-sm mono mt-1">{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                      {qaScorecard.feedback && <div className="text-sm text-slate-300 leading-relaxed">{qaScorecard.feedback}</div>}
+                    </div>
+                  )}
+                </div>
+              </div>
             </>
           )}
         </div>
@@ -364,4 +530,13 @@ export default function MeetingDetail() {
 
 function EmptyHint({ label }) {
   return <div className="text-sm text-slate-500 py-6 text-center border border-dashed border-white/10 rounded-md">{label || "Nothing here yet. Run the AI generator above."}</div>;
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+      <div className="text-[11px] text-slate-500 uppercase tracking-wider">{label}</div>
+      <div className="text-xl font-bold mono mt-1">{value}</div>
+    </div>
+  );
 }

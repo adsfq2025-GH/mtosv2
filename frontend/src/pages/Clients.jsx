@@ -80,8 +80,10 @@ export function ClientDetail() {
   const [actions, setActions] = useState([]);
   const [clickupFolderId, setClickupFolderId] = useState("");
   const [gohighlevelLocationId, setGohighlevelLocationId] = useState("");
+  const [googleAdsCustomerId, setGoogleAdsCustomerId] = useState("");
   const [savingBindings, setSavingBindings] = useState(false);
   const [savingGhlBinding, setSavingGhlBinding] = useState(false);
+  const [savingGadsBinding, setSavingGadsBinding] = useState(false);
   const [showClickupPicker, setShowClickupPicker] = useState(false);
   const [clickupWorkspaces, setClickupWorkspaces] = useState([]);
   const [clickupTeamId, setClickupTeamId] = useState("");
@@ -92,6 +94,10 @@ export function ClientDetail() {
   const [ghlLocations, setGhlLocations] = useState([]);
   const [ghlQ, setGhlQ] = useState("");
   const [loadingGhl, setLoadingGhl] = useState(false);
+  const [showGadsPicker, setShowGadsPicker] = useState(false);
+  const [gadsCustomers, setGadsCustomers] = useState([]);
+  const [gadsQ, setGadsQ] = useState("");
+  const [loadingGads, setLoadingGads] = useState(false);
   const [showMeet, setShowMeet] = useState(false);
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
 
@@ -104,6 +110,9 @@ export function ClientDetail() {
       const ghl = (b || []).find((x) => x.platform === "gohighlevel");
       const locId = ghl?.external_ids?.location_id || ghl?.config?.location_id || "";
       setGohighlevelLocationId(locId ? String(locId) : "");
+      const gads = (b || []).find((x) => x.platform === "google_ads");
+      const custId = gads?.external_ids?.customer_id || gads?.config?.customer_id || "";
+      setGoogleAdsCustomerId(custId ? String(custId) : "");
     }),
     [id],
   );
@@ -147,6 +156,18 @@ export function ClientDetail() {
       alert(e?.response?.data?.detail || "Failed to save GoHighLevel binding");
     } finally {
       setSavingGhlBinding(false);
+    }
+  };
+
+  const saveGadsBinding = async () => {
+    setSavingGadsBinding(true);
+    try {
+      await clients.upsertBinding(id, "google_ads", { enabled: true, external_ids: { customer_id: googleAdsCustomerId } });
+      await reload();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save Google Ads binding");
+    } finally {
+      setSavingGadsBinding(false);
     }
   };
 
@@ -200,6 +221,21 @@ export function ClientDetail() {
       setGhlLocations([]);
     } finally {
       setLoadingGhl(false);
+    }
+  };
+
+  const openGadsPicker = async () => {
+    setShowGadsPicker(true);
+    setGadsQ("");
+    setLoadingGads(true);
+    try {
+      const res = await integrations.googleAdsCustomers();
+      setGadsCustomers(res?.customers || []);
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to load Google Ads customers");
+      setGadsCustomers([]);
+    } finally {
+      setLoadingGads(false);
     }
   };
 
@@ -257,6 +293,14 @@ export function ClientDetail() {
             <button type="button" className="btn-ghost whitespace-nowrap" onClick={openGhlPicker} data-testid="browse-ghl-locations">Browse</button>
           </div>
           <button className="btn-ghost w-full mt-2" onClick={saveGhlBinding} disabled={savingGhlBinding} data-testid="save-gohighlevel-binding">{savingGhlBinding ? "Saving…" : "Save GoHighLevel Location"}</button>
+          <div className="divider my-4" />
+          <div className="label mb-2">Google Ads Mapping</div>
+          <label className="text-[11px] text-slate-500">Customer ID</label>
+          <div className="flex gap-2 mt-1.5">
+            <input className="input flex-1" value={googleAdsCustomerId} onChange={(e) => setGoogleAdsCustomerId(e.target.value)} placeholder="1234567890" data-testid="google-ads-customer-id" />
+            <button type="button" className="btn-ghost whitespace-nowrap" onClick={openGadsPicker} data-testid="browse-google-ads-customers">Browse</button>
+          </div>
+          <button className="btn-ghost w-full mt-2" onClick={saveGadsBinding} disabled={savingGadsBinding} data-testid="save-google-ads-binding">{savingGadsBinding ? "Saving…" : "Save Google Ads Customer"}</button>
         </div>
 
         <div className="lg:col-span-2 space-y-6">
@@ -347,6 +391,36 @@ export function ClientDetail() {
                   {!loadingClickup && (clickupFolders || []).length === 0 && <div className="p-4 text-sm text-slate-400">No folders found.</div>}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGadsPicker && (
+        <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowGadsPicker(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="card-flat p-6 w-full max-w-xl" data-testid="gads-picker">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <div className="text-lg font-semibold">Pick Google Ads Customer</div>
+                <div className="text-xs text-slate-400">Select the customer account for this client.</div>
+              </div>
+              <button type="button" className="btn-ghost !p-2" onClick={() => setShowGadsPicker(false)}><X size={14} /></button>
+            </div>
+            <label className="label">Search</label>
+            <input className="input mt-1.5 mb-3" value={gadsQ} onChange={(e) => setGadsQ(e.target.value)} placeholder="1234567890" />
+            <div className="max-h-[55vh] overflow-y-auto scroll-thin border border-white/5 rounded-md">
+              {loadingGads && <div className="p-4 text-sm text-slate-400">Loading…</div>}
+              {!loadingGads && (gadsCustomers || []).filter((c) => !gadsQ || String(c.id || "").includes(gadsQ)).map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  className="w-full text-left p-3 border-b border-white/5 hover:bg-white/[0.03]"
+                  onClick={() => { setGoogleAdsCustomerId(String(c.id)); setShowGadsPicker(false); }}
+                >
+                  <div className="text-sm font-medium">{c.id}</div>
+                </button>
+              ))}
+              {!loadingGads && (gadsCustomers || []).length === 0 && <div className="p-4 text-sm text-slate-400">No customers found.</div>}
             </div>
           </div>
         </div>

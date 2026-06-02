@@ -54,6 +54,11 @@ export const meetings = {
   analyzeTranscript: (id, body) => api.post(`/meetings/${id}/analyze-transcript`, body).then((r) => r.data),
   generateRecap: (id, body) => api.post(`/meetings/${id}/generate-recap`, body).then((r) => r.data),
   exportHtml: (id) => api.get(`/meetings/${id}/export/html`).then((r) => r.data),
+  automation: (id) => api.get(`/meetings/${id}/automation`).then((r) => r.data),
+  generateAutomation: (id) => api.post(`/meetings/${id}/automation/generate`).then((r) => r.data),
+  approveAutomation: (id) => api.post(`/meetings/${id}/automation/approve`).then((r) => r.data),
+  qa: (id) => api.get(`/meetings/${id}/qa`).then((r) => r.data),
+  scoreQa: (id) => api.post(`/meetings/${id}/qa/score`).then((r) => r.data),
 };
 
 export const actionItems = {
@@ -83,6 +88,23 @@ export const integrations = {
   clickupLists: (teamId) => api.get(`/integrations/clickup/lists${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`).then((r) => r.data),
   clickupFolders: (teamId) => api.get(`/integrations/clickup/folders${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`).then((r) => r.data),
   gohighlevelLocations: () => api.get("/integrations/gohighlevel/locations").then((r) => r.data),
+  googleAdsCustomers: () => api.get("/integrations/google_ads/customers").then((r) => r.data),
+};
+
+export const settings = {
+  get: () => api.get("/settings").then((r) => r.data),
+  put: (data) => api.put("/settings", data).then((r) => r.data),
+};
+
+export const whiteLabel = {
+  uploads: () => api.get("/white-label/uploads").then((r) => r.data),
+  upload: (file, purpose = "documentation") => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("purpose", purpose);
+    return api.post("/white-label/uploads", fd, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data);
+  },
+  analyze: () => api.post("/white-label/analyze").then((r) => r.data),
 };
 
 export const docs = {
