@@ -1,11 +1,11 @@
 """
 ai.py — Monthly Touch OS · Powered by Map Ranking
-AI Router: Groq (speed) → OpenRouter (flexibility) → OpenAI (premium)
+AI Router: Gemini Direct (primary) → Groq (optional) → OpenAI (optional)
 Dependencies: httpx only  (pip install httpx)
 
 Environment variables required:
+    GEMINI_API_KEY
     GROQ_API_KEY
-    OPENROUTER_API_KEY
     OPENAI_API_KEY
 """
 
@@ -40,6 +40,11 @@ class AIProviderError(Exception):
 # ─────────────────────────────────────────────
 
 MODEL_REGISTRY: Dict[str, Dict[str, str]] = {
+    # ── PRIMARY (Gemini Direct) ─────────────────────────────────────────
+    "gemini-direct": {
+        "provider": "gemini",
+        "model": "gemini-2.5-pro",
+    },
     # ── FAST / LOW COST (Groq) ──────────────────────────────────────────
     "llama-fast": {
         "provider": "groq",
@@ -49,23 +54,6 @@ MODEL_REGISTRY: Dict[str, Dict[str, str]] = {
         "provider": "groq",
         "model": "deepseek-r1-distill-llama-70b",
     },
-    # ── FLEXIBLE (OpenRouter) ───────────────────────────────────────────
-    "claude-sonnet": {
-        "provider": "openrouter",
-        "model": "anthropic/claude-sonnet-4",
-    },
-    "gemini-pro": {
-        "provider": "openrouter",
-        "model": "google/gemini-2.5-pro",
-    },
-    "gemini-direct": {
-        "provider": "gemini",
-        "model": "gemini-2.5-pro",
-    },
-    "deepseek-r1": {
-        "provider": "openrouter",
-        "model": "deepseek/deepseek-r1",
-    },
     # ── PREMIUM (OpenAI) ────────────────────────────────────────────────
     "gpt-premium": {
         "provider": "openai",
@@ -74,8 +62,8 @@ MODEL_REGISTRY: Dict[str, Dict[str, str]] = {
 }
 
 # Defaults per feature
-DEFAULT_MODEL    = "llama-fast"    # meeting brief + recap
-TRANSCRIPT_MODEL = "deepseek-fast"
+DEFAULT_MODEL = "gemini-direct"  # meeting brief + recap
+TRANSCRIPT_MODEL = "gemini-direct"
 
 # ─────────────────────────────────────────────
 # Provider Endpoints & Config
@@ -86,14 +74,6 @@ PROVIDER_CONFIG: Dict[str, Dict[str, Any]] = {
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "api_key_env": "GROQ_API_KEY",
         "headers_extra": {},
-    },
-    "openrouter": {
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "api_key_env": "OPENROUTER_API_KEY",
-        "headers_extra": {
-            "HTTP-Referer": "https://monthlytouchos.com",
-            "X-Title": "Monthly Touch OS",
-        },
     },
     "openai": {
         "url": "https://api.openai.com/v1/chat/completions",
@@ -109,10 +89,9 @@ PROVIDER_CONFIG: Dict[str, Dict[str, Any]] = {
 
 # Failover chain: when a provider fails, escalate to next
 FAILOVER_CHAIN: Dict[str, Dict[str, Any]] = {
-    "groq":       {"next_provider": "openrouter", "fallback_model_key": "claude-sonnet"},
-    "openrouter": {"next_provider": "openai",     "fallback_model_key": "gpt-premium"},
+    "groq":       {"next_provider": None, "fallback_model_key": None},
     "openai":     {"next_provider": None,          "fallback_model_key": None},  # terminal
-    "gemini":     {"next_provider": "openrouter", "fallback_model_key": "claude-sonnet"},
+    "gemini":     {"next_provider": None, "fallback_model_key": None},
 }
 
 REQUEST_TIMEOUT = 90   # seconds

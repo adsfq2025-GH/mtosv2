@@ -29,7 +29,7 @@ const sevChip = (s) => s === "high" ? "chip-danger" : s === "low" ? "chip-succes
 export default function MeetingDetail() {
   const { id } = useParams();
   const [m, setM] = useState(null);
-  const [model, setModel] = useState("llama-fast");
+  const [model, setModel] = useState("gemini-direct");
   const [tab, setTab] = useState("brief");
   const [transcript, setTranscript] = useState("");
   const [busy, setBusy] = useState("");
