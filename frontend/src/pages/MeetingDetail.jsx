@@ -103,6 +103,19 @@ export default function MeetingDetail() {
     }
   };
 
+  const syncMeetTranscript = async () => {
+    setBusy("sync_meet");
+    try {
+      const updated = await meetings.syncMeetTranscript(id);
+      setM(updated);
+      setTranscript(updated.transcript || "");
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Google Meet transcript sync failed");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const genAutomation = async () => {
     setBusy("automation");
     try {
@@ -369,9 +382,16 @@ export default function MeetingDetail() {
           <div className="lg:col-span-2 card-flat p-5">
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold flex items-center gap-2"><ChatCircle size={18} weight="duotone" /> Meeting Transcript</h3>
-              <button className="btn-primary flex items-center gap-2" onClick={analyze} disabled={busy === "analyze" || !transcript.trim()} data-testid="analyze-transcript-btn">
-                {busy === "analyze" ? <ArrowsClockwise size={14} className="animate-spin" /> : <Robot size={14} weight="duotone" />} Analyze with AI
-              </button>
+              <div className="flex items-center gap-2">
+                {m.google_meet_url && (
+                  <button className="btn-ghost flex items-center gap-2" onClick={syncMeetTranscript} disabled={busy === "sync_meet"} data-testid="sync-meet-transcript-btn">
+                    {busy === "sync_meet" ? <ArrowsClockwise size={14} className="animate-spin" /> : "Sync from Meet"}
+                  </button>
+                )}
+                <button className="btn-primary flex items-center gap-2" onClick={analyze} disabled={busy === "analyze" || !transcript.trim()} data-testid="analyze-transcript-btn">
+                  {busy === "analyze" ? <ArrowsClockwise size={14} className="animate-spin" /> : <Robot size={14} weight="duotone" />} Analyze with AI
+                </button>
+              </div>
             </div>
             <textarea
               className="input !min-h-[440px] font-mono text-[12.5px] leading-relaxed"

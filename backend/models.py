@@ -213,6 +213,7 @@ class Meeting(BaseDocument):
     # During / post meeting
     notes: Optional[str] = None
     transcript: Optional[str] = None
+    transcript_source: Dict[str, Any] = Field(default_factory=dict)
     transcript_analyzed_at: Optional[str] = None
     sentiment: Optional[Literal["positive", "neutral", "negative"]] = None
     sentiment_summary: Optional[str] = None

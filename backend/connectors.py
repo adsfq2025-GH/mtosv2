@@ -440,6 +440,142 @@ async def test_google_ads(tenant_id: str) -> Dict[str, Any]:
     return {"ok": True, "customers_found": len(res.get("customers") or [])}
 
 
+async def test_google_meet(tenant_id: str) -> Dict[str, Any]:
+    creds = await get_credentials(tenant_id, "google_meet")
+    try:
+        await _google_ads_access_token(creds)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
+
+
+def _meet_code_from_url(url: str) -> Optional[str]:
+    s = (url or "").strip()
+    if not s:
+        return None
+    if "meet.google.com" not in s:
+        return None
+    try:
+        parts = s.split("/")
+        for p in parts[::-1]:
+            p = p.strip()
+            if p and "-" in p and len(p) >= 10 and "." not in p:
+                return p.split("?")[0]
+    except Exception:
+        return None
+    return None
+
+
+async def list_google_meet_conference_records(tenant_id: str, meet_code: str) -> Dict[str, Any]:
+    creds = await get_credentials(tenant_id, "google_meet")
+    try:
+        access_token = await _google_ads_access_token(creds)
+    except Exception as exc:
+        return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
+    url = f"https://meet.googleapis.com/v2/spaces/{meet_code}/conferenceRecords"
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"google_meet_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    return {"ok": True, "conference_records": data.get("conferenceRecords") or []}
+
+
+async def _get_google_meet_transcripts(tenant_id: str, conference_record_name: str) -> Dict[str, Any]:
+    creds = await get_credentials(tenant_id, "google_meet")
+    try:
+        access_token = await _google_ads_access_token(creds)
+    except Exception as exc:
+        return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
+    url = f"https://meet.googleapis.com/v2/{conference_record_name}/transcripts"
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"google_meet_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    return {"ok": True, "transcripts": data.get("transcripts") or []}
+
+
+async def _google_docs_document(tenant_id: str, document_id: str) -> Dict[str, Any]:
+    creds = await get_credentials(tenant_id, "google_meet")
+    try:
+        access_token = await _google_ads_access_token(creds)
+    except Exception as exc:
+        raise ValueError(str(exc))
+    url = f"https://docs.googleapis.com/v1/documents/{document_id}"
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        raise ValueError(f"google_docs_http_{resp.status_code}: {_safe_err_detail(resp)}")
+    return resp.json() or {}
+
+
+def _extract_docs_text(doc: Dict[str, Any]) -> str:
+    out: List[str] = []
+    body = (doc or {}).get("body") or {}
+    for c in (body.get("content") or []):
+        p = c.get("paragraph")
+        if not p:
+            continue
+        buf: List[str] = []
+        for el in (p.get("elements") or []):
+            tr = (el.get("textRun") or {}).get("content")
+            if tr:
+                buf.append(tr)
+        line = "".join(buf).strip()
+        if line:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+async def sync_google_meet_transcript_to_meeting(tenant_id: str, meeting: dict) -> Dict[str, Any]:
+    meet_code = _meet_code_from_url((meeting or {}).get("google_meet_url") or "")
+    if not meet_code:
+        return {"ok": False, "error": "missing_meet_url"}
+
+    recs = await list_google_meet_conference_records(tenant_id, meet_code)
+    if not recs.get("ok"):
+        return recs
+    records = recs.get("conference_records") or []
+    if not records:
+        return {"ok": False, "error": "no_conference_records"}
+
+    record = records[0]
+    record_name = record.get("name")
+    if not record_name:
+        return {"ok": False, "error": "invalid_conference_record"}
+
+    trs = await _get_google_meet_transcripts(tenant_id, record_name)
+    if not trs.get("ok"):
+        return trs
+    transcripts = trs.get("transcripts") or []
+    if not transcripts:
+        return {"ok": False, "error": "no_transcripts"}
+
+    transcript = transcripts[0]
+    docs_dest = (transcript.get("docsDestination") or {})
+    document_id = docs_dest.get("document") or ""
+    if isinstance(document_id, str) and document_id.startswith("documents/"):
+        document_id = document_id.split("/", 1)[1]
+    if not document_id:
+        return {"ok": False, "error": "missing_document_id"}
+
+    gdoc = await _google_docs_document(tenant_id, str(document_id))
+    text = _extract_docs_text(gdoc)
+    if not text:
+        return {"ok": False, "error": "empty_transcript"}
+    return {
+        "ok": True,
+        "meet_code": meet_code,
+        "conference_record": record_name,
+        "transcript": text,
+        "document_id": str(document_id),
+    }
+
+
 async def list_clickup_workspaces(tenant_id: str) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
     token = _strip_bearer((creds or {}).get("api_token", ""))

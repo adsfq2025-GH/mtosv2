@@ -54,6 +54,7 @@ export const meetings = {
   analyzeTranscript: (id, body) => api.post(`/meetings/${id}/analyze-transcript`, body).then((r) => r.data),
   generateRecap: (id, body) => api.post(`/meetings/${id}/generate-recap`, body).then((r) => r.data),
   exportHtml: (id) => api.get(`/meetings/${id}/export/html`).then((r) => r.data),
+  syncMeetTranscript: (id) => api.post(`/meetings/${id}/google-meet/sync-transcript`).then((r) => r.data),
   automation: (id) => api.get(`/meetings/${id}/automation`).then((r) => r.data),
   generateAutomation: (id) => api.post(`/meetings/${id}/automation/generate`).then((r) => r.data),
   approveAutomation: (id) => api.post(`/meetings/${id}/automation/approve`).then((r) => r.data),

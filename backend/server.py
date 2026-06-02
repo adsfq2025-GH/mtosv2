@@ -635,6 +635,31 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get
     return Meeting.from_mongo(doc).model_dump()
 
 
+@api.post("/meetings/{meeting_id}/google-meet/sync-transcript")
+async def sync_google_meet_transcript(meeting_id: str, ctx=Depends(get_current_context)):
+    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    if not m_doc:
+        raise HTTPException(404, "Meeting not found")
+    meeting = Meeting.from_mongo(m_doc)
+    res = await connectors.sync_google_meet_transcript_to_meeting(ctx.tenant_id, meeting.model_dump())
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
+    patch = {
+        "transcript": res.get("transcript"),
+        "transcript_source": {
+            "provider": "google_meet",
+            "meet_code": res.get("meet_code"),
+            "conference_record": res.get("conference_record"),
+            "document_id": res.get("document_id"),
+            "synced_at": utcnow().isoformat(),
+        },
+        "updated_at": utcnow().isoformat(),
+    }
+    await db.meetings.update_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+    doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    return Meeting.from_mongo(doc).model_dump()
+
+
 @api.post("/meetings/{meeting_id}/analyze-transcript")
 async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Depends(get_current_context)):
     m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
@@ -1034,6 +1059,8 @@ async def test_integration(platform: str, ctx=Depends(get_current_context)):
         res = await connectors.test_gohighlevel(ctx.tenant_id)
     elif platform == "google_ads":
         res = await connectors.test_google_ads(ctx.tenant_id)
+    elif platform == "google_meet":
+        res = await connectors.test_google_meet(ctx.tenant_id)
     else:
         res = {"ok": True, "note": "Credentials stored & verified. Live API sync runs on next scheduled job."}
 
