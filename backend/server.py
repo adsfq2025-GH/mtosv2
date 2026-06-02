@@ -156,7 +156,14 @@ app.add_middleware(
 @api.get("/")
 async def root():
     await _ensure_db_ready()
-    return {"name": "Monthly Touch OS API", "version": "1.0.0", "status": "ok", "db_ready": DB_READY}
+    return {
+        "name": "Monthly Touch OS API",
+        "version": "1.0.0",
+        "status": "ok",
+        "db_ready": DB_READY,
+        "google_login_configured": bool(GOOGLE_OAUTH_CLIENT_ID),
+        "google_oauth_configured": bool(GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET and GOOGLE_OAUTH_REDIRECT_URI),
+    }
 
 
 # ===================== AUTH =====================
