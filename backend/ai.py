@@ -58,6 +58,10 @@ MODEL_REGISTRY: Dict[str, Dict[str, str]] = {
         "provider": "openrouter",
         "model": "google/gemini-2.5-pro",
     },
+    "gemini-direct": {
+        "provider": "gemini",
+        "model": "gemini-2.5-pro",
+    },
     "deepseek-r1": {
         "provider": "openrouter",
         "model": "deepseek/deepseek-r1",
@@ -96,6 +100,11 @@ PROVIDER_CONFIG: Dict[str, Dict[str, Any]] = {
         "api_key_env": "OPENAI_API_KEY",
         "headers_extra": {},
     },
+    "gemini": {
+        "url": "https://generativelanguage.googleapis.com/v1beta/models",
+        "api_key_env": "GEMINI_API_KEY",
+        "headers_extra": {},
+    },
 }
 
 # Failover chain: when a provider fails, escalate to next
@@ -103,6 +112,7 @@ FAILOVER_CHAIN: Dict[str, Dict[str, Any]] = {
     "groq":       {"next_provider": "openrouter", "fallback_model_key": "claude-sonnet"},
     "openrouter": {"next_provider": "openai",     "fallback_model_key": "gpt-premium"},
     "openai":     {"next_provider": None,          "fallback_model_key": None},  # terminal
+    "gemini":     {"next_provider": "openrouter", "fallback_model_key": "claude-sonnet"},
 }
 
 REQUEST_TIMEOUT = 90   # seconds
@@ -130,12 +140,31 @@ async def _call_provider(
             f"Missing API key for {provider!r}. Set {cfg['api_key_env']}."
         )
 
-    headers: Dict[str, str] = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        **cfg["headers_extra"],
-    }
-    payload: Dict[str, Any] = {"model": model, "messages": messages}
+    headers: Dict[str, str] = {"Content-Type": "application/json", **cfg["headers_extra"]}
+    payload: Dict[str, Any]
+    params: Dict[str, Any] = {}
+
+    if provider == "gemini":
+        system_text = ""
+        user_text = ""
+        for m in messages:
+            if (m.get("role") or "") == "system":
+                system_text = str(m.get("content") or "")
+            elif (m.get("role") or "") == "user":
+                user_text = str(m.get("content") or "")
+        url = f"{cfg['url'].rstrip('/')}/{model}:generateContent"
+        params = {"key": api_key}
+        if system_text:
+            payload = {
+                "system_instruction": {"parts": [{"text": system_text}]},
+                "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+            }
+        else:
+            payload = {"contents": [{"role": "user", "parts": [{"text": user_text}]}]}
+    else:
+        headers = {"Authorization": f"Bearer {api_key}", **headers}
+        payload = {"model": model, "messages": messages}
+        url = cfg["url"]
     last_exc: Optional[Exception] = None
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -146,7 +175,7 @@ async def _call_provider(
                 attempt, provider, model, session_id or "—",
             )
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                resp = await client.post(cfg["url"], headers=headers, json=payload)
+                resp = await client.post(url, headers=headers, params=params, json=payload)
 
             elapsed = time.perf_counter() - t0
             logger.info(
@@ -160,6 +189,13 @@ async def _call_provider(
                 )
 
             data    = resp.json()
+            if provider == "gemini":
+                candidates = data.get("candidates") or []
+                parts = ((candidates[0] or {}).get("content") or {}).get("parts") if candidates else None
+                content = (parts[0] or {}).get("text") if parts else None
+                if not content:
+                    raise AIProviderError("Gemini returned no content")
+                return content if isinstance(content, str) else str(content)
             content = data["choices"][0]["message"]["content"]
             return content if isinstance(content, str) else str(content)
 
