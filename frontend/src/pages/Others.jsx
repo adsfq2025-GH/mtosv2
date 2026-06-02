@@ -134,7 +134,14 @@ export function Integrations() {
     "google_ads",
   ]);
 
-  const openConfig = (i) => { setEdit(i); setForm({}); };
+  const openConfig = (i) => {
+    setEdit(i);
+    const next = {};
+    (i.fields || []).forEach((f) => {
+      if (!f.secret) next[f.key] = (i.metadata || {})[f.key] || "";
+    });
+    setForm(next);
+  };
   const save = async (e) => {
     e.preventDefault(); setBusy(true);
     try {
@@ -240,7 +247,18 @@ export function Integrations() {
                   {edit.fields.map((f) => (
                     <div key={f.key}>
                       <label className="label">{f.label}{f.secret && <span className="ml-2 text-[10px] text-[#2FE0C2]">encrypted</span>}</label>
-                      <input className="input mt-1.5" type={f.secret ? "password" : "text"} value={form[f.key] || ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} placeholder={f.help || ""} data-testid={`field-${edit.platform}-${f.key}`} />
+                      <input
+                        className="input mt-1.5"
+                        type={f.secret ? "password" : "text"}
+                        value={form[f.key] || ""}
+                        onChange={(e) => setForm({ ...form, [f.key]: e.target.value })}
+                        placeholder={
+                          f.secret && (edit.configured_field_keys || []).includes(f.key)
+                            ? `Saved (leave blank to keep)${f.help ? ` · ${f.help}` : ""}`
+                            : (f.help || "")
+                        }
+                        data-testid={`field-${edit.platform}-${f.key}`}
+                      />
                       {f.help && <div className="text-[11px] text-slate-500 mt-1">{f.help}</div>}
                     </div>
                   ))}

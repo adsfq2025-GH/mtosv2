@@ -63,7 +63,7 @@ export function Login() {
       el.innerHTML = "";
       window.google.accounts.id.renderButton(el, { theme: "outline", size: "large", width: 360 });
     }
-  }, [googleReady]);
+  }, [googleReady, loginWithGoogle, navigate]);
 
   return (
     <div className="app-bg min-h-screen grid lg:grid-cols-2">

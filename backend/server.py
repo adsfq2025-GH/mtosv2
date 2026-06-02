@@ -76,7 +76,7 @@ DB_READY = False
 
 
 def tenant_scope(tenant_id: str) -> dict:
-    return {"$or": [{"tenant_id": tenant_id}, {"tenant_id": {"$exists": False}}]}
+    return {"tenant_id": tenant_id}
 
 
 GOOGLE_OAUTH_PLATFORMS = {

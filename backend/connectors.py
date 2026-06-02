@@ -12,7 +12,7 @@ from integrations_meta import demo_kpi_snapshot
 
 
 def _tenant_scope(tenant_id: str) -> dict:
-    return {"$or": [{"tenant_id": tenant_id}, {"tenant_id": {"$exists": False}}]}
+    return {"tenant_id": tenant_id}
 
 
 async def _get_integration_doc(tenant_id: str, platform: str) -> Optional[dict]:
