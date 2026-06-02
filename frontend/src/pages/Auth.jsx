@@ -16,7 +16,13 @@ export function Login() {
   const submit = async (e) => {
     e.preventDefault(); setErr(""); setLoading(true);
     try { await login(email, password); navigate("/"); }
-    catch (e) { setErr(e?.response?.data?.detail || "Login failed"); }
+    catch (e) {
+      const detail = e?.response?.data?.detail;
+      const status = e?.response?.status;
+      if (detail) setErr(String(detail));
+      else if (status) setErr(`Login failed (HTTP ${status})`);
+      else setErr(`Login failed (${e?.message || "Network error"})`);
+    }
     finally { setLoading(false); }
   };
 
