@@ -78,14 +78,14 @@ export function ClientDetail() {
   const [client, setClient] = useState(null);
   const [meets, setMeets] = useState([]);
   const [actions, setActions] = useState([]);
-  const [clickupListId, setClickupListId] = useState("");
+  const [clickupFolderId, setClickupFolderId] = useState("");
   const [gohighlevelLocationId, setGohighlevelLocationId] = useState("");
   const [savingBindings, setSavingBindings] = useState(false);
   const [savingGhlBinding, setSavingGhlBinding] = useState(false);
   const [showClickupPicker, setShowClickupPicker] = useState(false);
   const [clickupWorkspaces, setClickupWorkspaces] = useState([]);
   const [clickupTeamId, setClickupTeamId] = useState("");
-  const [clickupLists, setClickupLists] = useState([]);
+  const [clickupFolders, setClickupFolders] = useState([]);
   const [clickupQ, setClickupQ] = useState("");
   const [loadingClickup, setLoadingClickup] = useState(false);
   const [showGhlPicker, setShowGhlPicker] = useState(false);
@@ -99,8 +99,8 @@ export function ClientDetail() {
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
       setClient(c); setMeets(m); setActions(a);
       const clickup = (b || []).find((x) => x.platform === "clickup");
-      const listId = clickup?.external_ids?.list_id || clickup?.config?.list_id || "";
-      setClickupListId(listId ? String(listId) : "");
+      const folderId = clickup?.external_ids?.folder_id || clickup?.config?.folder_id || "";
+      setClickupFolderId(folderId ? String(folderId) : "");
       const ghl = (b || []).find((x) => x.platform === "gohighlevel");
       const locId = ghl?.external_ids?.location_id || ghl?.config?.location_id || "";
       setGohighlevelLocationId(locId ? String(locId) : "");
@@ -129,7 +129,7 @@ export function ClientDetail() {
   const saveClickupBinding = async () => {
     setSavingBindings(true);
     try {
-      await clients.upsertBinding(id, "clickup", { enabled: true, external_ids: { list_id: clickupListId } });
+      await clients.upsertBinding(id, "clickup", { enabled: true, external_ids: { folder_id: clickupFolderId } });
       await reload();
     } catch (e) {
       alert(e?.response?.data?.detail || "Failed to save ClickUp binding");
@@ -161,14 +161,14 @@ export function ClientDetail() {
       const teamId = list?.[0]?.id ? String(list[0].id) : "";
       setClickupTeamId(teamId);
       if (teamId) {
-        const res = await integrations.clickupLists(teamId);
-        setClickupLists(res?.lists || []);
+        const res = await integrations.clickupFolders(teamId);
+        setClickupFolders(res?.folders || []);
       } else {
-        setClickupLists([]);
+        setClickupFolders([]);
       }
     } catch (e) {
       alert(e?.response?.data?.detail || "Failed to load ClickUp data");
-      setClickupWorkspaces([]); setClickupLists([]); setClickupTeamId("");
+      setClickupWorkspaces([]); setClickupFolders([]); setClickupTeamId("");
     } finally {
       setLoadingClickup(false);
     }
@@ -178,11 +178,11 @@ export function ClientDetail() {
     setClickupTeamId(teamId);
     setLoadingClickup(true);
     try {
-      const res = await integrations.clickupLists(teamId);
-      setClickupLists(res?.lists || []);
+      const res = await integrations.clickupFolders(teamId);
+      setClickupFolders(res?.folders || []);
     } catch (e) {
-      alert(e?.response?.data?.detail || "Failed to load ClickUp lists");
-      setClickupLists([]);
+      alert(e?.response?.data?.detail || "Failed to load ClickUp folders");
+      setClickupFolders([]);
     } finally {
       setLoadingClickup(false);
     }
@@ -243,12 +243,12 @@ export function ClientDetail() {
           </div>
           <div className="divider my-4" />
           <div className="label mb-2">ClickUp Mapping</div>
-          <label className="text-[11px] text-slate-500">List ID</label>
+          <label className="text-[11px] text-slate-500">Folder ID</label>
           <div className="flex gap-2 mt-1.5">
-            <input className="input flex-1" value={clickupListId} onChange={(e) => setClickupListId(e.target.value)} placeholder="123456789" data-testid="clickup-list-id" />
-            <button type="button" className="btn-ghost whitespace-nowrap" onClick={openClickupPicker} data-testid="browse-clickup-lists">Browse</button>
+            <input className="input flex-1" value={clickupFolderId} onChange={(e) => setClickupFolderId(e.target.value)} placeholder="123456789" data-testid="clickup-folder-id" />
+            <button type="button" className="btn-ghost whitespace-nowrap" onClick={openClickupPicker} data-testid="browse-clickup-folders">Browse</button>
           </div>
-          <button className="btn-ghost w-full mt-2" onClick={saveClickupBinding} disabled={savingBindings} data-testid="save-clickup-binding">{savingBindings ? "Saving…" : "Save ClickUp List"}</button>
+          <button className="btn-ghost w-full mt-2" onClick={saveClickupBinding} disabled={savingBindings} data-testid="save-clickup-binding">{savingBindings ? "Saving…" : "Save ClickUp Folder"}</button>
           <div className="divider my-4" />
           <div className="label mb-2">GoHighLevel Mapping</div>
           <label className="text-[11px] text-slate-500">Location ID</label>
@@ -315,8 +315,8 @@ export function ClientDetail() {
           <div onClick={(e) => e.stopPropagation()} className="card-flat p-6 w-full max-w-2xl" data-testid="clickup-picker">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <div className="text-lg font-semibold">Pick ClickUp List</div>
-                <div className="text-xs text-slate-400">Choose the List that represents this client.</div>
+                <div className="text-lg font-semibold">Pick ClickUp Folder</div>
+                <div className="text-xs text-slate-400">Choose the Folder that represents this client.</div>
               </div>
               <button type="button" className="btn-ghost !p-2" onClick={() => setShowClickupPicker(false)}><X size={14} /></button>
             </div>
@@ -330,21 +330,21 @@ export function ClientDetail() {
                 <input className="input mt-1.5" value={clickupQ} onChange={(e) => setClickupQ(e.target.value)} placeholder="Client name…" />
               </div>
               <div className="md:col-span-2">
-                <div className="label">Lists</div>
+                <div className="label">Folders</div>
                 <div className="mt-2 max-h-[55vh] overflow-y-auto scroll-thin border border-white/5 rounded-md">
                   {loadingClickup && <div className="p-4 text-sm text-slate-400">Loading…</div>}
-                  {!loadingClickup && (clickupLists || []).filter((l) => !clickupQ || `${l.name} ${l.space || ""} ${l.folder || ""}`.toLowerCase().includes(clickupQ.toLowerCase())).map((l) => (
+                  {!loadingClickup && (clickupFolders || []).filter((f) => !clickupQ || `${f.name} ${f.space || ""}`.toLowerCase().includes(clickupQ.toLowerCase())).map((f) => (
                     <button
-                      key={l.id}
+                      key={f.id}
                       type="button"
                       className="w-full text-left p-3 border-b border-white/5 hover:bg-white/[0.03]"
-                      onClick={() => { setClickupListId(String(l.id)); setShowClickupPicker(false); }}
+                      onClick={() => { setClickupFolderId(String(f.id)); setShowClickupPicker(false); }}
                     >
-                      <div className="text-sm font-medium">{l.name}</div>
-                      <div className="text-xs text-slate-500 mt-0.5">{[l.space, l.folder].filter(Boolean).join(" · ")} · <span className="mono">{l.id}</span></div>
+                      <div className="text-sm font-medium">{f.name}</div>
+                      <div className="text-xs text-slate-500 mt-0.5">{f.space || ""} · <span className="mono">{f.id}</span></div>
                     </button>
                   ))}
-                  {!loadingClickup && (clickupLists || []).length === 0 && <div className="p-4 text-sm text-slate-400">No lists found.</div>}
+                  {!loadingClickup && (clickupFolders || []).length === 0 && <div className="p-4 text-sm text-slate-400">No folders found.</div>}
                 </div>
               </div>
             </div>

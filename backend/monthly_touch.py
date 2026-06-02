@@ -58,12 +58,52 @@ async def _push_action_item_to_clickup(item: ActionItem, client_id: str) -> Acti
     creds = await connectors.get_credentials("clickup")
     binding = await connectors.get_client_binding(client_id, "clickup")
     token = (creds or {}).get("api_token", "").strip()
-    list_id = (binding.get("external_ids") or {}).get("list_id") or (binding.get("config") or {}).get("list_id")
-    if not token or not list_id:
+    external_ids = (binding.get("external_ids") or {}) if binding else {}
+    config = (binding.get("config") or {}) if binding else {}
+    list_id = external_ids.get("action_list_id") or external_ids.get("list_id") or config.get("action_list_id") or config.get("list_id")
+    folder_id = external_ids.get("folder_id") or config.get("folder_id")
+    if not token or (not list_id and not folder_id):
         return item
 
-    url = f"https://api.clickup.com/api/v2/list/{list_id}/task"
-    headers = {"Authorization": token, "Content-Type": "application/json"}
+    headers = {"Authorization": token, "Content-Type": "application/json", "Accept": "application/json"}
+
+    async def ensure_action_list_id() -> Optional[str]:
+        nonlocal list_id
+        if list_id:
+            return str(list_id)
+        if not folder_id:
+            return None
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"https://api.clickup.com/api/v2/folder/{folder_id}/list", headers={"Authorization": token, "Accept": "application/json"}, params={"archived": "false"})
+        if resp.status_code == 200:
+            lists = (resp.json() or {}).get("lists") or []
+            for l in lists:
+                if (l.get("name") or "").strip().lower() == "mtos action items" and l.get("id"):
+                    list_id = str(l.get("id"))
+                    break
+            if not list_id and lists and (lists[0] or {}).get("id"):
+                list_id = str((lists[0] or {}).get("id"))
+        if not list_id:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp2 = await client.post(
+                    f"https://api.clickup.com/api/v2/folder/{folder_id}/list",
+                    headers={"Authorization": token, "Content-Type": "application/json", "Accept": "application/json"},
+                    json={"name": "MTOS Action Items"},
+                )
+            if resp2.status_code in (200, 201):
+                list_id = str((resp2.json() or {}).get("id") or (resp2.json() or {}).get("list", {}).get("id") or "")
+        if list_id:
+            await db.client_integration_bindings.update_one(
+                {"client_id": client_id, "platform": "clickup"},
+                {"$set": {"external_ids.action_list_id": str(list_id), "updated_at": utcnow().isoformat()}},
+            )
+        return str(list_id) if list_id else None
+
+    target_list_id = await ensure_action_list_id()
+    if not target_list_id:
+        return item
+
+    url = f"https://api.clickup.com/api/v2/list/{target_list_id}/task"
     payload: Dict[str, Any] = {"name": item.title, "description": item.description or ""}
 
     async with httpx.AsyncClient(timeout=30) as client:

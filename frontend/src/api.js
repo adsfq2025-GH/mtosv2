@@ -81,6 +81,7 @@ export const integrations = {
   disconnect: (platform) => api.delete(`/integrations/${platform}`).then((r) => r.data),
   clickupWorkspaces: () => api.get("/integrations/clickup/workspaces").then((r) => r.data),
   clickupLists: (teamId) => api.get(`/integrations/clickup/lists${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`).then((r) => r.data),
+  clickupFolders: (teamId) => api.get(`/integrations/clickup/folders${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`).then((r) => r.data),
   gohighlevelLocations: () => api.get("/integrations/gohighlevel/locations").then((r) => r.data),
 };
 

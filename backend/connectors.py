@@ -65,13 +65,35 @@ def _safe_err_detail(resp: httpx.Response) -> str:
 
 async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[str, Any]:
     token = _strip_bearer((creds or {}).get("api_token", ""))
-    list_id = (binding.get("external_ids") or {}).get("list_id") or (binding.get("config") or {}).get("list_id")
-    if not token or not list_id:
+    team_id = (
+        (binding.get("external_ids") or {}).get("team_id")
+        or (binding.get("config") or {}).get("team_id")
+        or (creds or {}).get("team_id")
+    )
+    folder_id = (binding.get("external_ids") or {}).get("folder_id") or (binding.get("config") or {}).get("folder_id")
+    if not token or not folder_id:
         return {}
 
-    headers = {"Authorization": token}
-    url = f"https://api.clickup.com/api/v2/list/{list_id}/task"
-    params = {"archived": "false", "include_closed": "true", "page": 0}
+    headers = {"Authorization": token, "Accept": "application/json"}
+    if not team_id:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get("https://api.clickup.com/api/v2/team", headers=headers)
+        if r.status_code == 200:
+            teams = (r.json() or {}).get("teams") or []
+            team_id = (teams[0] or {}).get("id") if teams else None
+        if not team_id:
+            return {"error": "clickup_missing_team_id", "error_detail": "Missing ClickUp workspace/team_id. Set it in Integrations → ClickUp."}
+
+    start_d, _ = _last_30_days_range()
+    date_updated_gt = str(int(start_d.replace(tzinfo=timezone.utc).timestamp() * 1000))
+    url = f"https://api.clickup.com/api/v2/team/{team_id}/task"
+    params = [
+        ("include_closed", "true"),
+        ("subtasks", "true"),
+        ("date_updated_gt", date_updated_gt),
+        ("project_ids[]", str(folder_id)),
+        ("page", "0"),
+    ]
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers=headers, params=params)
@@ -114,7 +136,8 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[st
         "open_tasks": open_tasks,
         "overdue_tasks": overdue_tasks,
         "completed_last_30_days": completed_recent,
-        "list_id": str(list_id),
+        "team_id": str(team_id),
+        "folder_id": str(folder_id),
     }
 
 
@@ -192,12 +215,14 @@ async def build_kpi_snapshot(client_id: str, client_name: str = "") -> Dict[str,
 
     clickup_creds = await get_credentials("clickup")
     clickup_binding = await get_client_binding(client_id, "clickup")
-    if (clickup_creds or {}).get("api_token") and clickup_binding:
-        clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding)
-        if clickup_data:
-            snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
-    elif (clickup_creds or {}).get("api_token") and not clickup_binding:
-        snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_missing_client_mapping", "error_detail": "Missing ClickUp List ID mapping for this client."}
+    if (clickup_creds or {}).get("api_token"):
+        folder_id = ((clickup_binding or {}).get("external_ids") or {}).get("folder_id") or ((clickup_binding or {}).get("config") or {}).get("folder_id")
+        if clickup_binding and folder_id:
+            clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding)
+            if clickup_data:
+                snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
+        else:
+            snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_missing_client_mapping", "error_detail": "Missing ClickUp Folder ID mapping for this client."}
 
     ghl_creds = await get_credentials("gohighlevel")
     ghl_binding = await get_client_binding(client_id, "gohighlevel")
@@ -274,6 +299,43 @@ async def list_clickup_workspaces() -> Dict[str, Any]:
     data = resp.json() or {}
     teams = data.get("teams") or []
     return {"ok": True, "workspaces": [{"id": str(t.get("id")), "name": t.get("name")} for t in teams if t.get("id")]}
+
+
+async def list_clickup_folders(team_id: str) -> Dict[str, Any]:
+    creds = await get_credentials("clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return {"ok": False, "error": "missing_api_token"}
+    if not team_id:
+        return {"ok": False, "error": "missing_team_id"}
+    headers = {"Authorization": token, "Accept": "application/json"}
+
+    async def get_json(url: str):
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(url, headers=headers, params={"archived": "false"})
+        if r.status_code != 200:
+            raise HTTPException(400, f"ClickUp error {r.status_code}: {_safe_err_detail(r)}")
+        return r.json() or {}
+
+    spaces = (await get_json(f"https://api.clickup.com/api/v2/team/{team_id}/space")).get("spaces") or []
+    folders = []
+    for s in spaces:
+        sid = s.get("id")
+        sname = s.get("name")
+        if not sid:
+            continue
+        space_folders = (await get_json(f"https://api.clickup.com/api/v2/space/{sid}/folder")).get("folders") or []
+        for f in space_folders:
+            fid = f.get("id")
+            if fid:
+                folders.append({"id": str(fid), "name": f.get("name"), "space": sname})
+
+    uniq = {}
+    for f in folders:
+        uniq[f["id"]] = f
+    out = list(uniq.values())
+    out.sort(key=lambda x: (x.get("space") or "", x.get("name") or ""))
+    return {"ok": True, "folders": out}
 
 
 async def list_clickup_lists(team_id: str) -> Dict[str, Any]:
