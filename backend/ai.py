@@ -273,6 +273,26 @@ def _extract_json(text: str) -> Dict[str, Any]:
         return {}
 
 
+JSON_REPAIR_SYSTEM = "You fix JSON. Return a single valid JSON object only. No markdown, no commentary."
+
+
+async def _extract_or_repair_json(
+    raw: str,
+    model_key: str,
+    session_id: Optional[str],
+) -> Dict[str, Any]:
+    data = _extract_json(raw)
+    if data:
+        return data
+    fix_text = (
+        "Convert the following into a single valid JSON object. "
+        "Keep the same keys/structure as intended. Output JSON only.\n\n"
+        f"{raw[:12000]}"
+    )
+    fixed = await run_chat(JSON_REPAIR_SYSTEM, fix_text, model_key, (session_id or "ai") + "-repair")
+    return _extract_json(fixed)
+
+
 # ─────────────────────────────────────────────
 # Meeting Brief
 # ─────────────────────────────────────────────
@@ -355,8 +375,8 @@ async def generate_meeting_brief(
         kpi_json=json.dumps(kpi_snapshot, default=str, indent=2),
         extra=extra_context or "(none)",
     )
-    raw  = await run_chat(BRIEF_SYSTEM, user_text, model_key, session_id)
-    data = _extract_json(raw)
+    raw = await run_chat(BRIEF_SYSTEM, user_text, model_key, session_id)
+    data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
         "wins":                      (data.get("wins") or [])[:3],
         "wins_library":              data.get("wins_library") or (data.get("wins") or []),
@@ -431,8 +451,8 @@ async def analyze_transcript(
         am_name=am_name or "Account Manager",
         transcript=transcript[:18_000],
     )
-    raw  = await run_chat(TRANSCRIPT_SYSTEM, user_text, model_key, session_id)
-    data = _extract_json(raw)
+    raw = await run_chat(TRANSCRIPT_SYSTEM, user_text, model_key, session_id)
+    data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
         "summary":                 data.get("summary", ""),
         "sentiment":               data.get("sentiment", "neutral"),
@@ -497,8 +517,8 @@ async def generate_recap(
         issues=json.dumps(issues, default=str),
         actions=json.dumps(actions, default=str),
     )
-    raw  = await run_chat(RECAP_SYSTEM, user_text, model_key, session_id)
-    data = _extract_json(raw)
+    raw = await run_chat(RECAP_SYSTEM, user_text, model_key, session_id)
+    data = await _extract_or_repair_json(raw, model_key, session_id)
     if not data:
         return {"subject": f"Recap — {title}", "html": f"<pre>{raw}</pre>", "plain": raw}
     return {
@@ -557,7 +577,7 @@ async def generate_meeting_workflow(
         transcript=(transcript or "")[:18_000],
     )
     raw = await run_chat(WORKFLOW_SYSTEM, user_text, model_key, session_id)
-    data = _extract_json(raw)
+    data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
         "meeting_summary": data.get("meeting_summary", ""),
         "client_recap_email": data.get("client_recap_email") or {},
@@ -623,7 +643,7 @@ async def score_meeting_qa(
         checklist_json=json.dumps(checklist or {}, default=str),
     )
     raw = await run_chat(QA_SYSTEM, user_text, model_key, session_id)
-    data = _extract_json(raw)
+    data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
         "total_score": int(data.get("total_score") or 0),
         "dimensions": data.get("dimensions") or {},

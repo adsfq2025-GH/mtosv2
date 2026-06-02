@@ -11,6 +11,12 @@ function ModelSelect({ value, onChange }) {
   const [models, setModels] = useState([]);
   const loadModels = useCallback(() => { aiModels.list().then(setModels).catch(() => {}); }, []);
   useEffect(() => { loadModels(); }, [loadModels]);
+  useEffect(() => {
+    if (!models.length) return;
+    if (models.some((m) => m.key === value)) return;
+    const preferred = models.find((m) => m.recommended) || models[0];
+    if (preferred?.key) onChange(preferred.key);
+  }, [models, onChange, value]);
   return (
     <select className="input !w-auto !py-2 !px-3 text-sm" value={value} onChange={(e) => onChange(e.target.value)} data-testid="ai-model-select">
       {models.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
@@ -27,6 +33,7 @@ export default function MeetingDetail() {
   const [tab, setTab] = useState("brief");
   const [transcript, setTranscript] = useState("");
   const [busy, setBusy] = useState("");
+  const [aiErr, setAiErr] = useState("");
   const [actions, setActions] = useState([]);
   const [content, setContent] = useState([]);
   const [recap, setRecap] = useState(null);
@@ -56,13 +63,18 @@ export default function MeetingDetail() {
 
   const genBrief = async () => {
     setBusy("brief");
+    setAiErr("");
     try {
       const meeting = await meetings.generateBrief(id, { model });
       setM(meeting);
       setChecklist(meeting.checklist || {});
       await reload().catch(() => {});
     } catch (e) {
-      alert(e?.response?.data?.detail || "Brief generation failed");
+      const detail = e?.response?.data?.detail;
+      const status = e?.response?.status;
+      if (detail) setAiErr(String(detail));
+      else if (status) setAiErr(`Brief generation failed (HTTP ${status})`);
+      else setAiErr(`Brief generation failed (${e?.message || "Network error"})`);
     } finally {
       setBusy("");
     }
@@ -184,7 +196,7 @@ export default function MeetingDetail() {
           <>
             <ModelSelect value={model} onChange={setModel} />
             <button className="btn-ghost flex items-center gap-2" onClick={genBrief} disabled={busy === "brief"} data-testid="generate-brief-btn">
-              {busy === "brief" ? <ArrowsClockwise size={14} className="animate-spin" /> : <Sparkle size={14} weight="duotone" />} {m.brief_generated_at ? "Regenerate Brief" : "Generate Brief"}
+              {busy === "brief" ? <ArrowsClockwise size={14} className="animate-spin" /> : <Sparkle size={14} weight="duotone" />} {busy === "brief" ? "Generating…" : (m.brief_generated_at ? "Regenerate Brief" : "Generate Brief")}
             </button>
             <button className="btn-ghost flex items-center gap-2" onClick={exportHtml} disabled={busy === "export"} data-testid="export-html-btn">
               {busy === "export" ? <ArrowsClockwise size={14} className="animate-spin" /> : <FileText size={14} weight="duotone" />} Export HTML
@@ -193,6 +205,7 @@ export default function MeetingDetail() {
           </>
         }
       />
+      {aiErr && <div className="card-flat p-4 mb-5 border border-red-500/30 bg-red-500/10 text-red-200 text-sm" data-testid="ai-error">{aiErr}</div>}
 
       {/* Tabs */}
       <div className="flex items-center gap-1 mb-5 overflow-x-auto">
