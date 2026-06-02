@@ -262,6 +262,16 @@ class IntegrationConfigureIn(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class UserOAuthToken(BaseDocument):
+    tenant_id: Optional[str] = None
+    user_id: str
+    provider: str
+    platform: str
+    refresh_token_encrypted: str
+    scopes: List[str] = Field(default_factory=list)
+    account_email: Optional[str] = None
+
+
 class ClientIntegrationBinding(BaseDocument):
     tenant_id: Optional[str] = None
     client_id: str

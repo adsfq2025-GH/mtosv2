@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -26,6 +27,15 @@ async def get_credentials(tenant_id: str, platform: str) -> Dict[str, str]:
     meta = doc.get("metadata") or {}
     dec = {k: decrypt_secret(v) for k, v in enc.items()} if enc else {}
     return {**meta, **dec}
+
+
+async def get_google_refresh_token(tenant_id: str, user_id: str, platform: str) -> str:
+    doc = await db.user_oauth_tokens.find_one(
+        {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform}
+    )
+    if not doc:
+        return ""
+    return decrypt_secret(doc.get("refresh_token_encrypted") or "")
 
 
 async def get_client_binding(tenant_id: str, client_id: str, platform: str) -> Optional[dict]:
@@ -219,8 +229,8 @@ async def fetch_gohighlevel_monthly(creds: Dict[str, str], binding: dict) -> Dic
 
 async def _google_ads_access_token(creds: Dict[str, str]) -> str:
     rt = (creds or {}).get("refresh_token")
-    cid = (creds or {}).get("oauth_client_id")
-    secret = (creds or {}).get("oauth_client_secret")
+    cid = (creds or {}).get("oauth_client_id") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+    secret = (creds or {}).get("oauth_client_secret") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
     if not rt or not cid or not secret:
         raise ValueError("Missing Google OAuth credentials")
     payload = {
@@ -321,7 +331,7 @@ async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict) -> Dict
     }
 
 
-async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = "") -> Dict[str, Any]:
+async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = "", user_id: Optional[str] = None) -> Dict[str, Any]:
     snapshot = demo_kpi_snapshot(client_name)
 
     clickup_creds = await get_credentials(tenant_id, "clickup")
@@ -346,13 +356,23 @@ async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = 
 
     gads_creds = await get_credentials(tenant_id, "google_ads")
     gads_binding = await get_client_binding(tenant_id, client_id, "google_ads")
-    if (gads_creds or {}).get("developer_token") and (gads_creds or {}).get("refresh_token"):
-        try:
-            gads_data = await fetch_google_ads_monthly(gads_creds, gads_binding or {"external_ids": {}, "config": {}})
-            if gads_data:
-                snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), **gads_data}
-        except Exception as exc:
-            snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_error", "error_detail": str(exc)[:300]}
+    if any(str(v or "").strip() for v in (gads_creds or {}).values()) or user_id:
+        if not str((gads_creds or {}).get("developer_token") or "").strip():
+            snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_incomplete_setup", "error_detail": "Missing Google Ads developer_token in Integrations → Google Ads."}
+        elif not user_id:
+            snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_missing_user", "error_detail": "Missing user context to run Google Ads sync."}
+        else:
+            rt = await get_google_refresh_token(tenant_id, user_id, "google_ads")
+            if not rt:
+                snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_missing_google_connection", "error_detail": "Connect Google for Google Ads first."}
+            else:
+                merged = {**gads_creds, "refresh_token": rt}
+                try:
+                    gads_data = await fetch_google_ads_monthly(merged, gads_binding or {"external_ids": {}, "config": {}})
+                    if gads_data:
+                        snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), **gads_data}
+                except Exception as exc:
+                    snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_error", "error_detail": str(exc)[:300]}
 
     return snapshot
 
@@ -406,11 +426,15 @@ async def test_gohighlevel(tenant_id: str) -> Dict[str, Any]:
     return {"ok": True, "total": meta.get("total")}
 
 
-async def list_google_ads_customers(tenant_id: str) -> Dict[str, Any]:
+async def list_google_ads_customers(tenant_id: str, user_id: str) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "google_ads")
     developer_token = (creds or {}).get("developer_token")
     if not developer_token:
         return {"ok": False, "error": "missing_developer_token"}
+    refresh_token = await get_google_refresh_token(tenant_id, user_id, "google_ads")
+    if not refresh_token:
+        return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Ads first."}
+    creds = {**creds, "refresh_token": refresh_token}
     try:
         access_token = await _google_ads_access_token(creds)
     except Exception as exc:
@@ -434,14 +458,25 @@ async def list_google_ads_customers(tenant_id: str) -> Dict[str, Any]:
 
 
 async def test_google_ads(tenant_id: str) -> Dict[str, Any]:
-    res = await list_google_ads_customers(tenant_id)
+    return {"ok": False, "error": "missing_user_id"}
+
+
+async def test_google_ads_for_user(tenant_id: str, user_id: str) -> Dict[str, Any]:
+    res = await list_google_ads_customers(tenant_id, user_id)
     if not res.get("ok"):
         return res
     return {"ok": True, "customers_found": len(res.get("customers") or [])}
 
 
 async def test_google_meet(tenant_id: str) -> Dict[str, Any]:
-    creds = await get_credentials(tenant_id, "google_meet")
+    return {"ok": False, "error": "missing_user_id"}
+
+
+async def test_google_meet_for_user(tenant_id: str, user_id: str) -> Dict[str, Any]:
+    rt = await get_google_refresh_token(tenant_id, user_id, "google_meet")
+    if not rt:
+        return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Meet first."}
+    creds = {"refresh_token": rt}
     try:
         await _google_ads_access_token(creds)
         return {"ok": True}
@@ -466,8 +501,11 @@ def _meet_code_from_url(url: str) -> Optional[str]:
     return None
 
 
-async def list_google_meet_conference_records(tenant_id: str, meet_code: str) -> Dict[str, Any]:
-    creds = await get_credentials(tenant_id, "google_meet")
+async def list_google_meet_conference_records(tenant_id: str, user_id: str, meet_code: str) -> Dict[str, Any]:
+    rt = await get_google_refresh_token(tenant_id, user_id, "google_meet")
+    if not rt:
+        return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Meet first."}
+    creds = {"refresh_token": rt}
     try:
         access_token = await _google_ads_access_token(creds)
     except Exception as exc:
@@ -482,8 +520,11 @@ async def list_google_meet_conference_records(tenant_id: str, meet_code: str) ->
     return {"ok": True, "conference_records": data.get("conferenceRecords") or []}
 
 
-async def _get_google_meet_transcripts(tenant_id: str, conference_record_name: str) -> Dict[str, Any]:
-    creds = await get_credentials(tenant_id, "google_meet")
+async def _get_google_meet_transcripts(tenant_id: str, user_id: str, conference_record_name: str) -> Dict[str, Any]:
+    rt = await get_google_refresh_token(tenant_id, user_id, "google_meet")
+    if not rt:
+        return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Meet first."}
+    creds = {"refresh_token": rt}
     try:
         access_token = await _google_ads_access_token(creds)
     except Exception as exc:
@@ -498,8 +539,11 @@ async def _get_google_meet_transcripts(tenant_id: str, conference_record_name: s
     return {"ok": True, "transcripts": data.get("transcripts") or []}
 
 
-async def _google_docs_document(tenant_id: str, document_id: str) -> Dict[str, Any]:
-    creds = await get_credentials(tenant_id, "google_meet")
+async def _google_docs_document(tenant_id: str, user_id: str, document_id: str) -> Dict[str, Any]:
+    rt = await get_google_refresh_token(tenant_id, user_id, "google_meet")
+    if not rt:
+        raise ValueError("missing_google_connection")
+    creds = {"refresh_token": rt}
     try:
         access_token = await _google_ads_access_token(creds)
     except Exception as exc:
@@ -531,12 +575,12 @@ def _extract_docs_text(doc: Dict[str, Any]) -> str:
     return "\n".join(out).strip()
 
 
-async def sync_google_meet_transcript_to_meeting(tenant_id: str, meeting: dict) -> Dict[str, Any]:
+async def sync_google_meet_transcript_to_meeting(tenant_id: str, user_id: str, meeting: dict) -> Dict[str, Any]:
     meet_code = _meet_code_from_url((meeting or {}).get("google_meet_url") or "")
     if not meet_code:
         return {"ok": False, "error": "missing_meet_url"}
 
-    recs = await list_google_meet_conference_records(tenant_id, meet_code)
+    recs = await list_google_meet_conference_records(tenant_id, user_id, meet_code)
     if not recs.get("ok"):
         return recs
     records = recs.get("conference_records") or []
@@ -548,7 +592,7 @@ async def sync_google_meet_transcript_to_meeting(tenant_id: str, meeting: dict) 
     if not record_name:
         return {"ok": False, "error": "invalid_conference_record"}
 
-    trs = await _get_google_meet_transcripts(tenant_id, record_name)
+    trs = await _get_google_meet_transcripts(tenant_id, user_id, record_name)
     if not trs.get("ok"):
         return trs
     transcripts = trs.get("transcripts") or []
@@ -563,7 +607,7 @@ async def sync_google_meet_transcript_to_meeting(tenant_id: str, meeting: dict) 
     if not document_id:
         return {"ok": False, "error": "missing_document_id"}
 
-    gdoc = await _google_docs_document(tenant_id, str(document_id))
+    gdoc = await _google_docs_document(tenant_id, user_id, str(document_id))
     text = _extract_docs_text(gdoc)
     if not text:
         return {"ok": False, "error": "empty_transcript"}

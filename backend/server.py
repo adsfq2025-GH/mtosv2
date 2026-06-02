@@ -6,14 +6,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 import zipfile
+from urllib.parse import urlencode
 
 from dotenv import load_dotenv
+import httpx
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response
 from starlette.middleware.cors import CORSMiddleware
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
 STORAGE_DIR = ROOT / "storage"
+
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
+GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "").strip()
 
 from db import db, decrypt_secret, encrypt_secret, new_id, utcnow  # noqa: E402
 from auth import (  # noqa: E402
@@ -68,6 +76,44 @@ DB_READY = False
 
 def tenant_scope(tenant_id: str) -> dict:
     return {"$or": [{"tenant_id": tenant_id}, {"tenant_id": {"$exists": False}}]}
+
+
+GOOGLE_OAUTH_PLATFORMS = {
+    "google_calendar",
+    "google_meet",
+    "google_drive",
+    "gmail",
+    "google_search_console",
+    "google_analytics",
+    "google_business_profile",
+    "google_lsa",
+    "google_ads",
+}
+
+
+def google_scopes_for_platform(platform: str) -> List[str]:
+    if platform == "google_calendar":
+        return ["https://www.googleapis.com/auth/calendar.events"]
+    if platform == "gmail":
+        return ["https://www.googleapis.com/auth/gmail.readonly"]
+    if platform == "google_drive":
+        return ["https://www.googleapis.com/auth/drive.readonly"]
+    if platform == "google_meet":
+        return [
+            "https://www.googleapis.com/auth/meetings.space.readonly",
+            "https://www.googleapis.com/auth/documents.readonly",
+        ]
+    if platform == "google_ads":
+        return ["https://www.googleapis.com/auth/adwords"]
+    if platform == "google_search_console":
+        return ["https://www.googleapis.com/auth/webmasters.readonly"]
+    if platform == "google_analytics":
+        return ["https://www.googleapis.com/auth/analytics.readonly"]
+    if platform == "google_business_profile":
+        return ["https://www.googleapis.com/auth/business.manage"]
+    if platform == "google_lsa":
+        return ["https://www.googleapis.com/auth/adwords"]
+    return []
 
 
 async def _ensure_db_ready() -> bool:
@@ -183,6 +229,119 @@ async def list_users(_: User = Depends(require_admin)):
         }
         for d in docs
     ]
+
+
+@api.get("/oauth/google/start")
+async def oauth_google_start(platform: str = Query(...), ctx=Depends(get_current_context)):
+    if platform not in GOOGLE_OAUTH_PLATFORMS:
+        raise HTTPException(400, "Unsupported platform")
+    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET or not GOOGLE_OAUTH_REDIRECT_URI:
+        raise HTTPException(500, "Google OAuth is not configured on the backend")
+    scopes = google_scopes_for_platform(platform)
+    if not scopes:
+        raise HTTPException(400, "Missing scopes for platform")
+    state = new_id()
+    await db.oauth_states.insert_one(
+        {
+            "_id": state,
+            "tenant_id": ctx.tenant_id,
+            "user_id": ctx.user.id,
+            "provider": "google",
+            "platform": platform,
+            "scopes": scopes,
+            "created_at": utcnow().isoformat(),
+        }
+    )
+    params = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+        "response_type": "code",
+        "access_type": "offline",
+        "prompt": "consent",
+        "include_granted_scopes": "true",
+        "scope": " ".join(scopes),
+        "state": state,
+    }
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+    return {"ok": True, "url": url}
+
+
+@api.get("/oauth/google/status")
+async def oauth_google_status(platform: str = Query(...), ctx=Depends(get_current_context)):
+    doc = await db.user_oauth_tokens.find_one(
+        {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": platform}
+    )
+    if not doc:
+        return {"ok": True, "connected": False}
+    return {"ok": True, "connected": True, "platform": platform, "scopes": doc.get("scopes") or [], "updated_at": doc.get("updated_at")}
+
+
+@api.post("/oauth/google/disconnect")
+async def oauth_google_disconnect(platform: str = Query(...), ctx=Depends(get_current_context)):
+    await db.user_oauth_tokens.delete_one({"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": platform})
+    return {"ok": True}
+
+
+@api.get("/oauth/google/callback")
+async def oauth_google_callback(code: str = Query(...), state: str = Query(...)):
+    st = await db.oauth_states.find_one({"_id": state, "provider": "google"})
+    if not st:
+        raise HTTPException(400, "Invalid OAuth state")
+    tenant_id = st.get("tenant_id")
+    user_id = st.get("user_id")
+    platform = st.get("platform")
+    scopes = st.get("scopes") or []
+    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET or not GOOGLE_OAUTH_REDIRECT_URI:
+        raise HTTPException(500, "Google OAuth is not configured on the backend")
+
+    payload = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post("https://oauth2.googleapis.com/token", data=payload)
+    if resp.status_code != 200:
+        await db.oauth_states.delete_one({"_id": state})
+        raise HTTPException(400, f"oauth_http_{resp.status_code}: {resp.text[:300]}")
+    data = resp.json() or {}
+    refresh_token = data.get("refresh_token") or ""
+    if not str(refresh_token).strip():
+        await db.oauth_states.delete_one({"_id": state})
+        raise HTTPException(400, "Google did not return a refresh_token. Re-run Connect and ensure prompt=consent is forced.")
+
+    now = utcnow().isoformat()
+    await db.user_oauth_tokens.update_one(
+        {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform},
+        {"$set": {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "provider": "google",
+            "platform": platform,
+            "refresh_token_encrypted": encrypt_secret(str(refresh_token)),
+            "scopes": scopes,
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+    await db.oauth_states.delete_one({"_id": state})
+
+    html = f"""<!doctype html><html><head><meta charset="utf-8"></head>
+<body><script>
+try {{
+  if (window.opener) {{
+    window.opener.postMessage({{ type: "google_oauth_success", platform: "{platform}" }}, "*");
+  }}
+}} catch (e) {{}}
+window.close();
+</script>
+<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 20px;">
+  Connected. You can close this window.
+</div>
+</body></html>"""
+    return Response(content=html, media_type="text/html")
 
 
 @api.get("/settings")
@@ -600,7 +759,7 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
     client_d = client.model_dump() if client else {"name": meeting.client_name}
-    kpi = await connectors.build_kpi_snapshot(ctx.tenant_id, meeting.client_id, client_d.get("company", ""))
+    kpi = await connectors.build_kpi_snapshot(ctx.tenant_id, meeting.client_id, client_d.get("company", ""), user_id=ctx.user.id)
     try:
         brief = await ai.generate_meeting_brief(
             client=client_d,
@@ -641,7 +800,7 @@ async def sync_google_meet_transcript(meeting_id: str, ctx=Depends(get_current_c
     if not m_doc:
         raise HTTPException(404, "Meeting not found")
     meeting = Meeting.from_mongo(m_doc)
-    res = await connectors.sync_google_meet_transcript_to_meeting(ctx.tenant_id, meeting.model_dump())
+    res = await connectors.sync_google_meet_transcript_to_meeting(ctx.tenant_id, ctx.user.id, meeting.model_dump())
     if not res.get("ok"):
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
     patch = {
@@ -992,10 +1151,22 @@ async def integrations_status(ctx=Depends(get_current_context)):
     for cat in list_integrations():
         plat = cat["platform"]
         stored = by_platform.get(plat)
+        user_tok = None
+        if plat in GOOGLE_OAUTH_PLATFORMS:
+            user_tok = await db.user_oauth_tokens.find_one(
+                {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": plat}
+            )
+        stored_status = (stored or {}).get("status", "not_connected")
+        if plat in GOOGLE_OAUTH_PLATFORMS:
+            if plat == "google_ads":
+                has_dev = bool(((stored or {}).get("credentials_encrypted") or {}).get("developer_token"))
+                stored_status = "connected" if (has_dev and user_tok) else "not_connected"
+            else:
+                stored_status = "connected" if user_tok else "not_connected"
         out.append({
             **cat,
-            "status": (stored or {}).get("status", "not_connected"),
-            "last_synced_at": (stored or {}).get("last_synced_at"),
+            "status": stored_status,
+            "last_synced_at": (stored or {}).get("last_synced_at") or (user_tok or {}).get("updated_at"),
             "last_error": (stored or {}).get("last_error"),
             "metadata": (stored or {}).get("metadata", {}),
             "configured_field_keys": list(((stored or {}).get("credentials_encrypted") or {}).keys()),
@@ -1009,7 +1180,14 @@ async def configure_integration(platform: str, data: IntegrationConfigureIn, ctx
         raise HTTPException(403, "Admin only")
     if platform not in INTEGRATIONS:
         raise HTTPException(404, "Unknown integration")
-    enc = {k: encrypt_secret(v) for k, v in (data.credentials or {}).items() if v}
+    if platform in GOOGLE_OAUTH_PLATFORMS and platform != "google_ads":
+        raise HTTPException(400, "This Google integration is connected per account manager via Connect Google.")
+    if platform == "google_ads":
+        drop = {"oauth_client_id", "oauth_client_secret", "refresh_token"}
+        creds = {k: v for k, v in (data.credentials or {}).items() if k not in drop}
+    else:
+        creds = data.credentials or {}
+    enc = {k: encrypt_secret(v) for k, v in creds.items() if v}
     existing = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
     if existing:
         merged_creds = {**(existing.get("credentials_encrypted") or {}), **enc}
@@ -1045,22 +1223,33 @@ async def test_integration(platform: str, ctx=Depends(get_current_context)):
     doc = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
     if not doc or not doc.get("credentials_encrypted"):
         raise HTTPException(400, "No credentials configured")
-    creds = {k: decrypt_secret(v) for k, v in doc.get("credentials_encrypted", {}).items()}
+    creds = {k: decrypt_secret(v) for k, v in (doc.get("credentials_encrypted", {}) or {}).items() if v}
     if not all(v is not None and str(v).strip() != "" for v in creds.values()):
+        bad_keys = []
+        enc_map = doc.get("credentials_encrypted", {}) or {}
+        for k, v in creds.items():
+            if str(v or "").strip() == "" and str(enc_map.get(k) or "").strip() != "":
+                bad_keys.append(k)
         await db.integrations.update_one(
             {"_id": doc["_id"]},
             {"$set": {"status": "error", "last_error": "Credential decryption failed", "updated_at": utcnow().isoformat()}},
         )
-        raise HTTPException(500, "Credential decryption failed")
+        detail = "Credential decryption failed. Re-enter all encrypted fields and save again."
+        if bad_keys:
+            detail = f"{detail} Undecryptable fields: {', '.join(sorted(set(bad_keys)))}"
+        raise HTTPException(400, detail)
 
     if platform == "clickup":
         res = await connectors.test_clickup(ctx.tenant_id)
     elif platform == "gohighlevel":
         res = await connectors.test_gohighlevel(ctx.tenant_id)
     elif platform == "google_ads":
-        res = await connectors.test_google_ads(ctx.tenant_id)
+        res = await connectors.test_google_ads_for_user(ctx.tenant_id, ctx.user.id)
     elif platform == "google_meet":
-        res = await connectors.test_google_meet(ctx.tenant_id)
+        res = await connectors.test_google_meet_for_user(ctx.tenant_id, ctx.user.id)
+    elif platform == "google_calendar":
+        doc = await db.user_oauth_tokens.find_one({"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": "google_calendar"})
+        res = {"ok": True} if doc else {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Calendar first."}
     else:
         res = {"ok": True, "note": "Credentials stored & verified. Live API sync runs on next scheduled job."}
 
@@ -1100,7 +1289,7 @@ async def clickup_workspaces(ctx=Depends(get_current_context)):
 async def google_ads_customers(ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    res = await connectors.list_google_ads_customers(ctx.tenant_id)
+    res = await connectors.list_google_ads_customers(ctx.tenant_id, ctx.user.id)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
     return res

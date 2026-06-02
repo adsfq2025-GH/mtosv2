@@ -108,13 +108,39 @@ export function Integrations() {
   const [edit, setEdit] = useState(null);
   const [form, setForm] = useState({});
   const [busy, setBusy] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState(false);
   const load = () => integrations.status().then(setList);
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const onMsg = (ev) => {
+      if (ev?.data?.type === "google_oauth_success") {
+        setEdit(null);
+        load();
+      }
+    };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
+
+  const GOOGLE_OAUTH = new Set([
+    "google_calendar",
+    "google_meet",
+    "google_drive",
+    "gmail",
+    "google_search_console",
+    "google_analytics",
+    "google_business_profile",
+    "google_lsa",
+    "google_ads",
+  ]);
 
   const openConfig = (i) => { setEdit(i); setForm({}); };
   const save = async (e) => {
     e.preventDefault(); setBusy(true);
     try {
+      if (GOOGLE_OAUTH.has(edit.platform) && (edit.fields || []).length === 0) {
+        throw new Error("Use Connect Google for this integration.");
+      }
       const credentials = {}; const metadata = {};
       edit.fields.forEach((f) => { if (form[f.key]) { if (f.secret) credentials[f.key] = form[f.key]; else metadata[f.key] = form[f.key]; } });
       await integrations.configure(edit.platform, { credentials, metadata });
@@ -122,6 +148,34 @@ export function Integrations() {
       setEdit(null); load();
     } catch (err) { alert(err?.response?.data?.detail || "Failed"); }
     finally { setBusy(false); }
+  };
+
+  const connectGoogle = async (platform) => {
+    setOauthBusy(true);
+    try {
+      const res = await integrations.oauthGoogleStart(platform);
+      const url = res?.url;
+      if (!url) throw new Error("Missing OAuth URL");
+      window.open(url, "google_oauth", "width=520,height=720");
+    } catch (err) {
+      alert(err?.response?.data?.detail || err?.message || "Failed to start Google OAuth");
+    } finally {
+      setOauthBusy(false);
+    }
+  };
+
+  const disconnectGoogle = async (platform) => {
+    if (!window.confirm("Disconnect your Google account for this integration?")) return;
+    setOauthBusy(true);
+    try {
+      await integrations.oauthGoogleDisconnect(platform);
+      await load();
+      setEdit(null);
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed");
+    } finally {
+      setOauthBusy(false);
+    }
   };
 
   const disconnect = async (platform) => {
@@ -147,7 +201,11 @@ export function Integrations() {
             <p className="text-xs text-slate-400 mt-3 min-h-[40px]">{i.description}</p>
             <div className="flex items-center gap-2 mt-3">
               <button className="btn-ghost text-xs !py-1.5 !px-2.5 flex-1" onClick={() => openConfig(i)} data-testid={`configure-${i.platform}`}>{i.status === "connected" ? "Reconfigure" : "Configure"}</button>
-              {i.status === "connected" && <button className="btn-danger text-xs" onClick={() => disconnect(i.platform)}>Disconnect</button>}
+              {i.status === "connected" && (
+                GOOGLE_OAUTH.has(i.platform)
+                  ? <button className="btn-danger text-xs" onClick={() => disconnectGoogle(i.platform)}>Disconnect</button>
+                  : <button className="btn-danger text-xs" onClick={() => disconnect(i.platform)}>Disconnect</button>
+              )}
             </div>
             {i.last_synced_at && <div className="text-[10px] mono text-slate-500 mt-2">Last sync · {new Date(i.last_synced_at).toLocaleString()}</div>}
           </div>
@@ -159,16 +217,37 @@ export function Integrations() {
           <form onClick={(e) => e.stopPropagation()} onSubmit={save} className="card-flat p-6 w-full max-w-lg" data-testid="integration-config-form">
             <div className="flex items-center justify-between mb-1"><h3 className="text-lg font-semibold">Configure {edit.label}</h3><button type="button" className="btn-ghost !p-2" onClick={() => setEdit(null)}><X size={14} /></button></div>
             <p className="text-xs text-slate-400 mb-4">{edit.description}</p>
-            <div className="space-y-3">
-              {edit.fields.map((f) => (
-                <div key={f.key}>
-                  <label className="label">{f.label}{f.secret && <span className="ml-2 text-[10px] text-[#2FE0C2]">encrypted</span>}</label>
-                  <input className="input mt-1.5" type={f.secret ? "password" : "text"} value={form[f.key] || ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} placeholder={f.help || ""} data-testid={`field-${edit.platform}-${f.key}`} />
-                  {f.help && <div className="text-[11px] text-slate-500 mt-1">{f.help}</div>}
+            {GOOGLE_OAUTH.has(edit.platform) && (
+              <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
+                <div className="label mb-1">Connect Google</div>
+                <div className="text-xs text-slate-400">Each account manager connects their own Google account. Tokens are stored securely and used for calendar + Meet/Drive artifacts on their behalf.</div>
+                <div className="flex items-center gap-2 mt-3">
+                  <button type="button" className="btn-primary flex-1" onClick={() => connectGoogle(edit.platform)} disabled={oauthBusy} data-testid="google-connect-btn">
+                    {oauthBusy ? "Connecting…" : "Connect Google"}
+                  </button>
+                  {edit.status === "connected" && (
+                    <button type="button" className="btn-danger" onClick={() => disconnectGoogle(edit.platform)} disabled={oauthBusy} data-testid="google-disconnect-btn">
+                      Disconnect
+                    </button>
+                  )}
                 </div>
-              ))}
-            </div>
-            <button type="submit" className="btn-primary w-full mt-5" disabled={busy} data-testid="integration-save-btn">{busy ? "Saving…" : "Save & Verify"}</button>
+              </div>
+            )}
+
+            {(edit.fields || []).length > 0 && (
+              <>
+                <div className="space-y-3 mt-4">
+                  {edit.fields.map((f) => (
+                    <div key={f.key}>
+                      <label className="label">{f.label}{f.secret && <span className="ml-2 text-[10px] text-[#2FE0C2]">encrypted</span>}</label>
+                      <input className="input mt-1.5" type={f.secret ? "password" : "text"} value={form[f.key] || ""} onChange={(e) => setForm({ ...form, [f.key]: e.target.value })} placeholder={f.help || ""} data-testid={`field-${edit.platform}-${f.key}`} />
+                      {f.help && <div className="text-[11px] text-slate-500 mt-1">{f.help}</div>}
+                    </div>
+                  ))}
+                </div>
+                <button type="submit" className="btn-primary w-full mt-5" disabled={busy} data-testid="integration-save-btn">{busy ? "Saving…" : "Save & Verify"}</button>
+              </>
+            )}
           </form>
         </div>
       )}

@@ -144,7 +144,7 @@ async def generate_for_client(
 
     meeting = await _ensure_meeting_for_client(tenant_id, client, user)
 
-    kpi = await connectors.build_kpi_snapshot(tenant_id, client_id, client.company)
+    kpi = await connectors.build_kpi_snapshot(tenant_id, client_id, client.company, user_id=(user.id if user else None))
     brief = await ai.generate_meeting_brief(
         client=client.model_dump(),
         kpi_snapshot=kpi,
