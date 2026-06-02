@@ -1519,12 +1519,19 @@ async def dashboard_overview(ctx=Depends(get_current_context)):
 async def ai_models(_: User = Depends(get_current_user)):
     items = []
     for key, entry in ai.MODEL_REGISTRY.items():
+        provider = entry.get("provider", "unknown")
+        required_env = (ai.PROVIDER_CONFIG.get(provider) or {}).get("api_key_env")
+        enabled = True
+        if required_env:
+            enabled = bool(os.environ.get(required_env, "").strip())
         items.append(
             {
                 "key": key,
                 "label": entry.get("model", key),
-                "provider": entry.get("provider", "unknown"),
+                "provider": provider,
                 "recommended": key == ai.DEFAULT_MODEL,
+                "enabled": enabled,
+                "required_env": required_env,
             }
         )
     return items

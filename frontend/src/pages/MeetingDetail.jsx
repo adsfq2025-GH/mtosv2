@@ -13,13 +13,17 @@ function ModelSelect({ value, onChange }) {
   useEffect(() => { loadModels(); }, [loadModels]);
   useEffect(() => {
     if (!models.length) return;
-    if (models.some((m) => m.key === value)) return;
-    const preferred = models.find((m) => m.recommended) || models[0];
+    if (models.some((m) => m.key === value && m.enabled !== false)) return;
+    const preferred = models.find((m) => m.recommended && m.enabled !== false) || models.find((m) => m.enabled !== false) || models[0];
     if (preferred?.key) onChange(preferred.key);
   }, [models, onChange, value]);
   return (
     <select className="input !w-auto !py-2 !px-3 text-sm" value={value} onChange={(e) => onChange(e.target.value)} data-testid="ai-model-select">
-      {models.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+      {models.map((m) => (
+        <option key={m.key} value={m.key} disabled={m.enabled === false}>
+          {m.label}{m.enabled === false && m.required_env ? ` (set ${m.required_env})` : ""}
+        </option>
+      ))}
     </select>
   );
 }
