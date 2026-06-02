@@ -11,9 +11,11 @@ class User(BaseDocument):
     email: EmailStr
     name: str
     role: Literal["admin", "manager"] = "manager"
-    password_hash: str
+    password_hash: str = ""
     avatar_url: Optional[str] = None
     active: bool = True
+    auth_provider: Literal["local", "google"] = "local"
+    google_sub: Optional[str] = None
 
 
 class UserPublic(BaseModel):
@@ -34,6 +36,10 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+
+
+class GoogleLoginIn(BaseModel):
+    credential: str
 
 
 # ===== TENANTS / WHITE LABEL =====

@@ -25,6 +25,13 @@ export function AuthProvider({ children }) {
     setUser(r.user);
     return r.user;
   };
+  const loginWithGoogle = async (credential) => {
+    const r = await authApi.google(credential);
+    localStorage.setItem("mtos_token", r.token);
+    localStorage.setItem("mtos_user", JSON.stringify(r.user));
+    setUser(r.user);
+    return r.user;
+  };
   const register = async (payload) => {
     const r = await authApi.register(payload);
     localStorage.setItem("mtos_token", r.token);
@@ -38,7 +45,7 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
-  return <AuthCtx.Provider value={{ user, loading, login, register, logout }}>{children}</AuthCtx.Provider>;
+  return <AuthCtx.Provider value={{ user, loading, login, loginWithGoogle, register, logout }}>{children}</AuthCtx.Provider>;
 }
 
 export const useAuth = () => useContext(AuthCtx);

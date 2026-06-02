@@ -50,6 +50,7 @@ from models import (  # noqa: E402
     Integration,
     IntegrationConfigureIn,
     LoginIn,
+    GoogleLoginIn,
     Meeting,
     MeetingIn,
     MeetingPatch,
@@ -198,6 +199,8 @@ async def login(data: LoginIn, _: None = Depends(require_db_ready)):
         if not doc:
             raise HTTPException(401, "Invalid credentials")
         user = User.from_mongo(doc)
+        if (user.auth_provider or "local") == "google":
+            raise HTTPException(400, "This account uses Google sign-in. Use “Continue with Google”.")
         if not user.active or not verify_password(data.password, user.password_hash):
             raise HTTPException(401, "Invalid credentials")
         membership = await ensure_membership(user)
@@ -208,6 +211,60 @@ async def login(data: LoginIn, _: None = Depends(require_db_ready)):
     except Exception as exc:
         logger.error("login failed: %s", exc)
         raise HTTPException(503, "Database unavailable. Check Atlas Network Access / connection string.") from exc
+
+
+@api.post("/auth/google")
+async def google_login(data: GoogleLoginIn, _: None = Depends(require_db_ready)):
+    if not GOOGLE_OAUTH_CLIENT_ID:
+        raise HTTPException(500, "Google login is not configured on the backend")
+    cred = (data.credential or "").strip()
+    if not cred:
+        raise HTTPException(400, "Missing credential")
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": cred})
+    if resp.status_code != 200:
+        raise HTTPException(400, "Invalid Google credential")
+    info = resp.json() or {}
+    if str(info.get("aud") or "") != str(GOOGLE_OAUTH_CLIENT_ID):
+        raise HTTPException(400, "Google credential audience mismatch")
+    email = str(info.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "Google credential missing email")
+    name = str(info.get("name") or "").strip() or email.split("@")[0]
+    sub = str(info.get("sub") or "").strip() or None
+    picture = str(info.get("picture") or "").strip() or None
+
+    doc = await db.users.find_one({"email": email})
+    if doc:
+        user = User.from_mongo(doc)
+        patch = {"updated_at": utcnow().isoformat()}
+        if (user.auth_provider or "local") != "google":
+            patch["auth_provider"] = "google"
+        if sub and not user.google_sub:
+            patch["google_sub"] = sub
+        if picture and not user.avatar_url:
+            patch["avatar_url"] = picture
+        if patch.keys() != {"updated_at"}:
+            await db.users.update_one({"_id": user.id}, {"$set": patch})
+            doc = await db.users.find_one({"_id": user.id})
+            user = User.from_mongo(doc)
+    else:
+        user_count = await db.users.count_documents({})
+        role = "admin" if user_count == 0 else "manager"
+        user = User(
+            email=email,
+            name=name,
+            role=role,
+            password_hash="",
+            avatar_url=picture,
+            auth_provider="google",
+            google_sub=sub,
+        )
+        await db.users.insert_one(user.to_mongo())
+
+    membership = await ensure_membership(user)
+    token = create_token(user.id, user.role, membership.tenant_id, membership.role)
+    return {"token": token, "user": to_public(user).model_dump(), "tenant_id": membership.tenant_id}
 
 
 @api.get("/auth/me")

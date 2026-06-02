@@ -1,16 +1,17 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../auth";
 import { Brand } from "../Layout";
 import { Sparkle, ArrowRight } from "@phosphor-icons/react";
 
 export function Login() {
-  const { login } = useAuth();
+  const { login, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState("admin@monthlytouchos.com");
-  const [password, setPassword] = useState("ChangeMe!2026");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  const [googleReady, setGoogleReady] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault(); setErr(""); setLoading(true);
@@ -18,6 +19,45 @@ export function Login() {
     catch (e) { setErr(e?.response?.data?.detail || "Login failed"); }
     finally { setLoading(false); }
   };
+
+  useEffect(() => {
+    const cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    if (!cid) return;
+    const id = "google-gsi";
+    if (!document.getElementById(id)) {
+      const s = document.createElement("script");
+      s.id = id;
+      s.src = "https://accounts.google.com/gsi/client";
+      s.async = true;
+      s.defer = true;
+      s.onload = () => setGoogleReady(true);
+      document.body.appendChild(s);
+    } else {
+      setGoogleReady(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    const cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    if (!googleReady || !cid) return;
+    if (!window.google?.accounts?.id) return;
+    window.google.accounts.id.initialize({
+      client_id: cid,
+      callback: async (resp) => {
+        try {
+          await loginWithGoogle(resp.credential);
+          navigate("/");
+        } catch (e) {
+          setErr(e?.response?.data?.detail || "Google sign-in failed");
+        }
+      },
+    });
+    const el = document.getElementById("googleSignInDiv");
+    if (el) {
+      el.innerHTML = "";
+      window.google.accounts.id.renderButton(el, { theme: "outline", size: "large", width: 360 });
+    }
+  }, [googleReady]);
 
   return (
     <div className="app-bg min-h-screen grid lg:grid-cols-2">
@@ -49,11 +89,14 @@ export function Login() {
           <button type="submit" className="btn-primary w-full mt-4 flex items-center justify-center gap-2" disabled={loading} data-testid="login-submit-btn">
             {loading ? "Signing in…" : "Sign in"} <ArrowRight size={16} weight="bold" />
           </button>
+          {process.env.REACT_APP_GOOGLE_CLIENT_ID && (
+            <>
+              <div className="divider my-5" />
+              <div className="flex justify-center" id="googleSignInDiv" data-testid="google-login-btn" />
+            </>
+          )}
           <div className="text-center mt-5 text-sm text-slate-400">
             New to the team? <Link className="text-[#3FA9F5] hover:underline" to="/register" data-testid="go-register-link">Create an account</Link>
-          </div>
-          <div className="mt-6 p-3 rounded-lg border border-white/5 bg-white/[0.02] text-xs text-slate-400">
-            <strong className="text-slate-200">Bootstrap admin:</strong> admin@monthlytouchos.com / ChangeMe!2026
           </div>
         </form>
       </div>
