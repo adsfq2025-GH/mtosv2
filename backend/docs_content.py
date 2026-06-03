@@ -422,13 +422,59 @@ If Drive isn't connected, account manager pastes the transcript into the meeting
 - Tokens stored encrypted (Fernet) — never echoed in any API response.
 """,
     },
+    {
+        "slug": "internal-white-label-sop",
+        "category": "Internal SOP",
+        "title": "White Label SOP (Map Ranking Internal)",
+        "summary": "How we onboard a new white-label tenant, assign domains, and keep data isolated.",
+        "body": """# White Label SOP (Internal)
+
+## Principle
+White label is one codebase + one deployment. Each new white-label customer is a new tenant with isolated data, independent users, and per-tenant branding/terminology.
+
+## Default Domains
+Every white-label tenant starts with:
+- `clientname.mapranking.com` (where `clientname` = tenant slug)
+
+Optional:
+- Custom domain like `app.clientdomain.com` mapped to the tenant.
+
+## Tenant Data Isolation Rules
+- Every data record must be scoped by `tenant_id` (clients, meetings, action items, integrations, content capture, tokens).
+- Never query without tenant scope.
+- Integrations are:
+  - Tenant-scoped (ClickUp/GHL tokens, location tokens, etc.)
+  - User-scoped where required (Google OAuth per account manager).
+
+## Onboarding SOP (New White Label Tenant)
+1. Create tenant (`slug`, `name`).
+2. Create tenant admin user (tenant_role = owner/admin).
+3. Configure branding and terminology in White Label Configuration Center.
+4. Confirm the default domain works: `slug.mapranking.com`.
+5. If custom domain is requested:
+   - Collect target domain (`app.clientdomain.com`)
+   - Add it under White Label → Domains
+   - Configure DNS/hosting as required, then validate it routes to the tenant.
+6. Set tenant-level integrations (GoHighLevel, ClickUp).
+7. Invite account managers and confirm role-based access.
+8. Import clients (GoHighLevel import) and confirm per-client mappings.
+
+## Role-based Access (Map Ranking)
+- Account Managers: day-to-day execution; no access to tenant-level secrets or domain settings.
+- Tenant Admins: manage integrations, domains, branding, and exports configuration.
+- System Admin: cross-tenant operations and support.
+""",
+        "audience": "internal",
+        "min_role": "admin",
+    },
 ]
 
 
-def get_docs_summary():
+def get_docs_summary(docs=None):
+    src = docs or DOCS
     return [
         {"slug": d["slug"], "category": d["category"], "title": d["title"], "summary": d["summary"]}
-        for d in DOCS
+        for d in src
     ]
 
 
@@ -439,9 +485,10 @@ def get_doc(slug: str):
     return None
 
 
-def get_categories():
+def get_categories(docs=None):
+    src = docs or DOCS
     cats = {}
-    for d in DOCS:
+    for d in src:
         cats.setdefault(d["category"], 0)
         cats[d["category"]] += 1
     return [{"category": k, "count": v} for k, v in cats.items()]

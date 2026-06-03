@@ -356,7 +356,7 @@ export function Integrations() {
 }
 
 export function DocsHub() {
-  const [data, setData] = useState({ items: [], categories: [] });
+  const [data, setData] = useState({ items: [], categories: [], wiki_type: "tenant" });
   const [active, setActive] = useState(null);
   const [doc, setDoc] = useState(null);
   const [q, setQ] = useState("");
@@ -367,12 +367,17 @@ export function DocsHub() {
 
   return (
     <div>
-      <PageHead title="Documentation Hub" subtitle="The full Monthly Touch Meeting operating system — frameworks, SOPs, playbooks, scorecards, automation maps." />
+      <PageHead
+        title="Dashboard Wiki"
+        subtitle={data.wiki_type === "internal"
+          ? "Internal Map Ranking wiki — SOPs, playbooks, tutorials, and admin procedures (role-gated)."
+          : "Tenant wiki — SOPs, playbooks, tutorials, and FAQs aligned to your branding and terminology."}
+      />
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-5">
         <aside className="card-flat p-4 lg:max-h-[78vh] overflow-y-auto scroll-thin">
           <div className="relative mb-3">
             <MagnifyingGlass size={14} className="absolute left-2.5 top-2.5 text-slate-500" />
-            <input className="input !pl-8 !py-2 text-sm" placeholder="Search docs…" value={q} onChange={(e) => setQ(e.target.value)} data-testid="docs-search" />
+            <input className="input !pl-8 !py-2 text-sm" placeholder="Search wiki…" value={q} onChange={(e) => setQ(e.target.value)} data-testid="docs-search" />
           </div>
           {data.categories.map((cat) => (
             <div key={cat.category} className="mb-3">

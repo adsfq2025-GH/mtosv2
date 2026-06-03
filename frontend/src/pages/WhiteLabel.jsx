@@ -6,16 +6,20 @@ import { ArrowsClockwise, UploadSimple, Sparkle } from "@phosphor-icons/react";
 export default function WhiteLabel() {
   const [cfg, setCfg] = useState(null);
   const [uploads, setUploads] = useState([]);
+  const [domains, setDomains] = useState({ default_subdomain: "", custom_domains: [] });
+  const [newDomain, setNewDomain] = useState("");
   const [busy, setBusy] = useState("");
   const [file, setFile] = useState(null);
 
   const load = async () => {
-    const [s, u] = await Promise.all([
+    const [s, u, d] = await Promise.all([
       settingsApi.get().catch(() => null),
       whiteLabel.uploads().catch(() => []),
+      whiteLabel.domains().catch(() => ({ default_subdomain: "", custom_domains: [] })),
     ]);
     setCfg(s);
     setUploads(u);
+    setDomains(d || { default_subdomain: "", custom_domains: [] });
   };
 
   useEffect(() => { load(); }, []);
@@ -95,6 +99,56 @@ export default function WhiteLabel() {
               <Field label="Secondary color" value={draft.branding.secondary_color || ""} onChange={(v) => setDraft({ branding: { ...draft.branding, secondary_color: v } })} placeholder="#2FE0C2" />
             </div>
             <div className="divider my-5" />
+            <div className="label mb-2">Domains</div>
+            <div className="text-[12px] text-slate-400">Default subdomain is derived from your tenant slug. Add a custom domain to enable `app.clientdomain.com` style access.</div>
+            <div className="mt-3">
+              <div className="text-[11px] text-slate-500 uppercase tracking-wider">Default</div>
+              <div className="mono text-sm text-slate-200 mt-1">{domains.default_subdomain || "—"}</div>
+            </div>
+            <div className="mt-4">
+              <div className="text-[11px] text-slate-500 uppercase tracking-wider mb-1">Custom Domains</div>
+              {((domains.custom_domains || []).length === 0) && <div className="text-slate-500 text-sm">None added.</div>}
+              {((domains.custom_domains || []).length > 0) && (
+                <div className="space-y-2">
+                  {(domains.custom_domains || []).map((d) => (
+                    <div key={d} className="flex items-center justify-between gap-2 p-2 rounded border border-white/5">
+                      <div className="mono text-sm">{d}</div>
+                      <button className="btn-danger !py-1.5" type="button" disabled={busy} onClick={async () => {
+                        if (!window.confirm(`Remove domain ${d}?`)) return;
+                        setBusy("domain");
+                        try {
+                          await whiteLabel.deleteDomain(d);
+                          const next = await whiteLabel.domains();
+                          setDomains(next || { default_subdomain: "", custom_domains: [] });
+                        } catch (e) {
+                          alert(e?.response?.data?.detail || "Remove failed");
+                        } finally {
+                          setBusy("");
+                        }
+                      }}>Remove</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2 mt-3">
+                <input className="input" value={newDomain} onChange={(e) => setNewDomain(e.target.value)} placeholder="app.clientdomain.com" />
+                <button className="btn-primary" type="button" disabled={!newDomain.trim() || busy} onClick={async () => {
+                  setBusy("domain");
+                  try {
+                    await whiteLabel.addDomain(newDomain.trim());
+                    setNewDomain("");
+                    const next = await whiteLabel.domains();
+                    setDomains(next || { default_subdomain: "", custom_domains: [] });
+                  } catch (e) {
+                    alert(e?.response?.data?.detail || "Add failed");
+                  } finally {
+                    setBusy("");
+                  }
+                }}>Add</button>
+              </div>
+              <div className="text-[11px] text-slate-500 mt-2">After adding a custom domain, configure DNS/hosting to route it to this app.</div>
+            </div>
+            <div className="divider my-5" />
             <div className="label mb-2">Terminology</div>
             <div className="space-y-3">
               <Field label="Client (singular)" value={draft.terminology.client_singular || ""} onChange={(v) => setDraft({ terminology: { ...draft.terminology, client_singular: v } })} placeholder="Client" />
@@ -148,4 +202,3 @@ function Field({ label, value, onChange, placeholder }) {
     </div>
   );
 }
-

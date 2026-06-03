@@ -17,6 +17,10 @@
   --danger: #EF4444;
   --warning: #F59E0B;
   --success: #2FE0C2;
+  --glass-bg: rgba(10, 14, 26, 0.55);
+  --glass-border: rgba(255,255,255,0.06);
+  --base-font-size: 16px;
+  --base-line-height: 1.45;
 
   --background: 222 36% 7%;
   --foreground: 210 40% 98%;
@@ -49,6 +53,8 @@ body {
   font-feature-settings: 'cv11', 'ss01';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  font-size: var(--base-font-size);
+  line-height: var(--base-line-height);
 }
 
 h1, h2, h3, h4, h5 { font-family: 'Outfit', sans-serif; letter-spacing: -0.02em; }
@@ -64,10 +70,10 @@ h1, h2, h3, h4, h5 { font-family: 'Outfit', sans-serif; letter-spacing: -0.02em;
 }
 
 .glass {
-  background: rgba(10, 14, 26, 0.55);
+  background: var(--glass-bg);
   backdrop-filter: blur(18px) saturate(150%);
   -webkit-backdrop-filter: blur(18px) saturate(150%);
-  border: 1px solid rgba(255,255,255,0.06);
+  border: 1px solid var(--glass-border);
 }
 
 .card-flat {
@@ -124,6 +130,40 @@ h1, h2, h3, h4, h5 { font-family: 'Outfit', sans-serif; letter-spacing: -0.02em;
 
 select.input { color-scheme: dark; }
 select.input option, select.input optgroup { background: var(--surface); color: var(--text); }
+
+html.theme-light {
+  --bg: #F8FAFC;
+  --surface: #FFFFFF;
+  --surface-2: #F1F5F9;
+  --primary: #2563EB;
+  --primary-hover: #1D4ED8;
+  --secondary: #0F766E;
+  --text: #0F172A;
+  --text-muted: #475569;
+  --border: #E2E8F0;
+  --glass-bg: rgba(255, 255, 255, 0.75);
+  --glass-border: rgba(15, 23, 42, 0.10);
+  --base-font-size: 16px;
+  --base-line-height: 1.5;
+}
+
+html.theme-light select.input { color-scheme: light; }
+
+html.theme-easy {
+  --bg: #05070E;
+  --surface: #0C1222;
+  --surface-2: #0A0F1D;
+  --primary: #FFD400;
+  --primary-hover: #FFDD33;
+  --secondary: #7CFFEA;
+  --text: #FFFFFF;
+  --text-muted: #D1D5DB;
+  --border: #334155;
+  --glass-bg: rgba(5, 7, 14, 0.72);
+  --glass-border: rgba(255,255,255,0.10);
+  --base-font-size: 18px;
+  --base-line-height: 1.6;
+}
 
 .label { color: var(--text-muted); font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
 

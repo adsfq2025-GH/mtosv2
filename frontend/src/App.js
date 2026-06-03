@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "@/auth";
@@ -12,6 +12,7 @@ import Opportunities from "@/pages/Opportunities";
 import Testimonials from "@/pages/Testimonials";
 import Strategy from "@/pages/Strategy";
 import WhiteLabel from "@/pages/WhiteLabel";
+import { applyDisplayMode, getSavedDisplayMode } from "@/displayMode";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -21,6 +22,11 @@ function Protected({ children }) {
 }
 
 export default function App() {
+  useEffect(() => {
+    try {
+      applyDisplayMode(getSavedDisplayMode());
+    } catch (e) {}
+  }, []);
   return (
     <BrowserRouter>
       <AuthProvider>

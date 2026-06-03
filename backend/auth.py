@@ -5,7 +5,7 @@ from typing import Optional
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -18,6 +18,39 @@ JWT_EXPIRES_HOURS = int(os.environ.get("JWT_EXPIRES_HOURS", "720"))
 
 bearer = HTTPBearer(auto_error=False)
 _DEFAULT_TENANT_ID: Optional[str] = None
+_INTERNAL_WIKI_TENANT_ID: Optional[str] = None
+
+
+def _norm_host(host: str) -> str:
+    h = (host or "").strip().lower()
+    if not h:
+        return ""
+    if "://" in h:
+        h = h.split("://", 1)[1]
+    if "/" in h:
+        h = h.split("/", 1)[0]
+    if ":" in h:
+        h = h.split(":", 1)[0]
+    return h
+
+
+async def resolve_tenant_id_from_host(host: str) -> Optional[str]:
+    h = _norm_host(host)
+    if not h:
+        return None
+
+    base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
+    if base_domain and h.endswith("." + base_domain):
+        slug = h[: -(len(base_domain) + 1)].split(".", 1)[0].strip()
+        if slug:
+            doc = await db.tenants.find_one({"slug": slug, "status": "active"})
+            if doc:
+                return str(doc.get("_id"))
+
+    doc = await db.tenant_domains.find_one({"domain": h})
+    if doc:
+        return str(doc.get("tenant_id"))
+    return None
 
 
 def hash_password(plain: str) -> str:
@@ -83,6 +116,31 @@ async def ensure_default_tenant() -> str:
     return _DEFAULT_TENANT_ID
 
 
+async def ensure_internal_wiki_tenant_id() -> str:
+    global _INTERNAL_WIKI_TENANT_ID
+    if _INTERNAL_WIKI_TENANT_ID:
+        return _INTERNAL_WIKI_TENANT_ID
+    slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
+    doc = await db.tenants.find_one({"slug": slug})
+    if not doc:
+        t = Tenant(slug=slug, name="Internal")
+        await db.tenants.insert_one(t.to_mongo())
+        _INTERNAL_WIKI_TENANT_ID = t.id
+        return _INTERNAL_WIKI_TENANT_ID
+    _INTERNAL_WIKI_TENANT_ID = str(doc.get("_id"))
+    return _INTERNAL_WIKI_TENANT_ID
+
+
+async def ensure_membership_for_tenant(user: User, tenant_id: str, role_if_create: Optional[str] = None) -> TenantMembership:
+    doc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(tenant_id), "status": "active"})
+    if doc:
+        return TenantMembership.from_mongo(doc)
+    role = role_if_create or ("owner" if user.role == "admin" else "member")
+    m = TenantMembership(tenant_id=str(tenant_id), user_id=user.id, role=role, status="active")
+    await db.tenant_memberships.insert_one(m.to_mongo())
+    return m
+
+
 async def ensure_membership(user: User) -> TenantMembership:
     doc = await db.tenant_memberships.find_one({"user_id": user.id, "status": "active"})
     if doc:
@@ -94,7 +152,7 @@ async def ensure_membership(user: User) -> TenantMembership:
     return m
 
 
-async def get_current_context(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> RequestContext:
+async def get_current_context(request: Request, creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> RequestContext:
     if not creds or not creds.credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
     try:
@@ -108,6 +166,14 @@ async def get_current_context(creds: Optional[HTTPAuthorizationCredentials] = De
     user = User.from_mongo(doc)
     tenant_id = payload.get("tenant_id")
     tenant_role = payload.get("trole")
+    host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+    if host_tenant_id and str(host_tenant_id) != str(tenant_id or ""):
+        mdoc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(host_tenant_id), "status": "active"})
+        if not mdoc:
+            raise HTTPException(status_code=403, detail="Not a member of this tenant")
+        m = TenantMembership.from_mongo(mdoc)
+        tenant_id = m.tenant_id
+        tenant_role = m.role
     if not tenant_id or not tenant_role:
         membership = await ensure_membership(user)
         tenant_id = membership.tenant_id

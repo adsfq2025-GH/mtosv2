@@ -5,6 +5,7 @@ import {
   SignOut, Sparkle, CaretRight, Trophy, Lightbulb,
 } from "@phosphor-icons/react";
 import { useAuth } from "./auth";
+import { applyDisplayMode, getSavedDisplayMode } from "./displayMode";
 
 export function Brand() {
   return (
@@ -30,12 +31,29 @@ const NAV = [
   { to: "/strategy", label: "Strategy", icon: Lightbulb, testid: "nav-strategy" },
   { to: "/integrations", label: "Integrations", icon: Plugs, testid: "nav-integrations" },
   { to: "/white-label", label: "White Label", icon: Sparkle, testid: "nav-white-label" },
-  { to: "/docs", label: "Documentation", icon: BookOpen, testid: "nav-docs" },
+  { to: "/docs", label: "Dashboard Wiki", icon: BookOpen, testid: "nav-docs" },
 ];
 
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [displayMode, setDisplayMode] = React.useState("dark");
+  const [displayOpen, setDisplayOpen] = React.useState(false);
+  const displayRef = React.useRef(null);
+  React.useEffect(() => {
+    try {
+      setDisplayMode(getSavedDisplayMode());
+    } catch (e) {}
+  }, []);
+  React.useEffect(() => {
+    if (!displayOpen) return;
+    const onDown = (e) => {
+      if (!displayRef.current) return;
+      if (!displayRef.current.contains(e.target)) setDisplayOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [displayOpen]);
   return (
     <div className="app-bg min-h-screen flex">
       {/* Sidebar */}
@@ -72,9 +90,36 @@ export default function Layout({ children }) {
           <div className="md:hidden"><Brand /></div>
           <div className="hidden md:flex items-center gap-2 text-xs text-slate-400">
             <span className="kbd">⌘</span><span className="kbd">K</span>
-            <span className="ml-2">Search clients, meetings, docs…</span>
+            <span className="ml-2">Search clients, meetings, wiki…</span>
           </div>
           <div className="flex items-center gap-3 text-sm">
+            <div className="relative" ref={displayRef}>
+              <button className="btn-ghost !py-1.5 !px-3 text-xs" type="button" onClick={() => setDisplayOpen((v) => !v)} data-testid="display-toggle">
+                Display: {displayMode === "easy" ? "Easy" : displayMode === "light" ? "Light" : "Dark"}
+              </button>
+              {displayOpen && (
+                <div className="absolute right-0 mt-2 w-44 card-flat p-1 z-30">
+                  {[
+                    { key: "dark", label: "Dark" },
+                    { key: "light", label: "Light" },
+                    { key: "easy", label: "Easy read" },
+                  ].map((o) => (
+                    <button
+                      key={o.key}
+                      type="button"
+                      className={`w-full text-left px-3 py-2 rounded text-[13px] ${displayMode === o.key ? "bg-[#3FA9F5]/15 text-white" : "text-slate-300 hover:bg-white/[0.04]"}`}
+                      onClick={() => {
+                        const m = applyDisplayMode(o.key);
+                        setDisplayMode(m);
+                        setDisplayOpen(false);
+                      }}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <span className="chip chip-success" data-testid="status-chip"><span className="pulse-dot" /> Live</span>
           </div>
         </header>

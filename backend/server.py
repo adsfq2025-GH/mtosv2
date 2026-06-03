@@ -30,10 +30,12 @@ from auth import (  # noqa: E402
     bootstrap_admin,
     create_token,
     ensure_membership,
+    ensure_membership_for_tenant,
     get_current_context,
     get_current_user,
     hash_password,
     require_admin,
+    resolve_tenant_id_from_host,
     to_public,
     verify_password,
 )
@@ -60,13 +62,14 @@ from models import (  # noqa: E402
     MeetingPatch,
     QAScorecard,
     RegisterIn,
+    TenantMembership,
     TenantSettings,
     TenantSettingsIn,
     Ticket,
     User,
 )
 from integrations_meta import INTEGRATIONS, list_integrations, demo_kpi_snapshot
-from docs_content import get_categories, get_doc, get_docs_summary
+from docs_content import DOCS, get_categories, get_doc, get_docs_summary
 import ai
 import connectors
 import monthly_touch
@@ -172,7 +175,7 @@ async def root():
 
 # ===================== AUTH =====================
 @api.post("/auth/register")
-async def register(data: RegisterIn, _: None = Depends(require_db_ready)):
+async def register(request: Request, data: RegisterIn, _: None = Depends(require_db_ready)):
     # First user becomes admin if no users exist; otherwise role is forced to manager
     try:
         user_count = await db.users.count_documents({})
@@ -186,7 +189,13 @@ async def register(data: RegisterIn, _: None = Depends(require_db_ready)):
             password_hash=hash_password(data.password),
         )
         await db.users.insert_one(user.to_mongo())
-        membership = await ensure_membership(user)
+        host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+        if host_tenant_id:
+            existing_count = await db.tenant_memberships.count_documents({"tenant_id": str(host_tenant_id), "status": "active"})
+            role_if_create = "owner" if existing_count == 0 else "member"
+            membership = await ensure_membership_for_tenant(user, str(host_tenant_id), role_if_create=role_if_create)
+        else:
+            membership = await ensure_membership(user)
         if not await db.tenant_settings.find_one({"tenant_id": membership.tenant_id}):
             settings = TenantSettings(
                 tenant_id=membership.tenant_id,
@@ -206,7 +215,7 @@ async def register(data: RegisterIn, _: None = Depends(require_db_ready)):
 
 
 @api.post("/auth/login")
-async def login(data: LoginIn, _: None = Depends(require_db_ready)):
+async def login(request: Request, data: LoginIn, _: None = Depends(require_db_ready)):
     try:
         doc = await db.users.find_one({"email": data.email})
         if not doc:
@@ -216,7 +225,14 @@ async def login(data: LoginIn, _: None = Depends(require_db_ready)):
             raise HTTPException(400, "This account uses Google sign-in. Use “Continue with Google”.")
         if not user.active or not verify_password(data.password, user.password_hash):
             raise HTTPException(401, "Invalid credentials")
-        membership = await ensure_membership(user)
+        host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+        if host_tenant_id:
+            mdoc = await db.tenant_memberships.find_one({"tenant_id": str(host_tenant_id), "user_id": user.id, "status": "active"})
+            if not mdoc:
+                raise HTTPException(403, "Not a member of this tenant")
+            membership = TenantMembership.from_mongo(mdoc)
+        else:
+            membership = await ensure_membership(user)
         token = create_token(user.id, user.role, membership.tenant_id, membership.role)
         return {"token": token, "user": to_public(user).model_dump(), "tenant_id": membership.tenant_id}
     except HTTPException:
@@ -227,7 +243,7 @@ async def login(data: LoginIn, _: None = Depends(require_db_ready)):
 
 
 @api.post("/auth/google")
-async def google_login(data: GoogleLoginIn, _: None = Depends(require_db_ready)):
+async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(require_db_ready)):
     if not GOOGLE_OAUTH_CLIENT_ID:
         raise HTTPException(500, "Google login is not configured on the backend")
     cred = (data.credential or "").strip()
@@ -275,7 +291,17 @@ async def google_login(data: GoogleLoginIn, _: None = Depends(require_db_ready))
         )
         await db.users.insert_one(user.to_mongo())
 
-    membership = await ensure_membership(user)
+    host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+    if host_tenant_id:
+        mdoc = await db.tenant_memberships.find_one({"tenant_id": str(host_tenant_id), "user_id": user.id, "status": "active"})
+        if mdoc:
+            membership = TenantMembership.from_mongo(mdoc)
+        else:
+            existing_count = await db.tenant_memberships.count_documents({"tenant_id": str(host_tenant_id), "status": "active"})
+            role_if_create = "owner" if existing_count == 0 else "member"
+            membership = await ensure_membership_for_tenant(user, str(host_tenant_id), role_if_create=role_if_create)
+    else:
+        membership = await ensure_membership(user)
     token = create_token(user.id, user.role, membership.tenant_id, membership.role)
     return {"token": token, "user": to_public(user).model_dump(), "tenant_id": membership.tenant_id}
 
@@ -444,6 +470,50 @@ async def put_settings(data: TenantSettingsIn, ctx=Depends(get_current_context))
     await db.tenant_settings.update_one({"tenant_id": ctx.tenant_id}, {"$set": patch}, upsert=True)
     doc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
     return TenantSettings.from_mongo(doc).model_dump()
+
+
+@api.get("/white-label/domains")
+async def list_white_label_domains(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
+    slug = (tdoc or {}).get("slug") or ""
+    base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
+    default_subdomain = f"{slug}.{base_domain}" if slug and base_domain else ""
+    docs = await db.tenant_domains.find({"tenant_id": ctx.tenant_id}).to_list(200)
+    custom_domains = sorted({str(d.get("domain") or "").strip().lower() for d in (docs or []) if d.get("domain")})
+    return {"ok": True, "default_subdomain": default_subdomain, "custom_domains": custom_domains}
+
+
+@api.post("/white-label/domains")
+async def add_white_label_domain(domain: str = Query(...), ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    d = str(domain or "").strip().lower()
+    if not d or "." not in d:
+        raise HTTPException(400, "Invalid domain")
+    if ":" in d or "/" in d:
+        raise HTTPException(400, "Invalid domain")
+    existing = await db.tenant_domains.find_one({"domain": d})
+    if existing and str(existing.get("tenant_id")) != str(ctx.tenant_id):
+        raise HTTPException(409, "Domain already in use by another tenant")
+    await db.tenant_domains.update_one(
+        {"domain": d},
+        {"$set": {"domain": d, "tenant_id": ctx.tenant_id, "updated_at": utcnow().isoformat()}, "$setOnInsert": {"created_at": utcnow().isoformat()}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api.delete("/white-label/domains")
+async def delete_white_label_domain(domain: str = Query(...), ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    d = str(domain or "").strip().lower()
+    if not d:
+        raise HTTPException(400, "Invalid domain")
+    await db.tenant_domains.delete_one({"tenant_id": ctx.tenant_id, "domain": d})
+    return {"ok": True}
 
 
 @api.get("/white-label/uploads")
@@ -1743,16 +1813,98 @@ async def delete_ghl_location_token(location_id: str = Query(...), ctx=Depends(g
 
 # ===================== DOCS =====================
 @api.get("/docs")
-async def docs_list(_: User = Depends(get_current_user)):
-    return {"items": get_docs_summary(), "categories": get_categories()}
+async def docs_list(ctx=Depends(get_current_context)):
+    tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
+    tslug = str((tdoc or {}).get("slug") or "")
+    internal_slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
+    is_internal_tenant = bool(tslug and internal_slug and tslug == internal_slug)
+    is_admin_view = ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")
+    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+
+    def apply_template(doc: dict) -> dict:
+        brand_name = str((settings.branding or {}).get("product_name") or "")
+        monthly_touch = str((settings.terminology or {}).get("monthly_touch") or "Monthly Touch")
+        account_manager = str((settings.terminology or {}).get("account_manager") or "Account Manager")
+        rep = {
+            "{{brand_name}}": brand_name,
+            "{{client_singular}}": str((settings.terminology or {}).get("client_singular") or "Client"),
+            "{{client_plural}}": str((settings.terminology or {}).get("client_plural") or "Clients"),
+            "{{monthly_touch}}": monthly_touch,
+            "{{account_manager}}": account_manager,
+            "Monthly Touch OS": brand_name or "Monthly Touch OS",
+            "Monthly Touch": monthly_touch,
+            "Account manager": account_manager,
+            "Account Manager": account_manager,
+        }
+        out = {**doc}
+        for k in ("title", "summary", "body"):
+            v = out.get(k)
+            if isinstance(v, str):
+                for a, b in rep.items():
+                    if b:
+                        v = v.replace(a, b)
+                out[k] = v
+        return out
+
+    filtered = []
+    for d in DOCS:
+        aud = (d.get("audience") or "tenant").strip().lower()
+        if aud == "internal" and not is_internal_tenant:
+            continue
+        if aud not in ("tenant", "internal"):
+            continue
+        min_role = (d.get("min_role") or "").strip().lower()
+        if min_role == "admin" and not is_admin_view:
+            continue
+        filtered.append(apply_template(d))
+
+    return {"items": get_docs_summary(filtered), "categories": get_categories(filtered), "wiki_type": "internal" if is_internal_tenant else "tenant"}
 
 
 @api.get("/docs/{slug}")
-async def docs_detail(slug: str, _: User = Depends(get_current_user)):
+async def docs_detail(slug: str, ctx=Depends(get_current_context)):
     d = get_doc(slug)
     if not d:
         raise HTTPException(404, "Doc not found")
-    return d
+
+    tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
+    tslug = str((tdoc or {}).get("slug") or "")
+    internal_slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
+    is_internal_tenant = bool(tslug and internal_slug and tslug == internal_slug)
+    is_admin_view = ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")
+    aud = (d.get("audience") or "tenant").strip().lower()
+    if aud == "internal" and not is_internal_tenant:
+        raise HTTPException(404, "Doc not found")
+    min_role = (d.get("min_role") or "").strip().lower()
+    if min_role == "admin" and not is_admin_view:
+        raise HTTPException(404, "Doc not found")
+
+    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    brand_name = str((settings.branding or {}).get("product_name") or "")
+    monthly_touch = str((settings.terminology or {}).get("monthly_touch") or "Monthly Touch")
+    account_manager = str((settings.terminology or {}).get("account_manager") or "Account Manager")
+    rep = {
+        "{{brand_name}}": brand_name,
+        "{{client_singular}}": str((settings.terminology or {}).get("client_singular") or "Client"),
+        "{{client_plural}}": str((settings.terminology or {}).get("client_plural") or "Clients"),
+        "{{monthly_touch}}": monthly_touch,
+        "{{account_manager}}": account_manager,
+        "Monthly Touch OS": brand_name or "Monthly Touch OS",
+        "Monthly Touch": monthly_touch,
+        "Account manager": account_manager,
+        "Account Manager": account_manager,
+    }
+    out = {**d}
+    for k in ("title", "summary", "body"):
+        v = out.get(k)
+        if isinstance(v, str):
+            for a, b in rep.items():
+                if b:
+                    v = v.replace(a, b)
+            out[k] = v
+    return out
 
 
 # ===================== DASHBOARD =====================

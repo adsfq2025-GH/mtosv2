@@ -120,6 +120,9 @@ export const whiteLabel = {
     return api.post("/white-label/uploads", fd, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data);
   },
   analyze: () => api.post("/white-label/analyze").then((r) => r.data),
+  domains: () => api.get("/white-label/domains").then((r) => r.data),
+  addDomain: (domain) => api.post(`/white-label/domains?domain=${encodeURIComponent(domain)}`).then((r) => r.data),
+  deleteDomain: (domain) => api.delete(`/white-label/domains?domain=${encodeURIComponent(domain)}`).then((r) => r.data),
 };
 
 export const docs = {
