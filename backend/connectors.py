@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+from html import unescape
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -739,3 +741,189 @@ async def list_gohighlevel_locations(tenant_id: str) -> Dict[str, Any]:
     locs = data.get("locations") or []
     out = [{"id": str(l.get("id")), "name": l.get("name"), "email": l.get("email"), "phone": l.get("phone")} for l in locs if l.get("id")]
     return {"ok": True, "locations": out}
+
+
+def _ghl_headers(api_key: str, location_id: Optional[str] = None) -> Dict[str, str]:
+    h = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {api_key}",
+        "Version": "2023-02-21",
+    }
+    if location_id:
+        h["locationId"] = str(location_id)
+    return h
+
+
+async def list_gohighlevel_contacts(creds: Dict[str, str], location_id: str, query: str = "", limit: int = 100) -> Dict[str, Any]:
+    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+    if not api_key:
+        return {"ok": False, "error": "missing_api_key"}
+    if not location_id:
+        return {"ok": False, "error": "missing_location_id"}
+    headers = _ghl_headers(api_key, location_id=location_id)
+
+    body = {"locationId": str(location_id), "page": 1, "limit": int(limit or 100)}
+    if query:
+        body["query"] = str(query)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post("https://services.leadconnectorhq.com/contacts/search", headers=headers, json=body)
+
+    if resp.status_code == 400:
+        params = {"locationId": str(location_id), "limit": int(limit or 100), "skip": 0}
+        if query:
+            params["query"] = str(query)
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get("https://services.leadconnectorhq.com/contacts/", headers=headers, params=params)
+
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+
+    data = resp.json() or {}
+    raw = data.get("contacts") or data.get("results") or data.get("contact") or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    out = []
+    for c in raw or []:
+        cid = c.get("id") or c.get("_id")
+        if not cid:
+            continue
+        name = c.get("name") or " ".join([str(c.get("firstName") or "").strip(), str(c.get("lastName") or "").strip()]).strip()
+        company = c.get("companyName") or c.get("company") or ""
+        out.append(
+            {
+                "id": str(cid),
+                "name": str(name or "").strip(),
+                "company": str(company or "").strip(),
+                "email": str(c.get("email") or "").strip(),
+                "phone": str(c.get("phone") or "").strip(),
+            }
+        )
+    if query:
+        q = query.strip().lower()
+        out = [x for x in out if q in (x.get("name") or "").lower() or q in (x.get("company") or "").lower() or q in (x.get("email") or "").lower()]
+    return {"ok": True, "contacts": out[: int(limit or 100)]}
+
+
+async def list_gohighlevel_conversations(creds: Dict[str, str], location_id: str, contact_id: str, limit: int = 50) -> Dict[str, Any]:
+    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+    if not api_key:
+        return {"ok": False, "error": "missing_api_key"}
+    if not location_id:
+        return {"ok": False, "error": "missing_location_id"}
+    if not contact_id:
+        return {"ok": False, "error": "missing_contact_id"}
+    headers = _ghl_headers(api_key, location_id=location_id)
+    params = {"locationId": str(location_id), "contactId": str(contact_id), "limit": int(limit or 50), "sort": "desc", "sortBy": "last_message_date", "status": "all"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get("https://services.leadconnectorhq.com/conversations/search", headers=headers, params=params)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    convs = data.get("conversations") or []
+    out = []
+    for c in convs:
+        cid = c.get("id")
+        if cid:
+            out.append({"id": str(cid), "lastMessageType": c.get("lastMessageType"), "lastMessageBody": c.get("lastMessageBody")})
+    return {"ok": True, "conversations": out}
+
+
+async def list_gohighlevel_messages(creds: Dict[str, str], location_id: str, conversation_id: str, limit: int = 100) -> Dict[str, Any]:
+    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+    if not api_key:
+        return {"ok": False, "error": "missing_api_key"}
+    if not location_id:
+        return {"ok": False, "error": "missing_location_id"}
+    if not conversation_id:
+        return {"ok": False, "error": "missing_conversation_id"}
+    headers = _ghl_headers(api_key, location_id=location_id)
+    all_msgs = []
+    last_message_id: Optional[str] = None
+    for _ in range(20):
+        params: Dict[str, Any] = {"limit": int(limit or 100)}
+        if last_message_id:
+            params["lastMessageId"] = last_message_id
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"https://services.leadconnectorhq.com/conversations/{conversation_id}/messages",
+                headers=headers,
+                params=params,
+            )
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+        data = resp.json() or {}
+        wrapper = data.get("messages") or {}
+        msgs = wrapper.get("messages") if isinstance(wrapper, dict) else None
+        if not isinstance(msgs, list):
+            msgs = []
+        all_msgs.extend(msgs)
+        next_page = bool(wrapper.get("nextPage")) if isinstance(wrapper, dict) else False
+        last_message_id = str(wrapper.get("lastMessageId") or "") if isinstance(wrapper, dict) else ""
+        if not next_page or not last_message_id:
+            break
+    out = []
+    for m in all_msgs:
+        body = m.get("body")
+        if isinstance(body, str):
+            body = unescape(body)
+            body = re.sub(r"\s+", " ", body).strip()
+        out.append(
+            {
+                "id": str(m.get("id") or ""),
+                "messageType": m.get("messageType"),
+                "direction": m.get("direction"),
+                "dateAdded": m.get("dateAdded"),
+                "body": body or "",
+                "from": m.get("from"),
+                "to": m.get("to"),
+                "attachments": m.get("attachments") or [],
+            }
+        )
+    return {"ok": True, "messages": out}
+
+
+async def list_gmail_messages_for_contact(tenant_id: str, user_id: str, email: str, max_messages: int = 50) -> Dict[str, Any]:
+    em = (email or "").strip()
+    if not em:
+        return {"ok": True, "messages": []}
+    refresh_token = await get_google_refresh_token(tenant_id, user_id, "gmail")
+    if not refresh_token:
+        return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Gmail first."}
+    try:
+        access_token = await _google_ads_access_token({"refresh_token": refresh_token})
+    except Exception as exc:
+        return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
+
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    q = f"(from:{em} OR to:{em})"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r1 = await client.get("https://gmail.googleapis.com/gmail/v1/users/me/messages", headers=headers, params={"q": q, "maxResults": int(max_messages or 50)})
+    if r1.status_code != 200:
+        return {"ok": False, "error": f"gmail_http_{r1.status_code}", "error_detail": _safe_err_detail(r1)}
+    ids = (r1.json() or {}).get("messages") or []
+    out = []
+    for item in ids[: int(max_messages or 50)]:
+        mid = (item or {}).get("id")
+        if not mid:
+            continue
+        async with httpx.AsyncClient(timeout=30) as client:
+            r2 = await client.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{mid}",
+                headers=headers,
+                params={"format": "metadata", "metadataHeaders": ["From", "To", "Subject", "Date"]},
+            )
+        if r2.status_code != 200:
+            continue
+        m = r2.json() or {}
+        headers_meta = {h.get("name"): h.get("value") for h in ((m.get("payload") or {}).get("headers") or []) if isinstance(h, dict) and h.get("name")}
+        out.append(
+            {
+                "id": str(mid),
+                "date": headers_meta.get("Date") or "",
+                "from": headers_meta.get("From") or "",
+                "to": headers_meta.get("To") or "",
+                "subject": headers_meta.get("Subject") or "",
+                "snippet": (m.get("snippet") or ""),
+            }
+        )
+    return {"ok": True, "messages": out}

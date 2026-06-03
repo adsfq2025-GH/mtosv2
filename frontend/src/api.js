@@ -43,6 +43,13 @@ export const clients = {
   upsertBinding: (id, platform, payload) => api.put(`/clients/${id}/bindings/${platform}`, payload).then((r) => r.data),
   deleteBinding: (id, platform) => api.delete(`/clients/${id}/bindings/${platform}`).then((r) => r.data),
   generateMonthlyTouch: (id, payload = {}) => api.post(`/clients/${id}/monthly-touch`, payload).then((r) => r.data),
+  ghlImportContacts: ({ locationId, query = "", limit = 100 }) =>
+    api
+      .get(`/import/gohighlevel/contacts?location_id=${encodeURIComponent(locationId)}&query=${encodeURIComponent(query)}&limit=${encodeURIComponent(limit)}`)
+      .then((r) => r.data),
+  importFromGhl: (payload) => api.post("/import/gohighlevel/clients", payload).then((r) => r.data),
+  exportCommunications: (id, format = "html") =>
+    api.get(`/exports/client-communications/${id}.${format}`, { responseType: "blob" }).then((r) => r.data),
 };
 
 export const meetings = {

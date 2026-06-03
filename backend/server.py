@@ -1,4 +1,5 @@
 """Monthly Touch OS — FastAPI backend."""
+import io
 import logging
 import os
 import uvicorn
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 import zipfile
 from urllib.parse import urlencode
+from html import escape
 
 from dotenv import load_dotenv
 import httpx
@@ -41,6 +43,7 @@ from models import (  # noqa: E402
     AnalyzeTranscriptIn,
     Client,
     ClientIn,
+    ImportGhlClientsIn,
     ClientIntegrationBinding,
     ClientIntegrationBindingIn,
     ContentCapture,
@@ -657,6 +660,299 @@ async def delete_client_binding(client_id: str, platform: str, ctx=Depends(get_c
         {"$and": [{"client_id": client_id, "platform": platform}, tenant_scope(ctx.tenant_id)]}
     )
     return {"ok": True}
+
+
+def _norm_text(s: str) -> str:
+    return " ".join((s or "").strip().lower().split())
+
+
+@api.get("/import/gohighlevel/contacts")
+async def ghl_contacts_for_import(
+    location_id: str = Query(...),
+    query: str = Query(default=""),
+    limit: int = Query(default=100, ge=1, le=200),
+    ctx=Depends(get_current_context),
+):
+    creds = await connectors.get_credentials(ctx.tenant_id, "gohighlevel")
+    res = await connectors.list_gohighlevel_contacts(creds, location_id=location_id, query=query, limit=limit)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "GoHighLevel import failed")
+    return res
+
+
+@api.post("/import/gohighlevel/clients")
+async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(get_current_context)):
+    location_id = (data.location_id or "").strip()
+    if not location_id:
+        raise HTTPException(400, "Missing location_id")
+
+    selected = data.contacts or []
+    if not selected and data.contact_ids:
+        creds = await connectors.get_credentials(ctx.tenant_id, "gohighlevel")
+        res = await connectors.list_gohighlevel_contacts(creds, location_id=location_id, query="", limit=200)
+        if not res.get("ok"):
+            raise HTTPException(400, res.get("error_detail") or res.get("error") or "GoHighLevel import failed")
+        contacts = res.get("contacts") or []
+        wanted = {str(x) for x in (data.contact_ids or [])}
+        selected = [c for c in contacts if str((c or {}).get("id")) in wanted]
+
+    created = []
+    skipped = []
+    for c in selected:
+        contact_id = str((c or {}).get("id") or "").strip()
+        name = str((c or {}).get("name") or "").strip()
+        company = str((c or {}).get("company") or "").strip()
+        if not contact_id or not name or not company:
+            continue
+        existing = await db.clients.find_one(
+            {"$and": [{"name": {"$regex": f"^{name}$", "$options": "i"}, "company": {"$regex": f"^{company}$", "$options": "i"}}, tenant_scope(ctx.tenant_id)]}
+        )
+        if existing:
+            skipped.append({"contact_id": contact_id, "reason": "already_exists", "client_id": existing.get("_id")})
+            continue
+
+        client_in = ClientIn(
+            name=name,
+            company=company,
+            email=(c or {}).get("email") or None,
+            phone=(c or {}).get("phone") or None,
+            account_manager_id=ctx.user.id,
+        )
+        new_client = Client(tenant_id=ctx.tenant_id, **client_in.model_dump(), account_manager_name=ctx.user.name)
+        await db.clients.insert_one(new_client.to_mongo())
+
+        binding = ClientIntegrationBinding(
+            tenant_id=ctx.tenant_id,
+            client_id=new_client.id,
+            platform="gohighlevel",
+            enabled=True,
+            external_ids={"location_id": str(location_id), "contact_id": str(contact_id)},
+            config={},
+            updated_at=utcnow().isoformat(),
+        )
+        await db.client_bindings.insert_one(binding.to_mongo())
+        created.append(new_client.model_dump())
+
+    return {"ok": True, "created": created, "skipped": skipped}
+
+
+def _client_comms_html(client: dict, ghl_msgs: List[dict], gmail_msgs: List[dict]) -> str:
+    title = f"Client Communications — {client.get('company') or ''} — {client.get('name') or ''}".strip(" —")
+    head = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{escape(title)}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {{ font-family: Inter, Arial, sans-serif; line-height: 1.45; color: #0f172a; padding: 28px; max-width: 980px; margin: 0 auto; }}
+    h1 {{ font-size: 20px; margin: 0 0 4px; }}
+    h2 {{ font-size: 14px; margin: 22px 0 10px; text-transform: uppercase; letter-spacing: .06em; color: #334155; }}
+    .meta {{ color: #475569; font-size: 12.5px; margin: 0 0 18px; }}
+    .row {{ border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 14px; margin: 10px 0; background: #ffffff; }}
+    .hdr {{ display: flex; gap: 10px; flex-wrap: wrap; color: #475569; font-size: 12px; margin-bottom: 6px; }}
+    .tag {{ display: inline-block; border: 1px solid #e2e8f0; border-radius: 999px; padding: 2px 8px; background: #f8fafc; }}
+    .body {{ white-space: pre-wrap; font-size: 13px; color: #0f172a; }}
+    .muted {{ color: #64748b; }}
+  </style>
+</head>
+<body>
+  <h1>{escape(title)}</h1>
+  <p class="meta">
+    <span class="tag">Company: {escape(client.get("company") or "—")}</span>
+    <span class="tag">Contact: {escape(client.get("name") or "—")}</span>
+    <span class="tag">Email: {escape(client.get("email") or "—")}</span>
+    <span class="tag">Phone: {escape(client.get("phone") or "—")}</span>
+  </p>
+"""
+
+    def msg_row(source: str, when: str, direction: str, kind: str, frm: str, to: str, body: str) -> str:
+        return f"""<div class="row">
+  <div class="hdr">
+    <span class="tag">{escape(source)}</span>
+    <span class="tag">{escape(kind or "message")}</span>
+    <span class="tag">{escape(direction or "—")}</span>
+    <span class="muted">{escape(when or "")}</span>
+  </div>
+  <div class="hdr muted">
+    <span>From: {escape(frm or "—")}</span>
+    <span>To: {escape(to or "—")}</span>
+  </div>
+  <div class="body">{escape(body or "—")}</div>
+</div>"""
+
+    parts = [head]
+
+    parts.append("<h2>GoHighLevel Conversations</h2>")
+    if ghl_msgs:
+        for m in ghl_msgs:
+            parts.append(
+                msg_row(
+                    "GoHighLevel",
+                    str(m.get("dateAdded") or ""),
+                    str(m.get("direction") or ""),
+                    str(m.get("messageType") or ""),
+                    str(m.get("from") or ""),
+                    str(m.get("to") or ""),
+                    str(m.get("body") or ""),
+                )
+            )
+    else:
+        parts.append('<div class="row"><div class="body muted">No GoHighLevel messages found.</div></div>')
+
+    parts.append("<h2>Gmail (Direct)</h2>")
+    if gmail_msgs:
+        for g in gmail_msgs:
+            subj = str(g.get("subject") or "").strip()
+            line = f"{subj}\n\n{str(g.get('snippet') or '').strip()}".strip()
+            parts.append(
+                msg_row(
+                    "Gmail",
+                    str(g.get("date") or ""),
+                    "",
+                    "email",
+                    str(g.get("from") or ""),
+                    str(g.get("to") or ""),
+                    line,
+                )
+            )
+    else:
+        parts.append('<div class="row"><div class="body muted">No Gmail messages found (or Gmail is not connected).</div></div>')
+
+    parts.append("</body></html>")
+    return "\n".join(parts)
+
+
+def _pdf_from_lines(title: str, lines: List[str]) -> bytes:
+    try:
+        from reportlab.lib.pagesizes import letter
+        from reportlab.pdfgen import canvas
+    except Exception:
+        raise HTTPException(500, "PDF export is not available on this backend. Use HTML export.")
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    x = 50
+    y = height - 60
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(x, y, title[:120])
+    y -= 22
+    c.setFont("Helvetica", 10)
+
+    for raw in lines:
+        text = (raw or "").replace("\r", "").strip()
+        if not text:
+            y -= 8
+            continue
+        for piece in text.split("\n"):
+            s = piece
+            while s:
+                chunk = s[:110]
+                s = s[110:]
+                if y < 60:
+                    c.showPage()
+                    y = height - 60
+                    c.setFont("Helvetica", 10)
+                c.drawString(x, y, chunk)
+                y -= 12
+        y -= 10
+
+    c.save()
+    return buf.getvalue()
+
+
+async def _collect_client_comms(client_doc: dict, ctx) -> dict:
+    client = Client.from_mongo(client_doc).model_dump()
+    binding = await db.client_bindings.find_one(
+        {"$and": [{"client_id": client.get("id"), "platform": "gohighlevel", "enabled": True}, tenant_scope(ctx.tenant_id)]}
+    )
+    location_id = ((binding or {}).get("external_ids") or {}).get("location_id") or ((binding or {}).get("config") or {}).get("location_id")
+    contact_id = ((binding or {}).get("external_ids") or {}).get("contact_id") or ((binding or {}).get("config") or {}).get("contact_id")
+    if not location_id or not contact_id:
+        raise HTTPException(400, "Client is missing GoHighLevel mapping (location_id/contact_id). Import from GHL or set mapping first.")
+
+    ghl_creds = await connectors.get_credentials(ctx.tenant_id, "gohighlevel")
+    convs = await connectors.list_gohighlevel_conversations(ghl_creds, str(location_id), str(contact_id), limit=50)
+    if not convs.get("ok"):
+        raise HTTPException(400, convs.get("error_detail") or convs.get("error") or "Failed to fetch GoHighLevel conversations")
+    ghl_msgs: List[dict] = []
+    for c in convs.get("conversations") or []:
+        cid = (c or {}).get("id")
+        if not cid:
+            continue
+        msgs = await connectors.list_gohighlevel_messages(ghl_creds, str(location_id), str(cid), limit=100)
+        if msgs.get("ok"):
+            ghl_msgs.extend(msgs.get("messages") or [])
+
+    def _msg_dt(m: dict) -> str:
+        return str((m or {}).get("dateAdded") or "")
+
+    ghl_msgs.sort(key=_msg_dt)
+
+    gmail_msgs: List[dict] = []
+    if client.get("email"):
+        g = await connectors.list_gmail_messages_for_contact(ctx.tenant_id, ctx.user.id, client.get("email"), max_messages=50)
+        if g.get("ok"):
+            gmail_msgs = g.get("messages") or []
+
+    return {"client": client, "gohighlevel_messages": ghl_msgs, "gmail_messages": gmail_msgs}
+
+
+@api.get("/exports/client-communications/{client_id}.html")
+async def export_client_communications_html(client_id: str, ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        raise HTTPException(404, "Client not found")
+    bundle = await _collect_client_comms(doc, ctx)
+    html = _client_comms_html(bundle["client"], bundle["gohighlevel_messages"], bundle["gmail_messages"])
+    filename = f"client-communications-{client_id}.html"
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api.get("/exports/client-communications/{client_id}.pdf")
+async def export_client_communications_pdf(client_id: str, ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        raise HTTPException(404, "Client not found")
+    bundle = await _collect_client_comms(doc, ctx)
+    c = bundle["client"]
+    lines: List[str] = []
+    lines.append(f"Company: {c.get('company') or ''}")
+    lines.append(f"Contact: {c.get('name') or ''}")
+    lines.append(f"Email: {c.get('email') or ''}")
+    lines.append(f"Phone: {c.get('phone') or ''}")
+    lines.append("")
+    lines.append("GoHighLevel Messages")
+    for m in bundle["gohighlevel_messages"]:
+        lines.append(f"{m.get('dateAdded') or ''} | {m.get('messageType') or ''} | {m.get('direction') or ''}")
+        lines.append(f"From: {m.get('from') or ''}  To: {m.get('to') or ''}")
+        lines.append(str(m.get("body") or ""))
+        lines.append("")
+    lines.append("")
+    lines.append("Gmail Messages")
+    for g in bundle["gmail_messages"]:
+        lines.append(f"{g.get('date') or ''} | {g.get('subject') or ''}")
+        lines.append(f"From: {g.get('from') or ''}  To: {g.get('to') or ''}")
+        lines.append(str(g.get("snippet") or ""))
+        lines.append("")
+
+    title = f"Client Communications — {c.get('company') or ''}"
+    pdf = _pdf_from_lines(title, lines)
+    filename = f"client-communications-{client_id}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ===================== MEETINGS =====================

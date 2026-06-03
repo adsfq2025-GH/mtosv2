@@ -110,6 +110,12 @@ class ClientIn(BaseModel):
     avatar_url: Optional[str] = None
 
 
+class ImportGhlClientsIn(BaseModel):
+    location_id: str
+    contacts: List[dict] = Field(default_factory=list)
+    contact_ids: List[str] = Field(default_factory=list)
+
+
 # ===== MEETINGS =====
 class Win(BaseModel):
     title: str

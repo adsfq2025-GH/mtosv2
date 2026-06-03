@@ -3,12 +3,20 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { clients, meetings, actionItems, integrations } from "../api";
 import { PageHead } from "../Layout";
 import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle } from "@phosphor-icons/react";
+import { useAuth } from "../auth";
 
 const healthChip = (h) => h >= 80 ? "chip-success" : h >= 60 ? "chip-info" : h >= 40 ? "chip-warn" : "chip-danger";
 
 export function ClientsList() {
-  const [list, setList] = useState([]); const [showNew, setShowNew] = useState(false);
+  const [list, setList] = useState([]); const [showNew, setShowNew] = useState(false); const [showImport, setShowImport] = useState(false);
   const [form, setForm] = useState({ name: "", company: "", industry: "", email: "", phone: "", location: "", services: "" });
+  const [ghlLocations, setGhlLocations] = useState([]);
+  const [importLocationId, setImportLocationId] = useState("");
+  const [importQuery, setImportQuery] = useState("");
+  const [importContacts, setImportContacts] = useState([]);
+  const [importSelected, setImportSelected] = useState({});
+  const [importBusy, setImportBusy] = useState(false);
+  const [importErr, setImportErr] = useState("");
   const navigate = useNavigate();
   const load = useCallback(() => clients.list().then(setList), []);
   useEffect(() => { load(); }, [load]);
@@ -23,7 +31,10 @@ export function ClientsList() {
   return (
     <div>
       <PageHead title="Client Roster" subtitle="Health, churn signals, and recent activity at a glance." actions={
-        <button className="btn-primary flex items-center gap-2" onClick={() => setShowNew(true)} data-testid="new-client-btn"><Plus size={14} weight="bold" /> New Client</button>
+        <div className="flex items-center gap-2">
+          <button className="btn-secondary flex items-center gap-2" onClick={() => setShowImport(true)}><ArrowRight size={14} weight="bold" /> Import Clients</button>
+          <button className="btn-primary flex items-center gap-2" onClick={() => setShowNew(true)} data-testid="new-client-btn"><Plus size={14} weight="bold" /> New Client</button>
+        </div>
       } />
       {list.length === 0 && (
         <div className="card-flat p-10 text-center" data-testid="empty-clients">
@@ -68,6 +79,134 @@ export function ClientsList() {
           </form>
         </div>
       )}
+
+      {showImport && (
+        <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4" onClick={() => { setShowImport(false); setImportErr(""); }}>
+          <div onClick={(e) => e.stopPropagation()} className="card-flat p-6 w-full max-w-3xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Import Clients (GoHighLevel)</h3>
+              <button type="button" className="btn-ghost !p-2" onClick={() => { setShowImport(false); setImportErr(""); }}><X size={14} /></button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="md:col-span-2">
+                <label className="label">Map Ranking Location</label>
+                <select
+                  className="input mt-1.5"
+                  value={importLocationId}
+                  onChange={(e) => setImportLocationId(e.target.value)}
+                  onFocus={async () => {
+                    if (ghlLocations.length) return;
+                    try {
+                      const r = await integrations.gohighlevelLocations();
+                      setGhlLocations(r?.locations || []);
+                    } catch (e2) {
+                      setImportErr(e2?.response?.data?.detail || e2?.message || "Failed to load GoHighLevel locations");
+                    }
+                  }}
+                >
+                  <option value="">Select a location…</option>
+                  {ghlLocations.map((l) => <option key={l.id} value={l.id}>{l.name || l.id}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="label">Search</label>
+                <input className="input mt-1.5" value={importQuery} onChange={(e) => setImportQuery(e.target.value)} placeholder="Name, company, email…" />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 mt-4">
+              <button
+                className="btn-secondary"
+                disabled={!importLocationId || importBusy}
+                onClick={async () => {
+                  setImportErr("");
+                  setImportBusy(true);
+                  try {
+                    const r = await clients.ghlImportContacts({ locationId: importLocationId, query: importQuery, limit: 200 });
+                    setImportContacts(r?.contacts || []);
+                    setImportSelected({});
+                  } catch (e2) {
+                    setImportErr(e2?.response?.data?.detail || e2?.message || "Failed to load contacts");
+                  } finally {
+                    setImportBusy(false);
+                  }
+                }}
+              >
+                {importBusy ? "Loading…" : "Load Contacts"}
+              </button>
+              <button
+                className="btn-primary"
+                disabled={!importContacts.length || importBusy}
+                onClick={async () => {
+                  setImportErr("");
+                  setImportBusy(true);
+                  try {
+                    const chosen = importContacts.filter((c) => importSelected[c.id]);
+                    const payload = { location_id: importLocationId, contacts: chosen.length ? chosen : importContacts };
+                    const r = await clients.importFromGhl(payload);
+                    await load();
+                    setShowImport(false);
+                    setImportContacts([]);
+                    setImportSelected({});
+                    setImportLocationId("");
+                    setImportQuery("");
+                    if ((r?.skipped || []).length) {
+                      setTimeout(() => alert(`Imported ${r?.created?.length || 0} client(s). Skipped ${r?.skipped?.length || 0} duplicate(s).`), 50);
+                    }
+                  } catch (e2) {
+                    setImportErr(e2?.response?.data?.detail || e2?.message || "Import failed");
+                  } finally {
+                    setImportBusy(false);
+                  }
+                }}
+              >
+                Import {Object.values(importSelected).some(Boolean) ? "Selected" : "All Loaded"}
+              </button>
+            </div>
+
+            {importErr && (
+              <div className="mt-4 card-flat p-3 border border-rose-500/20 bg-rose-500/10 text-rose-200 text-sm">
+                {importErr}
+              </div>
+            )}
+
+            <div className="mt-4 max-h-[48vh] overflow-auto border border-white/5 rounded-xl">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-[#0B1222]">
+                  <tr className="text-left text-slate-400">
+                    <th className="p-3 w-10"> </th>
+                    <th className="p-3">Company</th>
+                    <th className="p-3">Contact</th>
+                    <th className="p-3">Email</th>
+                    <th className="p-3">Phone</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {importContacts.map((c) => (
+                    <tr key={c.id} className="border-t border-white/5">
+                      <td className="p-3">
+                        <input
+                          type="checkbox"
+                          checked={!!importSelected[c.id]}
+                          onChange={(e) => setImportSelected({ ...importSelected, [c.id]: e.target.checked })}
+                        />
+                      </td>
+                      <td className="p-3">{c.company || "—"}</td>
+                      <td className="p-3">{c.name || "—"}</td>
+                      <td className="p-3">{c.email || "—"}</td>
+                      <td className="p-3">{c.phone || "—"}</td>
+                    </tr>
+                  ))}
+                  {!importContacts.length && (
+                    <tr><td className="p-6 text-slate-500" colSpan={5}>Load contacts to preview and select what to import.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -75,6 +214,7 @@ export function ClientsList() {
 export function ClientDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [client, setClient] = useState(null);
   const [meets, setMeets] = useState([]);
   const [actions, setActions] = useState([]);
@@ -248,6 +388,50 @@ export function ClientDetail() {
         subtitle={`${client.name}${client.industry ? ` · ${client.industry}` : ""}${client.location ? ` · ${client.location}` : ""}`}
         actions={
           <>
+            {user?.role === "admin" && (
+              <>
+                <button
+                  className="btn-ghost flex items-center gap-2"
+                  onClick={async () => {
+                    try {
+                      const blob = await clients.exportCommunications(id, "html");
+                      const url = window.URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `client-communications-${client.company || id}.html`;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      window.URL.revokeObjectURL(url);
+                    } catch (e) {
+                      alert(e?.response?.data?.detail || e?.message || "Export failed");
+                    }
+                  }}
+                >
+                  Export HTML
+                </button>
+                <button
+                  className="btn-ghost flex items-center gap-2"
+                  onClick={async () => {
+                    try {
+                      const blob = await clients.exportCommunications(id, "pdf");
+                      const url = window.URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `client-communications-${client.company || id}.pdf`;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      window.URL.revokeObjectURL(url);
+                    } catch (e) {
+                      alert(e?.response?.data?.detail || e?.message || "Export failed");
+                    }
+                  }}
+                >
+                  Export PDF
+                </button>
+              </>
+            )}
             <button className="btn-ghost flex items-center gap-1" onClick={remove} data-testid="delete-client-btn"><Trash size={14} /> Delete</button>
             <button className="btn-ghost flex items-center gap-2" onClick={generateMonthlyTouch} data-testid="generate-monthly-touch-btn"><Sparkle size={14} weight="duotone" /> Generate Monthly Touch</button>
             <button className="btn-primary flex items-center gap-2" onClick={() => setShowMeet(true)} data-testid="new-meeting-btn"><Plus size={14} weight="bold" /> New Meeting</button>
