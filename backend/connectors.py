@@ -119,7 +119,10 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[st
     if resp.status_code != 200:
         return {"error": f"clickup_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
 
-    data = resp.json() or {}
+    try:
+        data = resp.json() or {}
+    except Exception:
+        return {"error": "clickup_bad_json", "error_detail": (resp.text or "")[:300]}
     tasks = data.get("tasks") or []
     now = _utc_now()
 
@@ -186,7 +189,10 @@ async def fetch_gohighlevel_monthly(tenant_id: str, binding: dict) -> Dict[str, 
             resp = await client.get(url, headers=headers, params=params)
         if resp.status_code != 200:
             return {"error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
-        return resp.json() or {}
+        try:
+            return resp.json() or {}
+        except Exception:
+            return {"error": "gohighlevel_bad_json", "error_detail": (resp.text or "")[:300]}
 
     open_res, won_res, lost_res = await fetch_status("open"), await fetch_status("won"), await fetch_status("lost")
     if any(isinstance(r, dict) and r.get("error") for r in (open_res, won_res, lost_res)):
@@ -336,20 +342,26 @@ async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = 
     if (clickup_creds or {}).get("api_token"):
         folder_id = ((clickup_binding or {}).get("external_ids") or {}).get("folder_id") or ((clickup_binding or {}).get("config") or {}).get("folder_id")
         if clickup_binding and folder_id:
-            clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding)
-            if clickup_data:
-                snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
+            try:
+                clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding)
+                if clickup_data:
+                    snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
+            except Exception as exc:
+                snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_error", "error_detail": str(exc)[:300]}
         else:
             snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_missing_client_mapping", "error_detail": "Missing ClickUp Folder ID mapping for this client."}
 
     ghl_binding = await get_client_binding(tenant_id, client_id, "gohighlevel")
     ghl_api_key = await _gohighlevel_base_api_key(tenant_id)
     if ghl_api_key:
-        ghl_data = await fetch_gohighlevel_monthly(tenant_id, ghl_binding or {"external_ids": {}, "config": {}})
-        if ghl_data:
-            snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
-        else:
-            snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), "error": "gohighlevel_missing_location_id", "error_detail": "Missing GoHighLevel location_id (set it in the client mapping or integration settings)."}
+        try:
+            ghl_data = await fetch_gohighlevel_monthly(tenant_id, ghl_binding or {"external_ids": {}, "config": {}})
+            if ghl_data:
+                snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
+            else:
+                snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), "error": "gohighlevel_missing_location_id", "error_detail": "Missing GoHighLevel location_id (set it in the client mapping or integration settings)."}
+        except Exception as exc:
+            snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), "error": "gohighlevel_error", "error_detail": str(exc)[:300]}
 
     gads_creds = await get_credentials(tenant_id, "google_ads")
     gads_binding = await get_client_binding(tenant_id, client_id, "google_ads")

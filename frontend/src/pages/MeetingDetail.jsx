@@ -74,7 +74,8 @@ export default function MeetingDetail() {
       setChecklist(meeting.checklist || {});
       await reload().catch(() => {});
     } catch (e) {
-      const detail = e?.response?.data?.detail;
+      const raw = e?.response?.data;
+      const detail = typeof raw === "string" ? raw : raw?.detail;
       const status = e?.response?.status;
       if (detail) setAiErr(String(detail));
       else if (status) setAiErr(`Brief generation failed (HTTP ${status})`);
