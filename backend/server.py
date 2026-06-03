@@ -1,5 +1,6 @@
 """Monthly Touch OS — FastAPI backend."""
 import io
+import copy
 import logging
 import os
 import uvicorn
@@ -149,9 +150,12 @@ _cors_origins = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
 if not _cors_origins:
     _cors_origins = ["*"]
 _cors_origin_regex = os.environ.get("CORS_ORIGIN_REGEX", "").strip() or None
+_cors_allow_credentials = True
+if "*" in _cors_origins and not _cors_origin_regex:
+    _cors_allow_credentials = False
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
+    allow_credentials=_cors_allow_credentials,
     allow_origins=_cors_origins,
     allow_origin_regex=_cors_origin_regex,
     allow_methods=["*"],
@@ -1190,10 +1194,23 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get
     client = Client.from_mongo(c_doc) if c_doc else None
     client_d = client.model_dump() if client else {"name": meeting.client_name}
     kpi = await connectors.build_kpi_snapshot(ctx.tenant_id, meeting.client_id, client_d.get("company", ""), user_id=ctx.user.id)
+    kpi_for_ai = copy.deepcopy(kpi)
+
+    def scrub(o):
+        if isinstance(o, dict):
+            o.pop("error", None)
+            o.pop("error_detail", None)
+            for v in list(o.values()):
+                scrub(v)
+        elif isinstance(o, list):
+            for it in o:
+                scrub(it)
+
+    scrub(kpi_for_ai)
     try:
         brief = await ai.generate_meeting_brief(
             client=client_d,
-            kpi_snapshot=kpi,
+            kpi_snapshot=kpi_for_ai,
             extra_context=data.extra_context,
             model_key=data.model or ai.DEFAULT_MODEL,
             session_id=f"brief-{meeting_id}",
