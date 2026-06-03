@@ -138,8 +138,8 @@ html.theme-light {
   --primary: #2563EB;
   --primary-hover: #1D4ED8;
   --secondary: #0F766E;
-  --text: #0F172A;
-  --text-muted: #475569;
+  --text: #000000;
+  --text-muted: #000000;
   --border: #E2E8F0;
   --glass-bg: rgba(255, 255, 255, 0.75);
   --glass-border: rgba(15, 23, 42, 0.10);
@@ -148,6 +148,28 @@ html.theme-light {
 }
 
 html.theme-light select.input { color-scheme: light; }
+
+html.theme-light .text-slate-200,
+html.theme-light .text-slate-300,
+html.theme-light .text-slate-400,
+html.theme-light .text-slate-500,
+html.theme-light .text-slate-600,
+html.theme-light .text-slate-700 {
+  color: #000000 !important;
+}
+
+html.theme-light .prose-doc h2,
+html.theme-light .prose-doc p,
+html.theme-light .prose-doc ul,
+html.theme-light .prose-doc ol,
+html.theme-light .prose-doc th,
+html.theme-light .prose-doc td,
+html.theme-light .prose-doc blockquote,
+html.theme-light .prose-doc strong {
+  color: #000000 !important;
+}
+
+html.theme-light .sidebar-link.active { color: #000000; }
 
 html.theme-easy {
   --bg: #05070E;
