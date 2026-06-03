@@ -793,14 +793,19 @@ async def list_gohighlevel_contacts(tenant_id: str, location_id: str, query: str
         return {"ok": False, "error": "missing_location_id"}
     headers = _ghl_headers(api_key, location_id=location_id)
 
-    body = {"locationId": str(location_id), "page": 1, "limit": int(limit or 100)}
+    page_limit = int(limit or 100)
+    if page_limit < 1:
+        page_limit = 1
+    if page_limit > 100:
+        page_limit = 100
+    body = {"locationId": str(location_id), "page": 1, "pageLimit": page_limit}
     if query:
-        body["query"] = str(query)
+        body["searchTerm"] = str(query)
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post("https://services.leadconnectorhq.com/contacts/search", headers=headers, json=body)
 
-    if resp.status_code == 400:
-        params = {"locationId": str(location_id), "limit": int(limit or 100), "skip": 0}
+    if resp.status_code in (400, 404, 422) or "property limit should not exist" in (resp.text or "").lower():
+        params = {"locationId": str(location_id), "limit": int(page_limit), "skip": 0}
         if query:
             params["query"] = str(query)
         async with httpx.AsyncClient(timeout=30) as client:
