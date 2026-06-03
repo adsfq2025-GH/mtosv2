@@ -44,6 +44,7 @@ from models import (  # noqa: E402
     Client,
     ClientIn,
     ImportGhlClientsIn,
+    GhlLocationTokenIn,
     ClientIntegrationBinding,
     ClientIntegrationBindingIn,
     ContentCapture,
@@ -673,8 +674,7 @@ async def ghl_contacts_for_import(
     limit: int = Query(default=100, ge=1, le=200),
     ctx=Depends(get_current_context),
 ):
-    creds = await connectors.get_credentials(ctx.tenant_id, "gohighlevel")
-    res = await connectors.list_gohighlevel_contacts(creds, location_id=location_id, query=query, limit=limit)
+    res = await connectors.list_gohighlevel_contacts(ctx.tenant_id, location_id=location_id, query=query, limit=limit)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "GoHighLevel import failed")
     return res
@@ -688,8 +688,7 @@ async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(
 
     selected = data.contacts or []
     if not selected and data.contact_ids:
-        creds = await connectors.get_credentials(ctx.tenant_id, "gohighlevel")
-        res = await connectors.list_gohighlevel_contacts(creds, location_id=location_id, query="", limit=200)
+        res = await connectors.list_gohighlevel_contacts(ctx.tenant_id, location_id=location_id, query="", limit=200)
         if not res.get("ok"):
             raise HTTPException(400, res.get("error_detail") or res.get("error") or "GoHighLevel import failed")
         contacts = res.get("contacts") or []
@@ -872,8 +871,7 @@ async def _collect_client_comms(client_doc: dict, ctx) -> dict:
     if not location_id or not contact_id:
         raise HTTPException(400, "Client is missing GoHighLevel mapping (location_id/contact_id). Import from GHL or set mapping first.")
 
-    ghl_creds = await connectors.get_credentials(ctx.tenant_id, "gohighlevel")
-    convs = await connectors.list_gohighlevel_conversations(ghl_creds, str(location_id), str(contact_id), limit=50)
+    convs = await connectors.list_gohighlevel_conversations(ctx.tenant_id, str(location_id), str(contact_id), limit=50)
     if not convs.get("ok"):
         raise HTTPException(400, convs.get("error_detail") or convs.get("error") or "Failed to fetch GoHighLevel conversations")
     ghl_msgs: List[dict] = []
@@ -881,7 +879,7 @@ async def _collect_client_comms(client_doc: dict, ctx) -> dict:
         cid = (c or {}).get("id")
         if not cid:
             continue
-        msgs = await connectors.list_gohighlevel_messages(ghl_creds, str(location_id), str(cid), limit=100)
+        msgs = await connectors.list_gohighlevel_messages(ctx.tenant_id, str(location_id), str(cid), limit=100)
         if msgs.get("ok"):
             ghl_msgs.extend(msgs.get("messages") or [])
 
@@ -1701,12 +1699,46 @@ async def clickup_folders(team_id: Optional[str] = Query(default=None), ctx=Depe
 
 @api.get("/integrations/gohighlevel/locations")
 async def ghl_locations(ctx=Depends(get_current_context)):
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        raise HTTPException(403, "Admin only")
     res = await connectors.list_gohighlevel_locations(ctx.tenant_id)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
     return res
+
+
+@api.get("/integrations/gohighlevel/location-tokens")
+async def ghl_location_tokens(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    docs = await db.integration_location_tokens.find({"tenant_id": ctx.tenant_id, "platform": "gohighlevel"}).to_list(2000)
+    ids = sorted({str(d.get("location_id") or "") for d in (docs or []) if d.get("location_id")})
+    return {"ok": True, "location_ids": ids}
+
+
+@api.post("/integrations/gohighlevel/location-tokens")
+async def upsert_ghl_location_token(data: GhlLocationTokenIn, ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    lid = str(data.location_id or "").strip()
+    tok = str(data.token or "").strip()
+    if not lid or not tok:
+        raise HTTPException(400, "Missing location_id or token")
+    await db.integration_location_tokens.update_one(
+        {"tenant_id": ctx.tenant_id, "platform": "gohighlevel", "location_id": lid},
+        {"$set": {"token_encrypted": encrypt_secret(tok), "updated_at": utcnow().isoformat()}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api.delete("/integrations/gohighlevel/location-tokens")
+async def delete_ghl_location_token(location_id: str = Query(...), ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    lid = str(location_id or "").strip()
+    if not lid:
+        raise HTTPException(400, "Missing location_id")
+    await db.integration_location_tokens.delete_one({"tenant_id": ctx.tenant_id, "platform": "gohighlevel", "location_id": lid})
+    return {"ok": True}
 
 
 # ===================== DOCS =====================

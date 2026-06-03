@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs } from "../api";
 import { PageHead } from "../Layout";
+import { useAuth } from "../auth";
 import {
   ArrowRight, CheckCircle, Clock, Megaphone, Plugs, BookOpen, Plus, MagnifyingGlass, Check, X, Sparkle,
 } from "@phosphor-icons/react";
@@ -104,11 +105,16 @@ export function ContentQueue() {
 }
 
 export function Integrations() {
+  const { user } = useAuth();
   const [list, setList] = useState([]);
   const [edit, setEdit] = useState(null);
   const [form, setForm] = useState({});
   const [busy, setBusy] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
+  const [ghlLocs, setGhlLocs] = useState([]);
+  const [ghlTokenLocId, setGhlTokenLocId] = useState("");
+  const [ghlTokenValue, setGhlTokenValue] = useState("");
+  const [ghlTokenSavedIds, setGhlTokenSavedIds] = useState([]);
   const load = () => integrations.status().then(setList);
   useEffect(() => { load(); }, []);
   useEffect(() => {
@@ -141,6 +147,12 @@ export function Integrations() {
       if (!f.secret) next[f.key] = (i.metadata || {})[f.key] || "";
     });
     setForm(next);
+    if (i.platform === "gohighlevel") {
+      integrations.gohighlevelLocations().then((r) => setGhlLocs(r?.locations || [])).catch(() => {});
+      if (user?.role === "admin") integrations.gohighlevelLocationTokens().then((r) => setGhlTokenSavedIds(r?.location_ids || [])).catch(() => {});
+      setGhlTokenLocId("");
+      setGhlTokenValue("");
+    }
   };
   const save = async (e) => {
     e.preventDefault(); setBusy(true);
@@ -262,6 +274,51 @@ export function Integrations() {
                       Disconnect
                     </button>
                   )}
+                </div>
+              </div>
+            )}
+
+            {edit.platform === "gohighlevel" && user?.role === "admin" && (
+              <div className="card-flat p-4 bg-white/[0.02] border border-white/5 mt-4">
+                <div className="label mb-1">Location Tokens (Admin)</div>
+                <div className="text-xs text-slate-400">Paste a sub-account (location) Private Integration Token for locations that restrict contacts/conversations access. Account managers can import/export without seeing the token.</div>
+                <div className="grid grid-cols-1 gap-3 mt-3">
+                  <div>
+                    <label className="label">Location</label>
+                    <select className="input mt-1.5" value={ghlTokenLocId} onChange={(e) => setGhlTokenLocId(e.target.value)}>
+                      <option value="">Select a location…</option>
+                      {ghlLocs.map((l) => <option key={l.id} value={l.id}>{l.name || l.id}{(ghlTokenSavedIds || []).includes(l.id) ? " (saved)" : ""}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="label">Private Integration Token</label>
+                    <input type="password" className="input mt-1.5" value={ghlTokenValue} onChange={(e) => setGhlTokenValue(e.target.value)} placeholder="Paste token (stored encrypted)" />
+                    <div className="text-[11px] text-slate-500 mt-1.5">Saved tokens are not shown. Paste a new value to rotate.</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button type="button" className="btn-primary flex-1" disabled={!ghlTokenLocId || !ghlTokenValue || busy} onClick={async () => {
+                      try {
+                        await integrations.gohighlevelUpsertLocationToken(ghlTokenLocId, ghlTokenValue);
+                        setGhlTokenValue("");
+                        const r = await integrations.gohighlevelLocationTokens();
+                        setGhlTokenSavedIds(r?.location_ids || []);
+                        alert("Location token saved.");
+                      } catch (e) {
+                        alert(e?.response?.data?.detail || e?.message || "Failed to save location token");
+                      }
+                    }}>Save Location Token</button>
+                    <button type="button" className="btn-danger" disabled={!ghlTokenLocId || busy} onClick={async () => {
+                      if (!window.confirm("Delete the saved token for this location?")) return;
+                      try {
+                        await integrations.gohighlevelDeleteLocationToken(ghlTokenLocId);
+                        const r = await integrations.gohighlevelLocationTokens();
+                        setGhlTokenSavedIds(r?.location_ids || []);
+                        alert("Location token deleted.");
+                      } catch (e) {
+                        alert(e?.response?.data?.detail || e?.message || "Failed to delete location token");
+                      }
+                    }}>Delete</button>
+                  </div>
                 </div>
               </div>
             )}

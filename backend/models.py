@@ -116,6 +116,11 @@ class ImportGhlClientsIn(BaseModel):
     contact_ids: List[str] = Field(default_factory=list)
 
 
+class GhlLocationTokenIn(BaseModel):
+    location_id: str
+    token: str
+
+
 # ===== MEETINGS =====
 class Win(BaseModel):
     title: str

@@ -160,23 +160,18 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[st
     }
 
 
-async def fetch_gohighlevel_monthly(creds: Dict[str, str], binding: dict) -> Dict[str, Any]:
-    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+async def fetch_gohighlevel_monthly(tenant_id: str, binding: dict) -> Dict[str, Any]:
     location_id = (
         (binding.get("external_ids") or {}).get("location_id")
         or (binding.get("config") or {}).get("location_id")
-        or (creds or {}).get("location_id")
     )
+    api_key = await _gohighlevel_token_for_location(tenant_id, str(location_id or ""))
     if not api_key or not location_id:
         return {}
 
     start_d, end_d = _last_30_days_range()
     url = "https://services.leadconnectorhq.com/opportunities/search"
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {api_key}",
-        "Version": "2023-02-21",
-    }
+    headers = _ghl_headers(api_key, location_id=str(location_id))
 
     async def fetch_status(status: str) -> dict:
         params = {
@@ -347,10 +342,10 @@ async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = 
         else:
             snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_missing_client_mapping", "error_detail": "Missing ClickUp Folder ID mapping for this client."}
 
-    ghl_creds = await get_credentials(tenant_id, "gohighlevel")
     ghl_binding = await get_client_binding(tenant_id, client_id, "gohighlevel")
-    if (ghl_creds or {}).get("api_key"):
-        ghl_data = await fetch_gohighlevel_monthly(ghl_creds, ghl_binding or {"external_ids": {}, "config": {}})
+    ghl_api_key = await _gohighlevel_base_api_key(tenant_id)
+    if ghl_api_key:
+        ghl_data = await fetch_gohighlevel_monthly(tenant_id, ghl_binding or {"external_ids": {}, "config": {}})
         if ghl_data:
             snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
         else:
@@ -754,8 +749,32 @@ def _ghl_headers(api_key: str, location_id: Optional[str] = None) -> Dict[str, s
     return h
 
 
-async def list_gohighlevel_contacts(creds: Dict[str, str], location_id: str, query: str = "", limit: int = 100) -> Dict[str, Any]:
-    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+async def _gohighlevel_base_api_key(tenant_id: str) -> str:
+    creds = await get_credentials(tenant_id, "gohighlevel")
+    return _strip_bearer((creds or {}).get("api_key", ""))
+
+
+async def get_gohighlevel_location_token(tenant_id: str, location_id: str) -> str:
+    lid = str(location_id or "").strip()
+    if not lid:
+        return ""
+    doc = await db.integration_location_tokens.find_one(
+        {"tenant_id": tenant_id, "platform": "gohighlevel", "location_id": lid}
+    )
+    if not doc:
+        return ""
+    return _strip_bearer(decrypt_secret(doc.get("token_encrypted") or ""))
+
+
+async def _gohighlevel_token_for_location(tenant_id: str, location_id: str) -> str:
+    tok = await get_gohighlevel_location_token(tenant_id, location_id)
+    if tok:
+        return tok
+    return await _gohighlevel_base_api_key(tenant_id)
+
+
+async def list_gohighlevel_contacts(tenant_id: str, location_id: str, query: str = "", limit: int = 100) -> Dict[str, Any]:
+    api_key = await _gohighlevel_token_for_location(tenant_id, location_id)
     if not api_key:
         return {"ok": False, "error": "missing_api_key"}
     if not location_id:
@@ -776,6 +795,8 @@ async def list_gohighlevel_contacts(creds: Dict[str, str], location_id: str, que
             resp = await client.get("https://services.leadconnectorhq.com/contacts/", headers=headers, params=params)
 
     if resp.status_code != 200:
+        if resp.status_code in (401, 403) and not await get_gohighlevel_location_token(tenant_id, location_id):
+            return {"ok": False, "error": "missing_location_token", "error_detail": "This location requires a GoHighLevel Location Private Integration Token. Ask your tenant admin to add it in Integrations → GoHighLevel."}
         return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
 
     data = resp.json() or {}
@@ -804,8 +825,8 @@ async def list_gohighlevel_contacts(creds: Dict[str, str], location_id: str, que
     return {"ok": True, "contacts": out[: int(limit or 100)]}
 
 
-async def list_gohighlevel_conversations(creds: Dict[str, str], location_id: str, contact_id: str, limit: int = 50) -> Dict[str, Any]:
-    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+async def list_gohighlevel_conversations(tenant_id: str, location_id: str, contact_id: str, limit: int = 50) -> Dict[str, Any]:
+    api_key = await _gohighlevel_token_for_location(tenant_id, location_id)
     if not api_key:
         return {"ok": False, "error": "missing_api_key"}
     if not location_id:
@@ -817,6 +838,8 @@ async def list_gohighlevel_conversations(creds: Dict[str, str], location_id: str
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get("https://services.leadconnectorhq.com/conversations/search", headers=headers, params=params)
     if resp.status_code != 200:
+        if resp.status_code in (401, 403) and not await get_gohighlevel_location_token(tenant_id, location_id):
+            return {"ok": False, "error": "missing_location_token", "error_detail": "This location requires a GoHighLevel Location Private Integration Token. Ask your tenant admin to add it in Integrations → GoHighLevel."}
         return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
     data = resp.json() or {}
     convs = data.get("conversations") or []
@@ -828,8 +851,8 @@ async def list_gohighlevel_conversations(creds: Dict[str, str], location_id: str
     return {"ok": True, "conversations": out}
 
 
-async def list_gohighlevel_messages(creds: Dict[str, str], location_id: str, conversation_id: str, limit: int = 100) -> Dict[str, Any]:
-    api_key = _strip_bearer((creds or {}).get("api_key", ""))
+async def list_gohighlevel_messages(tenant_id: str, location_id: str, conversation_id: str, limit: int = 100) -> Dict[str, Any]:
+    api_key = await _gohighlevel_token_for_location(tenant_id, location_id)
     if not api_key:
         return {"ok": False, "error": "missing_api_key"}
     if not location_id:
@@ -850,6 +873,8 @@ async def list_gohighlevel_messages(creds: Dict[str, str], location_id: str, con
                 params=params,
             )
         if resp.status_code != 200:
+            if resp.status_code in (401, 403) and not await get_gohighlevel_location_token(tenant_id, location_id):
+                return {"ok": False, "error": "missing_location_token", "error_detail": "This location requires a GoHighLevel Location Private Integration Token. Ask your tenant admin to add it in Integrations → GoHighLevel."}
             return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
         data = resp.json() or {}
         wrapper = data.get("messages") or {}

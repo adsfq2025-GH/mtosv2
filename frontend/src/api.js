@@ -100,6 +100,9 @@ export const integrations = {
   clickupLists: (teamId) => api.get(`/integrations/clickup/lists${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`).then((r) => r.data),
   clickupFolders: (teamId) => api.get(`/integrations/clickup/folders${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`).then((r) => r.data),
   gohighlevelLocations: () => api.get("/integrations/gohighlevel/locations").then((r) => r.data),
+  gohighlevelLocationTokens: () => api.get("/integrations/gohighlevel/location-tokens").then((r) => r.data),
+  gohighlevelUpsertLocationToken: (locationId, token) => api.post("/integrations/gohighlevel/location-tokens", { location_id: locationId, token }).then((r) => r.data),
+  gohighlevelDeleteLocationToken: (locationId) => api.delete(`/integrations/gohighlevel/location-tokens?location_id=${encodeURIComponent(locationId)}`).then((r) => r.data),
   googleAdsCustomers: () => api.get("/integrations/google_ads/customers").then((r) => r.data),
 };
 
