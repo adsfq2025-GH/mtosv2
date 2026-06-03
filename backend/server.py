@@ -4,7 +4,7 @@ import copy
 import logging
 import os
 import uvicorn
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, List, Optional
 import zipfile
@@ -44,6 +44,9 @@ from models import (  # noqa: E402
     ActionItem,
     ActionItemIn,
     AnalyzeTranscriptIn,
+    AiVisibilityConfig,
+    AiVisibilityConfigIn,
+    AiVisibilityRun,
     Client,
     ClientIn,
     ImportGhlClientsIn,
@@ -72,6 +75,7 @@ from models import (  # noqa: E402
 from integrations_meta import INTEGRATIONS, list_integrations, demo_kpi_snapshot
 from docs_content import DOCS, get_categories, get_doc, get_docs_summary
 import ai
+import ai_visibility
 import connectors
 import monthly_touch
 
@@ -474,6 +478,211 @@ async def put_settings(data: TenantSettingsIn, ctx=Depends(get_current_context))
     await db.tenant_settings.update_one({"tenant_id": ctx.tenant_id}, {"$set": patch}, upsert=True)
     doc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
     return TenantSettings.from_mongo(doc).model_dump()
+
+
+async def _is_internal_tenant_id(tenant_id: str) -> bool:
+    tdoc = await db.tenants.find_one({"_id": tenant_id})
+    tslug = str((tdoc or {}).get("slug") or "")
+    internal_slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
+    return bool(tslug and internal_slug and tslug == internal_slug)
+
+
+async def _ai_visibility_entitlement(ctx) -> dict:
+    if ctx.user.role == "admin":
+        return {"enabled": True, "trial_expires_at": None, "reason": "global_admin"}
+    if await _is_internal_tenant_id(ctx.tenant_id):
+        return {"enabled": True, "trial_expires_at": None, "reason": "internal_tenant"}
+
+    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    analysis = settings.analysis or {}
+    ent = (analysis.get("entitlements") or {}) if isinstance(analysis, dict) else {}
+    enabled = bool(ent.get("ai_visibility"))
+    trial_expires_at = str(analysis.get("ai_visibility_trial_expires_at") or "").strip() or None
+
+    if enabled:
+        return {"enabled": True, "trial_expires_at": trial_expires_at, "reason": "enabled"}
+    if trial_expires_at:
+        try:
+            exp = datetime.fromisoformat(trial_expires_at.replace("Z", "+00:00"))
+            if exp > utcnow():
+                return {"enabled": True, "trial_expires_at": trial_expires_at, "reason": "trial"}
+        except Exception:
+            pass
+
+    return {"enabled": False, "trial_expires_at": trial_expires_at, "reason": "disabled"}
+
+
+async def _require_ai_visibility(ctx=Depends(get_current_context)):
+    ent = await _ai_visibility_entitlement(ctx)
+    if not ent.get("enabled"):
+        raise HTTPException(403, "AI Visibility is not enabled for this tenant")
+    return ctx
+
+
+@api.get("/ai-visibility/entitlement")
+async def ai_visibility_entitlement(ctx=Depends(get_current_context)):
+    ent = await _ai_visibility_entitlement(ctx)
+    can_manage = bool(ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin"))
+    return {"ok": True, **ent, "can_manage": can_manage}
+
+
+@api.post("/super/ai-visibility/grant")
+async def super_grant_ai_visibility(
+    tenant_id: str = Query(...),
+    enabled: bool = Query(True),
+    trial_days: int = Query(14, ge=1, le=365),
+    user: User = Depends(get_current_user),
+):
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    tdoc = await db.tenants.find_one({"_id": tenant_id})
+    if not tdoc:
+        raise HTTPException(404, "Tenant not found")
+
+    sdoc = await db.tenant_settings.find_one({"tenant_id": tenant_id})
+    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=tenant_id)
+    analysis = dict(settings.analysis or {})
+    ent = dict((analysis.get("entitlements") or {}) if isinstance(analysis, dict) else {})
+    ent["ai_visibility"] = bool(enabled)
+    analysis["entitlements"] = ent
+    if enabled:
+        analysis["ai_visibility_trial_expires_at"] = (utcnow() + timedelta(days=int(trial_days))).isoformat()
+    else:
+        analysis.pop("ai_visibility_trial_expires_at", None)
+
+    patch = {"analysis": analysis, "updated_at": utcnow().isoformat()}
+    await db.tenant_settings.update_one({"tenant_id": tenant_id}, {"$set": patch}, upsert=True)
+    return {"ok": True}
+
+
+@api.get("/ai-visibility/configs")
+async def list_ai_visibility_configs(
+    client_id: str = Query(...),
+    ctx=Depends(_require_ai_visibility),
+):
+    docs = await db.ai_visibility_configs.find({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(200)
+    client_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    client_obj = client_doc or {}
+    out = []
+    for d in docs or []:
+        cfg = AiVisibilityConfig.from_mongo(d).model_dump()
+        brand, domain = ai_visibility.infer_brand_and_domain(client_obj, cfg.get("brand_override"), cfg.get("domain_override"))
+        keywords = [str(x or "").strip() for x in (cfg.get("keywords") or []) if str(x or "").strip()]
+        while len(keywords) < 5:
+            keywords.append("")
+        cfg["keyword_slots"] = keywords
+        cfg["inferred_brand"] = brand
+        cfg["inferred_domain"] = domain
+        out.append(cfg)
+    return {"ok": True, "configs": out}
+
+
+@api.post("/ai-visibility/configs")
+async def create_ai_visibility_config(
+    data: AiVisibilityConfigIn,
+    client_id: str = Query(...),
+    ctx=Depends(_require_ai_visibility),
+):
+    kw = [str(x or "").strip() for x in (data.keywords or []) if str(x or "").strip()]
+    cfg = AiVisibilityConfig(
+        tenant_id=ctx.tenant_id,
+        client_id=client_id,
+        market=str(data.market or "").strip(),
+        keywords=kw,
+        brand_override=str(data.brand_override or "").strip() or None,
+        domain_override=str(data.domain_override or "").strip() or None,
+        enabled=bool(data.enabled),
+    )
+    await db.ai_visibility_configs.insert_one(cfg.to_mongo())
+    return {"ok": True, "config": cfg.model_dump()}
+
+
+@api.patch("/ai-visibility/configs/{config_id}")
+async def update_ai_visibility_config(
+    config_id: str,
+    data: AiVisibilityConfigIn,
+    ctx=Depends(_require_ai_visibility),
+):
+    kw = [str(x or "").strip() for x in (data.keywords or []) if str(x or "").strip()]
+    patch = {
+        "market": str(data.market or "").strip(),
+        "keywords": kw,
+        "brand_override": str(data.brand_override or "").strip() or None,
+        "domain_override": str(data.domain_override or "").strip() or None,
+        "enabled": bool(data.enabled),
+        "updated_at": utcnow().isoformat(),
+    }
+    res = await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Config not found")
+    doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+    return {"ok": True, "config": AiVisibilityConfig.from_mongo(doc).model_dump()}
+
+
+@api.get("/ai-visibility/configs/{config_id}/runs")
+async def list_ai_visibility_runs(
+    config_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    ctx=Depends(_require_ai_visibility),
+):
+    docs = await db.ai_visibility_runs.find({"$and": [{"config_id": config_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(int(limit))
+    return {"ok": True, "runs": [AiVisibilityRun.from_mongo(d).model_dump() for d in (docs or [])]}
+
+
+@api.post("/ai-visibility/configs/{config_id}/run")
+async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibility)):
+    cfg_doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+    if not cfg_doc:
+        raise HTTPException(404, "Config not found")
+    cfg = AiVisibilityConfig.from_mongo(cfg_doc)
+    if not cfg.enabled:
+        raise HTTPException(400, "Config is disabled")
+
+    client_doc = await db.clients.find_one({"_id": cfg.client_id, **tenant_scope(ctx.tenant_id)})
+    if not client_doc:
+        raise HTTPException(404, "Client not found")
+
+    brand, domain = ai_visibility.infer_brand_and_domain(client_doc, cfg.brand_override, cfg.domain_override)
+    keywords = [str(x or "").strip() for x in (cfg.keywords or []) if str(x or "").strip()]
+    if not keywords:
+        raise HTTPException(400, "Add at least one keyword")
+
+    providers = ["openai", "gemini", "perplexity"]
+    created = 0
+    hit_count = 0
+    per_provider = {p: {"hits": 0, "total": 0, "errors": 0} for p in providers}
+
+    for kw in keywords:
+        for p in providers:
+            per_provider[p]["total"] += 1
+            try:
+                r = await ai_visibility.scan_keyword(provider=p, keyword=kw, market=cfg.market, brand=brand, domain=domain)
+                run = AiVisibilityRun(
+                    tenant_id=ctx.tenant_id,
+                    config_id=config_id,
+                    client_id=cfg.client_id,
+                    market=cfg.market,
+                    keyword=kw,
+                    provider=p,
+                    prompt=r.get("prompt") or "",
+                    response_text=r.get("response_text") or "",
+                    parsed=r.get("parsed") or {},
+                    hit=bool(r.get("hit")),
+                    hit_brand=bool(r.get("hit_brand")),
+                    hit_domain=bool(r.get("hit_domain")),
+                )
+                await db.ai_visibility_runs.insert_one(run.to_mongo())
+                created += 1
+                if run.hit:
+                    hit_count += 1
+                    per_provider[p]["hits"] += 1
+            except ai.AIProviderError:
+                per_provider[p]["errors"] += 1
+            except Exception:
+                per_provider[p]["errors"] += 1
+
+    return {"ok": True, "created": created, "hits": hit_count, "providers": per_provider, "brand": brand, "domain": domain}
 
 
 @api.get("/white-label/domains")

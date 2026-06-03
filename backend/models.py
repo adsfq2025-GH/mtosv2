@@ -80,6 +80,7 @@ class Client(BaseDocument):
     primary_contact: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    website: Optional[str] = None
     location: Optional[str] = None
     account_manager_id: Optional[str] = None
     account_manager_name: Optional[str] = None
@@ -101,6 +102,7 @@ class ClientIn(BaseModel):
     primary_contact: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    website: Optional[str] = None
     location: Optional[str] = None
     account_manager_id: Optional[str] = None
     services: List[str] = Field(default_factory=list)
@@ -119,6 +121,40 @@ class ImportGhlClientsIn(BaseModel):
 class GhlLocationTokenIn(BaseModel):
     location_id: str
     token: str
+
+
+# ===== AI VISIBILITY =====
+class AiVisibilityConfig(BaseDocument):
+    tenant_id: Optional[str] = None
+    client_id: str
+    market: str = ""
+    keywords: List[str] = Field(default_factory=list)
+    brand_override: Optional[str] = None
+    domain_override: Optional[str] = None
+    enabled: bool = True
+
+
+class AiVisibilityConfigIn(BaseModel):
+    market: str = ""
+    keywords: List[str] = Field(default_factory=list)
+    brand_override: Optional[str] = None
+    domain_override: Optional[str] = None
+    enabled: bool = True
+
+
+class AiVisibilityRun(BaseDocument):
+    tenant_id: Optional[str] = None
+    config_id: str
+    client_id: str
+    market: str = ""
+    keyword: str
+    provider: Literal["openai", "gemini", "perplexity"]
+    prompt: str
+    response_text: str
+    parsed: Dict[str, Any] = Field(default_factory=dict)
+    hit: bool = False
+    hit_brand: bool = False
+    hit_domain: bool = False
 
 
 # ===== MEETINGS =====

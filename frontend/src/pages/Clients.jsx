@@ -9,7 +9,7 @@ const healthChip = (h) => h >= 80 ? "chip-success" : h >= 60 ? "chip-info" : h >
 
 export function ClientsList() {
   const [list, setList] = useState([]); const [showNew, setShowNew] = useState(false); const [showImport, setShowImport] = useState(false);
-  const [form, setForm] = useState({ name: "", company: "", industry: "", email: "", phone: "", location: "", services: "" });
+  const [form, setForm] = useState({ name: "", company: "", industry: "", email: "", phone: "", website: "", location: "", services: "" });
   const [ghlLocations, setGhlLocations] = useState([]);
   const [importLocationId, setImportLocationId] = useState("");
   const [importQuery, setImportQuery] = useState("");
@@ -24,7 +24,7 @@ export function ClientsList() {
   const create = async (e) => {
     e.preventDefault();
     const c = await clients.create({ ...form, services: form.services.split(",").map(s => s.trim()).filter(Boolean) });
-    setShowNew(false); setForm({ name: "", company: "", industry: "", email: "", phone: "", location: "", services: "" });
+    setShowNew(false); setForm({ name: "", company: "", industry: "", email: "", phone: "", website: "", location: "", services: "" });
     navigate(`/clients/${c.id}`);
   };
 
@@ -73,6 +73,7 @@ export function ClientsList() {
               <div><label className="label">Location</label><input className="input mt-1.5" value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} /></div>
               <div><label className="label">Email</label><input type="email" className="input mt-1.5" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
               <div><label className="label">Phone</label><input className="input mt-1.5" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></div>
+              <div className="col-span-2"><label className="label">Website / Domain</label><input className="input mt-1.5" value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} placeholder="example.com" /></div>
               <div className="col-span-2"><label className="label">Services (comma-separated)</label><input className="input mt-1.5" placeholder="SEO, GBP, Google Ads" value={form.services} onChange={(e) => setForm({ ...form, services: e.target.value })} data-testid="new-client-services" /></div>
             </div>
             <button type="submit" className="btn-primary w-full mt-5" data-testid="new-client-submit">Create Client</button>
@@ -240,10 +241,13 @@ export function ClientDetail() {
   const [loadingGads, setLoadingGads] = useState(false);
   const [showMeet, setShowMeet] = useState(false);
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
+  const [website, setWebsite] = useState("");
+  const [savingClient, setSavingClient] = useState(false);
 
   const reload = useCallback(
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
       setClient(c); setMeets(m); setActions(a);
+      setWebsite(String(c?.website || ""));
       const clickup = (b || []).find((x) => x.platform === "clickup");
       const folderId = clickup?.external_ids?.folder_id || clickup?.config?.folder_id || "";
       setClickupFolderId(folderId ? String(folderId) : "");
@@ -450,6 +454,29 @@ export function ClientDetail() {
             {client.email && <div className="flex items-center gap-2 text-slate-300"><EnvelopeSimple size={14} /> {client.email}</div>}
             {client.phone && <div className="flex items-center gap-2 text-slate-300"><Phone size={14} /> {client.phone}</div>}
             {client.location && <div className="flex items-center gap-2 text-slate-300"><MapPin size={14} /> {client.location}</div>}
+          </div>
+          <div className="divider my-4" />
+          <div className="label mb-2">Website / Domain</div>
+          <div className="flex gap-2">
+            <input className="input flex-1" value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="example.com" />
+            <button
+              type="button"
+              className="btn-ghost whitespace-nowrap"
+              disabled={savingClient}
+              onClick={async () => {
+                setSavingClient(true);
+                try {
+                  await clients.update(id, { website: website || "" });
+                  await reload();
+                } catch (e) {
+                  alert(e?.response?.data?.detail || "Failed to save website");
+                } finally {
+                  setSavingClient(false);
+                }
+              }}
+            >
+              {savingClient ? "Saving…" : "Save"}
+            </button>
           </div>
           <div className="divider my-4" />
           <div className="label mb-2">Services</div>
