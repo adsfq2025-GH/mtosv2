@@ -272,6 +272,8 @@ class Meeting(BaseDocument):
     sentiment_summary: Optional[str] = None
     recap_html: Optional[str] = None
     recap_email: Optional[str] = None
+    recap_subject: Optional[str] = None
+    recap_sent_at: Optional[str] = None
 
     # Scorecard
     meeting_score: Optional[int] = None

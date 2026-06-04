@@ -2,7 +2,7 @@ import React from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
   House, Users, CalendarCheck, CheckSquare, Megaphone, Plugs, BookOpen,
-  SignOut, Sparkle, CaretRight, Trophy, Lightbulb,
+  SignOut, Sparkle, CaretRight, Trophy, Lightbulb, MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { useAuth } from "./auth";
 import { applyDisplayMode, getSavedDisplayMode } from "./displayMode";
@@ -21,7 +21,7 @@ export function Brand() {
   );
 }
 
-const NAV = [
+const NAV_BASE = [
   { to: "/", label: "Dashboard", icon: House, end: true, testid: "nav-dashboard" },
   { to: "/clients", label: "Clients", icon: Users, testid: "nav-clients" },
   { to: "/meetings", label: "Meetings", icon: CalendarCheck, testid: "nav-meetings" },
@@ -37,6 +37,13 @@ const NAV = [
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const nav = React.useMemo(() => {
+    const base = [...NAV_BASE];
+    if (user?.role === "admin") {
+      base.splice(7, 0, { to: "/ai-visibility", label: "AI Visibility", icon: MagnifyingGlass, testid: "nav-ai-visibility" });
+    }
+    return base;
+  }, [user?.role]);
   const [displayMode, setDisplayMode] = React.useState("dark");
   const [displayOpen, setDisplayOpen] = React.useState(false);
   const displayRef = React.useRef(null);
@@ -60,7 +67,7 @@ export default function Layout({ children }) {
       <aside className="hidden md:flex md:flex-col w-64 shrink-0 border-r border-white/5 px-4 py-5 sticky top-0 h-screen">
         <Brand />
         <nav className="mt-8 flex flex-col gap-1" data-testid="sidebar-nav">
-          {NAV.map((n) => (
+          {nav.map((n) => (
             <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => `sidebar-link ${isActive ? "active" : ""}`} data-testid={n.testid}>
               <n.icon size={18} weight="duotone" />
               <span>{n.label}</span>

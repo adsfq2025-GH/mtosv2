@@ -1,4 +1,5 @@
 """Monthly Touch OS — FastAPI backend."""
+import asyncio
 import io
 import copy
 import logging
@@ -89,6 +90,107 @@ DB_READY = False
 
 def tenant_scope(tenant_id: str) -> dict:
     return {"tenant_id": tenant_id}
+
+
+async def _bg_publish_clickup_brief(tenant_id: str, meeting_id: str) -> None:
+    try:
+        m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
+        if not m_doc:
+            return
+        c_doc = await db.clients.find_one({"_id": str(m_doc.get("client_id") or ""), **tenant_scope(tenant_id)})
+        res = await connectors.publish_clickup_meeting_brief(tenant_id, m_doc, c_doc or {})
+        if not res.get("ok"):
+            return
+        task_id = str(res.get("task_id") or "").strip()
+        task_url = str(res.get("url") or "").strip()
+        if not task_id:
+            return
+        await db.meetings.update_one(
+            {"_id": meeting_id, **tenant_scope(tenant_id)},
+            {"$set": {"clickup_client_book.brief_task_id": task_id, "clickup_client_book.brief_task_url": task_url, "updated_at": utcnow().isoformat()}},
+        )
+    except Exception as exc:
+        logger.error("clickup brief publish failed: %s", exc)
+
+
+async def _bg_publish_clickup_summary(tenant_id: str, meeting_id: str) -> None:
+    try:
+        m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
+        if not m_doc:
+            return
+        if not str(m_doc.get("recap_email") or "").strip():
+            return
+        if not str(m_doc.get("automation_approved_at") or "").strip():
+            return
+        c_doc = await db.clients.find_one({"_id": str(m_doc.get("client_id") or ""), **tenant_scope(tenant_id)})
+        actions = await db.action_items.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(tenant_id)]}).to_list(500)
+        tickets = await db.tickets.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(tenant_id)]}).to_list(500)
+        res = await connectors.publish_clickup_meeting_summary(tenant_id, m_doc, c_doc or {}, actions or [], tickets or [])
+        if not res.get("ok"):
+            return
+        task_id = str(res.get("task_id") or "").strip()
+        task_url = str(res.get("url") or "").strip()
+        if not task_id:
+            return
+        await db.meetings.update_one(
+            {"_id": meeting_id, **tenant_scope(tenant_id)},
+            {"$set": {"clickup_client_book.summary_task_id": task_id, "clickup_client_book.summary_task_url": task_url, "updated_at": utcnow().isoformat()}},
+        )
+    except Exception as exc:
+        logger.error("clickup summary publish failed: %s", exc)
+
+
+async def _bg_publish_clickup_tickets(tenant_id: str, meeting_id: str) -> None:
+    try:
+        m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
+        if not m_doc:
+            return
+        tickets = await db.tickets.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(tenant_id)]}).to_list(1000)
+        if not tickets:
+            return
+        res = await connectors.publish_clickup_department_tickets(tenant_id, m_doc, tickets)
+        if not res.get("ok"):
+            return
+        for it in res.get("published") or []:
+            tid = str(it.get("ticket_id") or "").strip()
+            task_id = str(it.get("task_id") or "").strip()
+            url = str(it.get("url") or "").strip()
+            if tid and task_id:
+                await db.tickets.update_one(
+                    {"_id": tid, **tenant_scope(tenant_id)},
+                    {"$set": {"external_id": task_id, "external_url": url, "updated_at": utcnow().isoformat()}},
+                )
+    except Exception as exc:
+        logger.error("clickup tickets publish failed: %s", exc)
+
+
+async def _bg_send_client_recap_email(tenant_id: str, meeting_id: str, user_id: str) -> None:
+    try:
+        m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
+        if not m_doc:
+            return
+        if str(m_doc.get("recap_sent_at") or "").strip():
+            return
+        draft = m_doc.get("automation_draft") or {}
+        email = (draft.get("client_recap_email") or {}) if isinstance(draft, dict) else {}
+        subject = str(email.get("subject") or "").strip()
+        plain = str(email.get("plain") or "").strip()
+        if not plain:
+            return
+        client_id = str(m_doc.get("client_id") or "").strip()
+        c_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(tenant_id)})
+        to_addr = str((c_doc or {}).get("email") or "").strip()
+        if not to_addr:
+            return
+        res = await connectors.send_gmail_plain_email(tenant_id, user_id, to_addr, subject, plain)
+        if not res.get("ok"):
+            return
+        await db.meetings.update_one(
+            {"_id": meeting_id, **tenant_scope(tenant_id)},
+            {"$set": {"recap_subject": subject, "recap_email": plain, "recap_sent_at": utcnow().isoformat(), "updated_at": utcnow().isoformat()}},
+        )
+    except Exception as exc:
+        logger.error("gmail recap send failed: %s", exc)
 
 
 GOOGLE_OAUTH_PLATFORMS = {
@@ -1447,6 +1549,7 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get
     }
     await db.meetings.update_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)}, {"$set": update})
     doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    asyncio.create_task(_bg_publish_clickup_brief(ctx.tenant_id, meeting_id))
     return Meeting.from_mongo(doc).model_dump()
 
 
@@ -1483,14 +1586,27 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
     meeting = Meeting.from_mongo(m_doc)
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
-    analysis = await ai.analyze_transcript(
-        client_name=client.name if client else (meeting.client_name or ""),
-        company=client.company if client else "",
-        am_name=meeting.account_manager_name or ctx.user.name,
-        transcript=data.transcript,
-        model_key=data.model or ai.DEFAULT_MODEL,
-        session_id=f"transcript-{meeting_id}",
+    analysis_task = asyncio.create_task(
+        ai.analyze_transcript(
+            client_name=client.name if client else (meeting.client_name or ""),
+            company=client.company if client else "",
+            am_name=meeting.account_manager_name or ctx.user.name,
+            transcript=data.transcript,
+            model_key=data.model or ai.DEFAULT_MODEL,
+            session_id=f"transcript-{meeting_id}",
+        )
     )
+    automation_task = asyncio.create_task(
+        ai.generate_meeting_workflow(
+            client_name=client.name if client else (meeting.client_name or ""),
+            company=client.company if client else "",
+            title=meeting.title,
+            transcript=data.transcript,
+            model_key=data.model or ai.DEFAULT_MODEL,
+            session_id=f"automation-{meeting_id}",
+        )
+    )
+    analysis, automation_draft = await asyncio.gather(analysis_task, automation_task)
     # persist transcript + sentiment
     await db.meetings.update_one(
         {"_id": meeting_id, **tenant_scope(ctx.tenant_id)},
@@ -1500,6 +1616,8 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
                 "transcript_analyzed_at": utcnow().isoformat(),
                 "sentiment": analysis.get("sentiment", "neutral"),
                 "sentiment_summary": analysis.get("sentiment_summary", ""),
+                "automation_draft": automation_draft,
+                "automation_draft_generated_at": utcnow().isoformat(),
                 "updated_at": utcnow().isoformat(),
             }
         },
@@ -1545,6 +1663,7 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
 
     return {
         "analysis": analysis,
+        "automation_draft": automation_draft,
         "created_action_items": created_actions,
         "created_content_captures": created_content,
     }
@@ -1584,6 +1703,7 @@ async def generate_recap(meeting_id: str, data: GenerateRecapIn, ctx=Depends(get
             }
         },
     )
+    asyncio.create_task(_bg_publish_clickup_summary(ctx.tenant_id, meeting_id))
     return recap
 
 
@@ -1669,6 +1789,9 @@ async def approve_meeting_automation(meeting_id: str, ctx=Depends(get_current_co
         {"_id": meeting_id, **tenant_scope(ctx.tenant_id)},
         {"$set": {"automation_approved_at": utcnow().isoformat(), "updated_at": utcnow().isoformat()}},
     )
+    asyncio.create_task(_bg_publish_clickup_tickets(ctx.tenant_id, meeting_id))
+    asyncio.create_task(_bg_send_client_recap_email(ctx.tenant_id, meeting_id, meeting.account_manager_id or ctx.user.id))
+    asyncio.create_task(_bg_publish_clickup_summary(ctx.tenant_id, meeting_id))
     return {"ok": True, "created_action_items": created_actions, "created_tickets": created_tickets}
 
 
@@ -2136,87 +2259,93 @@ async def docs_detail(slug: str, ctx=Depends(get_current_context)):
 # ===================== DASHBOARD =====================
 @api.get("/dashboard/overview")
 async def dashboard_overview(ctx=Depends(get_current_context)):
-    clients = await db.clients.find(tenant_scope(ctx.tenant_id)).to_list(2000)
-    meetings = await db.meetings.find(tenant_scope(ctx.tenant_id)).to_list(2000)
-    actions = await db.action_items.find(tenant_scope(ctx.tenant_id)).to_list(5000)
-    content = await db.content_captures.find(tenant_scope(ctx.tenant_id)).to_list(2000)
-
-    total_clients = len(clients)
-    health_scores = [c.get("health_score", 75) for c in clients]
-    avg_health = round(sum(health_scores) / len(health_scores), 1) if health_scores else 0
-    churn_red = sum(1 for c in clients if c.get("churn_risk") == "high")
-    churn_yellow = sum(1 for c in clients if c.get("churn_risk") == "medium")
-
-    meetings_this_month = 0
     now = utcnow()
-    for m in meetings:
-        sched = m.get("scheduled_at") or m.get("created_at")
-        if isinstance(sched, str):
-            try:
-                dt = datetime.fromisoformat(sched.replace("Z", "+00:00"))
-                if dt.year == now.year and dt.month == now.month:
-                    meetings_this_month += 1
-            except Exception:
-                pass
+    now_iso = now.isoformat()
+    start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    start_month_iso = start_month.isoformat()
 
-    open_actions = sum(1 for a in actions if a.get("status") in ("open", "in_progress"))
-    overdue_actions = 0
-    for a in actions:
-        if a.get("status") in ("open", "in_progress") and a.get("due_date"):
-            try:
-                d = datetime.fromisoformat(a["due_date"])
-                if d.replace(tzinfo=timezone.utc) < now:
-                    overdue_actions += 1
-            except Exception:
-                pass
+    total_clients = await db.clients.count_documents(tenant_scope(ctx.tenant_id))
+    churn_risk_high = await db.clients.count_documents({"$and": [tenant_scope(ctx.tenant_id), {"churn_risk": "high"}]})
+    churn_risk_medium = await db.clients.count_documents({"$and": [tenant_scope(ctx.tenant_id), {"churn_risk": "medium"}]})
 
-    def _parse_dt(v):
-        if not v:
-            return None
-        if isinstance(v, datetime):
-            return v.replace(tzinfo=v.tzinfo or timezone.utc)
-        if isinstance(v, str):
-            try:
-                return datetime.fromisoformat(v.replace("Z", "+00:00"))
-            except Exception:
-                return None
-        return None
+    avg_health_score = 0
+    try:
+        cur = db.clients.aggregate(
+            [
+                {"$match": tenant_scope(ctx.tenant_id)},
+                {"$group": {"_id": None, "avg": {"$avg": {"$ifNull": ["$health_score", 75]}}}},
+            ]
+        )
+        rows = await cur.to_list(1)
+        if rows and rows[0].get("avg") is not None:
+            avg_health_score = round(float(rows[0]["avg"]), 1)
+    except Exception:
+        avg_health_score = 0
 
-    meeting_models = [Meeting.from_mongo(m).model_dump() for m in meetings]
-    upcoming = []
-    for m in meeting_models:
-        dt = _parse_dt(m.get("scheduled_at")) or _parse_dt(m.get("created_at"))
-        if dt and dt.replace(tzinfo=dt.tzinfo or timezone.utc) >= now:
-            upcoming.append((dt, m))
-    upcoming.sort(key=lambda x: x[0])
-    prep_queue = [m for _, m in upcoming if not m.get("brief_generated_at")][:5]
+    meetings_this_month = await db.meetings.count_documents(
+        {"$and": [tenant_scope(ctx.tenant_id), {"created_at": {"$gte": start_month_iso}}]}
+    )
+
+    open_action_items = await db.action_items.count_documents(
+        {"$and": [tenant_scope(ctx.tenant_id), {"status": {"$in": ["open", "in_progress"]}}]}
+    )
+    overdue_action_items = await db.action_items.count_documents(
+        {"$and": [tenant_scope(ctx.tenant_id), {"status": {"$in": ["open", "in_progress"]}}, {"due_date": {"$lt": now.date().isoformat()}}]}
+    )
+
+    content_captures_total = await db.content_captures.count_documents(tenant_scope(ctx.tenant_id))
+    content_pending_routing = await db.content_captures.count_documents(
+        {"$and": [tenant_scope(ctx.tenant_id), {"routed_to_marketing": {"$ne": True}}]}
+    )
+
+    meeting_docs = await db.meetings.find(tenant_scope(ctx.tenant_id)).sort("created_at", -1).limit(5).to_list(5)
+    recent_meetings = [Meeting.from_mongo(m).model_dump() for m in (meeting_docs or [])]
+
+    prep_docs = await db.meetings.find(
+        {
+            "$and": [
+                tenant_scope(ctx.tenant_id),
+                {"brief_generated_at": {"$in": [None, ""]}},
+                {"scheduled_at": {"$nin": [None, ""]}},
+                {"scheduled_at": {"$gte": now_iso}},
+            ]
+        }
+    ).sort("scheduled_at", 1).limit(5).to_list(5)
+    prep_queue = [Meeting.from_mongo(m).model_dump() for m in (prep_docs or [])]
+    prep_queue_count = await db.meetings.count_documents(
+        {
+            "$and": [
+                tenant_scope(ctx.tenant_id),
+                {"brief_generated_at": {"$in": [None, ""]}},
+                {"scheduled_at": {"$nin": [None, ""]}},
+                {"scheduled_at": {"$gte": now_iso}},
+            ]
+        }
+    )
+
+    top_health_docs = await db.clients.find(tenant_scope(ctx.tenant_id)).sort("health_score", -1).limit(5).to_list(5)
+    top_health_clients = [Client.from_mongo(c).model_dump() for c in (top_health_docs or [])]
+
+    at_risk_docs = await db.clients.find(
+        {"$and": [tenant_scope(ctx.tenant_id), {"churn_risk": {"$in": ["high", "medium"]}}]}
+    ).sort("health_score", 1).limit(5).to_list(5)
+    at_risk_clients = [Client.from_mongo(c).model_dump() for c in (at_risk_docs or [])]
 
     return {
         "total_clients": total_clients,
-        "avg_health_score": avg_health,
-        "churn_risk_high": churn_red,
-        "churn_risk_medium": churn_yellow,
+        "avg_health_score": avg_health_score,
+        "churn_risk_high": churn_risk_high,
+        "churn_risk_medium": churn_risk_medium,
         "meetings_this_month": meetings_this_month,
-        "open_action_items": open_actions,
-        "overdue_action_items": overdue_actions,
-        "prep_queue_count": len([m for _, m in upcoming if not m.get("brief_generated_at")]),
+        "open_action_items": open_action_items,
+        "overdue_action_items": overdue_action_items,
+        "prep_queue_count": prep_queue_count,
         "prep_queue": prep_queue,
-        "content_captures_total": len(content),
-        "content_pending_routing": sum(1 for c in content if not c.get("routed_to_marketing")),
-        "recent_meetings": [
-            m for _, m in sorted(
-                [(_parse_dt(m.get("created_at")) or now, m) for m in meeting_models],
-                key=lambda x: x[0],
-                reverse=True,
-            )[:5]
-        ],
-        "top_health_clients": sorted(
-            [Client.from_mongo(c).model_dump() for c in clients],
-            key=lambda x: x["health_score"], reverse=True,
-        )[:5],
-        "at_risk_clients": [
-            Client.from_mongo(c).model_dump() for c in clients if c.get("churn_risk") in ("high", "medium")
-        ][:5],
+        "content_captures_total": content_captures_total,
+        "content_pending_routing": content_pending_routing,
+        "recent_meetings": recent_meetings,
+        "top_health_clients": top_health_clients,
+        "at_risk_clients": at_risk_clients,
     }
 
 

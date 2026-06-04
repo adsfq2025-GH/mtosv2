@@ -12,6 +12,7 @@ import Opportunities from "@/pages/Opportunities";
 import Testimonials from "@/pages/Testimonials";
 import Strategy from "@/pages/Strategy";
 import WhiteLabel from "@/pages/WhiteLabel";
+import AiVisibility from "@/pages/AiVisibility";
 import { applyDisplayMode, getSavedDisplayMode } from "@/displayMode";
 
 function Protected({ children }) {
@@ -43,6 +44,7 @@ export default function App() {
           <Route path="/testimonials" element={<Protected><Testimonials /></Protected>} />
           <Route path="/strategy" element={<Protected><Strategy /></Protected>} />
           <Route path="/white-label" element={<Protected><WhiteLabel /></Protected>} />
+          <Route path="/ai-visibility" element={<Protected><AiVisibility /></Protected>} />
           <Route path="/content" element={<Navigate to="/opportunities" replace />} />
           <Route path="/integrations" element={<Protected><Integrations /></Protected>} />
           <Route path="/docs" element={<Protected><DocsHub /></Protected>} />

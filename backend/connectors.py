@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
 from html import unescape
@@ -727,6 +728,292 @@ async def list_clickup_lists(tenant_id: str, team_id: str) -> Dict[str, Any]:
     out = list(uniq.values())
     out.sort(key=lambda x: (x.get("space") or "", x.get("folder") or "", x.get("name") or ""))
     return {"ok": True, "lists": out}
+
+
+def _norm_clickup_name(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+async def _clickup_client_book_list_id(tenant_id: str, client_id: str) -> str:
+    creds = await get_credentials(tenant_id, "clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return ""
+    binding = await get_client_binding(tenant_id, client_id, "clickup")
+    if not binding:
+        return ""
+    external_ids = (binding.get("external_ids") or {}) if binding else {}
+    config = (binding.get("config") or {}) if binding else {}
+    folder_id = external_ids.get("folder_id") or config.get("folder_id")
+    if not folder_id:
+        return ""
+
+    cached = str(external_ids.get("client_book_list_id") or "").strip()
+    if cached:
+        return cached
+
+    headers = {"Authorization": token, "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"https://api.clickup.com/api/v2/folder/{folder_id}/list",
+            headers=headers,
+            params={"archived": "false"},
+        )
+    if resp.status_code == 200:
+        lists = (resp.json() or {}).get("lists") or []
+        for l in lists:
+            name = _norm_clickup_name(l.get("name") or "")
+            if name in ("client book", "clients book", "client's book", "clients' book") and l.get("id"):
+                list_id = str(l.get("id"))
+                await db.client_bindings.update_one(
+                    {"$and": [{"client_id": client_id, "platform": "clickup"}, _tenant_scope(tenant_id)]},
+                    {"$set": {"external_ids.client_book_list_id": list_id, "updated_at": _utc_now().isoformat()}},
+                )
+                return list_id
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp2 = await client.post(
+            f"https://api.clickup.com/api/v2/folder/{folder_id}/list",
+            headers={"Authorization": token, "Content-Type": "application/json", "Accept": "application/json"},
+            json={"name": "Client Book"},
+        )
+    if resp2.status_code in (200, 201):
+        list_id = str((resp2.json() or {}).get("id") or (resp2.json() or {}).get("list", {}).get("id") or "")
+        if list_id:
+            await db.client_bindings.update_one(
+                {"$and": [{"client_id": client_id, "platform": "clickup"}, _tenant_scope(tenant_id)]},
+                {"$set": {"external_ids.client_book_list_id": list_id, "updated_at": _utc_now().isoformat()}},
+            )
+            return list_id
+    return ""
+
+
+async def _clickup_department_tickets_list_id(tenant_id: str, client_id: str) -> str:
+    creds = await get_credentials(tenant_id, "clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return ""
+    binding = await get_client_binding(tenant_id, client_id, "clickup")
+    if not binding:
+        return ""
+    external_ids = (binding.get("external_ids") or {}) if binding else {}
+    config = (binding.get("config") or {}) if binding else {}
+    folder_id = external_ids.get("folder_id") or config.get("folder_id")
+    if not folder_id:
+        return ""
+
+    cached = str(external_ids.get("department_tickets_list_id") or "").strip()
+    if cached:
+        return cached
+
+    headers = {"Authorization": token, "Accept": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"https://api.clickup.com/api/v2/folder/{folder_id}/list",
+            headers=headers,
+            params={"archived": "false"},
+        )
+    if resp.status_code == 200:
+        lists = (resp.json() or {}).get("lists") or []
+        for l in lists:
+            name = _norm_clickup_name(l.get("name") or "")
+            if name in ("department tickets", "dept tickets", "tickets") and l.get("id"):
+                list_id = str(l.get("id"))
+                await db.client_bindings.update_one(
+                    {"$and": [{"client_id": client_id, "platform": "clickup"}, _tenant_scope(tenant_id)]},
+                    {"$set": {"external_ids.department_tickets_list_id": list_id, "updated_at": _utc_now().isoformat()}},
+                )
+                return list_id
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp2 = await client.post(
+            f"https://api.clickup.com/api/v2/folder/{folder_id}/list",
+            headers={"Authorization": token, "Content-Type": "application/json", "Accept": "application/json"},
+            json={"name": "Department Tickets"},
+        )
+    if resp2.status_code in (200, 201):
+        list_id = str((resp2.json() or {}).get("id") or (resp2.json() or {}).get("list", {}).get("id") or "")
+        if list_id:
+            await db.client_bindings.update_one(
+                {"$and": [{"client_id": client_id, "platform": "clickup"}, _tenant_scope(tenant_id)]},
+                {"$set": {"external_ids.department_tickets_list_id": list_id, "updated_at": _utc_now().isoformat()}},
+            )
+            return list_id
+    return ""
+
+
+async def _clickup_upsert_task(token: str, list_id: str, task_id: str, name: str, description: str) -> Dict[str, Any]:
+    headers = {"Authorization": token, "Content-Type": "application/json", "Accept": "application/json"}
+    payload: Dict[str, Any] = {"name": str(name or "").strip(), "description": str(description or "").strip()}
+    async with httpx.AsyncClient(timeout=30) as client:
+        if task_id:
+            resp = await client.put(f"https://api.clickup.com/api/v2/task/{task_id}", headers=headers, json=payload)
+        else:
+            resp = await client.post(f"https://api.clickup.com/api/v2/list/{list_id}/task", headers=headers, json=payload)
+    if resp.status_code not in (200, 201):
+        return {"ok": False, "error": f"clickup_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    return {"ok": True, "task_id": str(data.get("id") or task_id or ""), "url": data.get("url")}
+
+
+def _fmt_bullets(items):
+    out = []
+    for it in items or []:
+        if isinstance(it, dict):
+            title = str(it.get("title") or "").strip()
+            desc = str(it.get("description") or "").strip()
+            if title and desc:
+                out.append(f"- {title}: {desc}")
+            elif title:
+                out.append(f"- {title}")
+        else:
+            s = str(it or "").strip()
+            if s:
+                out.append(f"- {s}")
+    return "\n".join(out).strip()
+
+
+async def publish_clickup_meeting_brief(tenant_id: str, meeting: dict, client: dict) -> Dict[str, Any]:
+    creds = await get_credentials(tenant_id, "clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return {"ok": False, "error": "missing_api_token"}
+    client_id = str((meeting or {}).get("client_id") or "").strip()
+    if not client_id:
+        return {"ok": False, "error": "missing_client_id"}
+    list_id = await _clickup_client_book_list_id(tenant_id, client_id)
+    if not list_id:
+        return {"ok": False, "error": "missing_client_book_list_id"}
+
+    title = str((meeting or {}).get("title") or "").strip() or "Monthly Touch"
+    name = f"{title} — Brief"
+    desc = (
+        f"Client: {str((client or {}).get('company') or '')}".strip()
+        + "\n"
+        + f"Contact: {str((client or {}).get('name') or '')}".strip()
+        + "\n\nWINS:\n"
+        + (_fmt_bullets((meeting or {}).get("wins") or []) or "—")
+        + "\n\nISSUES:\n"
+        + (_fmt_bullets((meeting or {}).get("issues") or []) or "—")
+        + "\n\nTALKING POINTS:\n"
+        + (
+            _fmt_bullets(
+                [
+                    f"{tp.get('topic')}: {tp.get('angle')}" if isinstance(tp, dict) else tp
+                    for tp in ((meeting or {}).get("talking_points") or [])
+                ]
+            )
+            or "—"
+        )
+        + "\n\nSUGGESTED QUESTIONS:\n"
+        + (_fmt_bullets((meeting or {}).get("suggested_questions") or []) or "—")
+        + "\n\nSTRATEGIC RECOMMENDATIONS:\n"
+        + (_fmt_bullets((meeting or {}).get("strategic_recommendations") or []) or "—")
+    )
+
+    existing_task_id = str(((meeting or {}).get("clickup_client_book") or {}).get("brief_task_id") or "").strip()
+    return await _clickup_upsert_task(token, list_id, existing_task_id, name, desc)
+
+
+async def publish_clickup_meeting_summary(tenant_id: str, meeting: dict, client: dict, actions: list, tickets: list) -> Dict[str, Any]:
+    creds = await get_credentials(tenant_id, "clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return {"ok": False, "error": "missing_api_token"}
+    client_id = str((meeting or {}).get("client_id") or "").strip()
+    if not client_id:
+        return {"ok": False, "error": "missing_client_id"}
+    list_id = await _clickup_client_book_list_id(tenant_id, client_id)
+    if not list_id:
+        return {"ok": False, "error": "missing_client_book_list_id"}
+
+    title = str((meeting or {}).get("title") or "").strip() or "Monthly Touch"
+    name = f"{title} — Meeting Summary"
+    recap = str((meeting or {}).get("recap_email") or "").strip()
+    sent = str((meeting or {}).get("sentiment") or "").strip()
+    sent_sum = str((meeting or {}).get("sentiment_summary") or "").strip()
+    desc = (
+        f"Client: {str((client or {}).get('company') or '')}".strip()
+        + "\n"
+        + f"Contact: {str((client or {}).get('name') or '')}".strip()
+        + (f"\n\nSENTIMENT: {sent}\n{sent_sum}".strip() if (sent or sent_sum) else "")
+        + "\n\nRECAP EMAIL:\n"
+        + (recap or "—")
+        + "\n\nACTION ITEMS:\n"
+        + (_fmt_bullets([{"title": a.get("title"), "description": a.get("description")} for a in (actions or []) if isinstance(a, dict)]) or "—")
+        + "\n\nDEPARTMENT TICKETS:\n"
+        + (
+            _fmt_bullets(
+                [
+                    {
+                        "title": f"[{t.get('department')}] {t.get('title')}",
+                        "description": t.get("description"),
+                    }
+                    for t in (tickets or [])
+                    if isinstance(t, dict)
+                ]
+            )
+            or "—"
+        )
+    )
+
+    existing_task_id = str(((meeting or {}).get("clickup_client_book") or {}).get("summary_task_id") or "").strip()
+    return await _clickup_upsert_task(token, list_id, existing_task_id, name, desc)
+
+
+async def publish_clickup_department_tickets(tenant_id: str, meeting: dict, tickets: list) -> Dict[str, Any]:
+    creds = await get_credentials(tenant_id, "clickup")
+    token = _strip_bearer((creds or {}).get("api_token", ""))
+    if not token:
+        return {"ok": False, "error": "missing_api_token"}
+    client_id = str((meeting or {}).get("client_id") or "").strip()
+    if not client_id:
+        return {"ok": False, "error": "missing_client_id"}
+    list_id = await _clickup_department_tickets_list_id(tenant_id, client_id)
+    if not list_id:
+        return {"ok": False, "error": "missing_department_tickets_list_id"}
+
+    published = []
+    for t in tickets or []:
+        if not isinstance(t, dict):
+            continue
+        ticket_id = str(t.get("_id") or t.get("id") or "").strip()
+        dept = str(t.get("department") or "Other").strip()
+        title = str(t.get("title") or "Ticket").strip()
+        name = f"[{dept}] {title}"
+        desc = str(t.get("description") or "").strip()
+        existing_task_id = str(t.get("external_id") or "").strip()
+        res = await _clickup_upsert_task(token, list_id, existing_task_id, name, desc)
+        if res.get("ok"):
+            published.append({"ticket_id": ticket_id, "task_id": res.get("task_id"), "url": res.get("url")})
+    return {"ok": True, "published": published}
+
+
+async def send_gmail_plain_email(tenant_id: str, user_id: str, to_email: str, subject: str, plain: str) -> Dict[str, Any]:
+    to_addr = str(to_email or "").strip()
+    if not to_addr:
+        return {"ok": False, "error": "missing_to"}
+    refresh_token = await get_google_refresh_token(tenant_id, user_id, "gmail")
+    if not refresh_token:
+        return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Gmail first."}
+    access_token = await _google_ads_access_token({"refresh_token": refresh_token})
+
+    subj = str(subject or "").strip() or "Monthly Touch Recap"
+    body = str(plain or "").strip()
+    raw_msg = (
+        f"To: {to_addr}\r\n"
+        f"Subject: {subj}\r\n"
+        "Content-Type: text/plain; charset=UTF-8\r\n"
+        "\r\n"
+        f"{body}"
+    )
+    encoded = base64.urlsafe_b64encode(raw_msg.encode("utf-8")).decode("utf-8").rstrip("=")
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", headers=headers, json={"raw": encoded})
+    if resp.status_code not in (200, 201):
+        return {"ok": False, "error": f"gmail_send_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    return {"ok": True}
 
 
 async def list_gohighlevel_locations(tenant_id: str) -> Dict[str, Any]:
