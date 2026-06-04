@@ -4,8 +4,72 @@ import { meetings, aiModels, actionItems, contentCaptures } from "../api";
 import { PageHead } from "../Layout";
 import {
   Sparkle, FileText, ChatCircle, Trophy, Warning, Lightbulb, Question, Megaphone,
-  CheckCircle, Clock, ListChecks, Robot, ArrowsClockwise, EnvelopeSimple,
+  CheckCircle, Clock, ListChecks, Robot, ArrowsClockwise, EnvelopeSimple, Info,
 } from "@phosphor-icons/react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "../components/ui/dialog";
+
+function ExplainDialog({ title, explain }) {
+  if (!explain) return null;
+  const sources = explain.data_sources_analyzed || explain.dataSourcesAnalyzed || [];
+  const timePeriod = explain.time_period || explain.timePeriod || {};
+  return (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button className="chip !px-2 !py-1 !bg-white/5 !border-white/10 hover:!bg-white/10" type="button" aria-label="AI source transparency">
+          <Info size={14} weight="duotone" />
+        </button>
+      </DialogTrigger>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+              <div className="text-xs text-white/60">Source Used</div>
+              <div className="mt-1">{String(explain.source_used || explain.sourceUsed || "—")}</div>
+            </div>
+            <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+              <div className="text-xs text-white/60">Confidence</div>
+              <div className="mt-1">{typeof explain.confidence === "number" ? `${explain.confidence}%` : String(explain.confidence || "—")}</div>
+            </div>
+          </div>
+          <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+            <div className="text-xs text-white/60">Time Period</div>
+            <div className="mt-1">
+              <div>Current: {String(timePeriod.current || timePeriod.current_period || "—")}</div>
+              <div>Compared: {String(timePeriod.comparison || timePeriod.comparison_period || "—")}</div>
+            </div>
+          </div>
+          <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+            <div className="text-xs text-white/60">Logic Used</div>
+            <div className="mt-1">{String(explain.logic_used || explain.logicUsed || "—")}</div>
+          </div>
+          <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+            <div className="text-xs text-white/60">How AI Reached Conclusion</div>
+            <div className="mt-1 whitespace-pre-wrap">{String(explain.calculation || explain.reasoning || explain.how || "—")}</div>
+          </div>
+          {!!sources.length && (
+            <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+              <div className="text-xs text-white/60">Data Sources Analyzed</div>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {sources.map((s) => (
+                  <span key={String(s)} className="chip">{String(s)}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function ModelSelect({ value, onChange }) {
   const [models, setModels] = useState([]);
@@ -177,10 +241,10 @@ export default function MeetingDetail() {
   };
 
   const CHECKLIST_ITEMS = [
-    ["wins", "3 wins delivered"],
-    ["issues", "2 issues with action plan"],
+    ["wins", "Wins delivered"],
+    ["issues", "Issues with action plan"],
     ["progress", "Campaign progress reviewed"],
-    ["strategic", "1 new strategic recommendation shared"],
+    ["strategic", "Strategic recommendation shared"],
     ["client_voice", "Open-ended client questions asked"],
     ["testimonial", "Testimonial / content opportunity assessed"],
     ["next30", "Next 30 days plan agreed"],
@@ -232,18 +296,21 @@ export default function MeetingDetail() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
           <div className="lg:col-span-2 space-y-5">
             <section className="card-flat p-5">
-              <div className="flex items-center gap-2 mb-3"><Trophy size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">3 Wins</h3></div>
+              <div className="flex items-center gap-2 mb-3"><Trophy size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">Wins</h3></div>
               {(m.wins || []).length === 0 && <EmptyHint label="Generate the brief to populate wins from your KPI snapshot." />}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {(m.wins || []).map((w, i) => (
                   <div key={i} className="p-4 rounded-md border border-[#2FE0C2]/20 bg-[#2FE0C2]/5">
-                    <div className="text-[10px] mono text-[#2FE0C2] uppercase tracking-wider">{w.metric || "WIN"} · {w.delta || ""}</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[10px] mono text-[#2FE0C2] uppercase tracking-wider">{w.metric || "WIN"} · {w.delta || ""}</div>
+                      <ExplainDialog title={w.title || "Win"} explain={w.explain} />
+                    </div>
                     <div className="font-semibold mt-1 text-sm">{w.title}</div>
                     <div className="text-xs text-slate-300 mt-1.5">{w.description}</div>
                   </div>
                 ))}
               </div>
-              {(m.wins_library || []).length > 3 && (
+              {(m.wins_library || []).length > (m.wins || []).length && (
                 <details className="mt-4">
                   <summary className="cursor-pointer text-xs text-[#3FA9F5]">View full wins library</summary>
                   <div className="mt-3 space-y-2">
@@ -260,18 +327,24 @@ export default function MeetingDetail() {
             </section>
 
             <section className="card-flat p-5">
-              <div className="flex items-center gap-2 mb-3"><Warning size={18} weight="duotone" color="#F59E0B" /><h3 className="font-semibold">2 Issues</h3></div>
-              {(m.issues || []).length === 0 && <EmptyHint label="Generate the brief to surface 2 transparent issues with action plans." />}
+              <div className="flex items-center gap-2 mb-3"><Warning size={18} weight="duotone" color="#F59E0B" /><h3 className="font-semibold">Issues</h3></div>
+              {(m.issues || []).length === 0 && <EmptyHint label="Generate the brief to surface important issues with action plans." />}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {(m.issues || []).map((iss, i) => (
                   <div key={i} className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
-                    <div className="flex items-center justify-between"><div className="font-semibold text-sm">{iss.title}</div><span className={`chip ${sevChip(iss.severity)}`}>{iss.severity}</span></div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-semibold text-sm">{iss.title}</div>
+                      <div className="flex items-center gap-2">
+                        <ExplainDialog title={iss.title || "Issue"} explain={iss.explain} />
+                        <span className={`chip ${sevChip(iss.severity)}`}>{iss.severity}</span>
+                      </div>
+                    </div>
                     <div className="text-xs text-slate-300 mt-1.5">{iss.description}</div>
                     {iss.action_plan && <div className="text-xs text-slate-300 mt-2 p-2 rounded bg-[#3FA9F5]/10 border border-[#3FA9F5]/15"><strong className="text-[#3FA9F5]">Action plan:</strong> {iss.action_plan}</div>}
                   </div>
                 ))}
               </div>
-              {(m.issues_library || []).length > 2 && (
+              {(m.issues_library || []).length > (m.issues || []).length && (
                 <details className="mt-4">
                   <summary className="cursor-pointer text-xs text-[#3FA9F5]">View full issues library</summary>
                   <div className="mt-3 space-y-2">
@@ -447,6 +520,44 @@ export default function MeetingDetail() {
                 </div>
                 <p className="text-sm text-slate-300">{m.sentiment_summary}</p>
               </div>
+              {(() => {
+                const profile = m?.transcript_analysis?.client_profile || {};
+                const has =
+                  profile.personality ||
+                  profile.decision_making_style ||
+                  (profile.business_goals || []).length ||
+                  (profile.growth_goals || []).length ||
+                  (profile.trust_issues || []).length ||
+                  (profile.frustrations || []).length ||
+                  (profile.hidden_risks || []).length ||
+                  (profile.relationship_opportunities || []).length ||
+                  (profile.operational_bottlenecks || []).length;
+                if (!has) return null;
+                return (
+                  <div className="card-flat p-5">
+                    <h3 className="font-semibold mb-3">Client Intelligence</h3>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="label mb-1">Personality</div>
+                        <div className="text-sm text-slate-300">{profile.personality || "—"}</div>
+                      </div>
+                      <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="label mb-1">Decision-Making Style</div>
+                        <div className="text-sm text-slate-300">{profile.decision_making_style || "—"}</div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mt-3">
+                      <InsightList title="Business Goals" items={profile.business_goals} />
+                      <InsightList title="Growth Goals" items={profile.growth_goals} />
+                      <InsightList title="Trust Issues" items={profile.trust_issues} />
+                      <InsightList title="Frustrations" items={profile.frustrations} />
+                      <InsightList title="Hidden Risks" items={profile.hidden_risks} />
+                      <InsightList title="Relationship Opportunities" items={profile.relationship_opportunities} />
+                      <InsightList title="Operational Bottlenecks" items={profile.operational_bottlenecks} />
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                 <div className="card-flat p-5">
                   <h3 className="font-semibold mb-3">Action Items ({actions.length})</h3>
@@ -575,6 +686,24 @@ function MiniStat({ label, value }) {
     <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
       <div className="text-[11px] text-slate-500 uppercase tracking-wider">{label}</div>
       <div className="text-xl font-bold mono mt-1">{value}</div>
+    </div>
+  );
+}
+
+function InsightList({ title, items }) {
+  const list = Array.isArray(items) ? items.filter((x) => String(x || "").trim()) : [];
+  return (
+    <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+      <div className="label mb-1">{title}</div>
+      {list.length === 0 ? (
+        <div className="text-sm text-slate-500">—</div>
+      ) : (
+        <ul className="list-disc pl-5 text-sm text-slate-300 space-y-1">
+          {list.map((x, i) => (
+            <li key={i}>{String(x)}</li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

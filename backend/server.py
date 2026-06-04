@@ -65,6 +65,8 @@ from models import (  # noqa: E402
     Meeting,
     MeetingIn,
     MeetingPatch,
+    PromptTemplate,
+    PromptTemplateIn,
     QAScorecard,
     RegisterIn,
     TenantMembership,
@@ -582,6 +584,40 @@ async def put_settings(data: TenantSettingsIn, ctx=Depends(get_current_context))
     return TenantSettings.from_mongo(doc).model_dump()
 
 
+def _default_prompt_text(key: str) -> str:
+    if key == "monthly_touch_analysis":
+        return (
+            "Analyze the transcript and produce a structured Monthly Touch analysis.\n"
+            "Focus on:\n"
+            "- Client personality and decision-making style\n"
+            "- Trust issues, frustrations, and relationship opportunities\n"
+            "- Business goals, growth goals, and hidden risks\n"
+            "- Operational bottlenecks that affect lead handling, sales, fulfillment, retention\n"
+            "- Clear action items with owner_type (agency|client) and suggested priority\n"
+            "Be specific and evidence-based. Do not invent facts."
+        )
+    return ""
+
+
+@api.get("/prompts/{key}")
+async def get_prompt_template(key: str, ctx=Depends(get_current_context)):
+    doc = await db.prompt_templates.find_one({"tenant_id": ctx.tenant_id, "key": str(key)})
+    if not doc:
+        return {"ok": True, "key": str(key), "text": _default_prompt_text(str(key))}
+    return {"ok": True, **PromptTemplate.from_mongo(doc).model_dump()}
+
+
+@api.put("/prompts/{key}")
+async def put_prompt_template(key: str, data: PromptTemplateIn, ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    now = utcnow().isoformat()
+    patch = {"tenant_id": ctx.tenant_id, "key": str(key), "text": str(data.text or ""), "updated_at": now}
+    await db.prompt_templates.update_one({"tenant_id": ctx.tenant_id, "key": str(key)}, {"$set": patch}, upsert=True)
+    doc = await db.prompt_templates.find_one({"tenant_id": ctx.tenant_id, "key": str(key)})
+    return {"ok": True, **PromptTemplate.from_mongo(doc).model_dump()}
+
+
 async def _is_internal_tenant_id(tenant_id: str) -> bool:
     tdoc = await db.tenants.find_one({"_id": tenant_id})
     tslug = str((tdoc or {}).get("slug") or "")
@@ -1088,6 +1124,14 @@ async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(
         company = str((c or {}).get("company") or "").strip()
         if not contact_id or not name or not company:
             continue
+        detail = await connectors.fetch_gohighlevel_contact_detail(ctx.tenant_id, location_id=location_id, contact_id=contact_id)
+        full_contact = (detail.get("contact") or {}) if detail.get("ok") else {}
+        enriched = connectors._extract_services_products_from_ghl_contact(full_contact) if full_contact else {"services": [], "assigned_products": [], "crm_data": {}}
+        website = (
+            str(full_contact.get("website") or full_contact.get("websiteUrl") or full_contact.get("websiteUri") or (c or {}).get("website") or "").strip()
+            if full_contact
+            else str((c or {}).get("website") or "").strip()
+        )
         existing = await db.clients.find_one(
             {"$and": [{"name": {"$regex": f"^{name}$", "$options": "i"}, "company": {"$regex": f"^{company}$", "$options": "i"}}, tenant_scope(ctx.tenant_id)]}
         )
@@ -1100,6 +1144,10 @@ async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(
             company=company,
             email=(c or {}).get("email") or None,
             phone=(c or {}).get("phone") or None,
+            website=website or None,
+            services=enriched.get("services") or [],
+            assigned_products=enriched.get("assigned_products") or [],
+            crm_data=enriched.get("crm_data") or {},
             account_manager_id=ctx.user.id,
         )
         new_client = Client(tenant_id=ctx.tenant_id, **client_in.model_dump(), account_manager_name=ctx.user.name)
@@ -1115,6 +1163,43 @@ async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(
             updated_at=utcnow().isoformat(),
         )
         await db.client_bindings.insert_one(binding.to_mongo())
+
+        gbp_match = await connectors.find_best_gbp_location_for_client(
+            ctx.tenant_id,
+            user_id=ctx.user.id,
+            company=company,
+            website=website,
+            phone=(c or {}).get("phone") or "",
+        )
+        if gbp_match.get("ok") and gbp_match.get("match"):
+            match = gbp_match.get("match") or {}
+            loc = match.get("location") or {}
+            account_name = str(match.get("account_name") or "").strip()
+            location_name = str(loc.get("name") or "").strip()
+            gbp_data = {
+                "account_name": account_name,
+                "location_name": location_name,
+                "location_title": loc.get("title"),
+                "websiteUri": loc.get("websiteUri"),
+                "phoneNumbers": loc.get("phoneNumbers"),
+                "storefrontAddress": loc.get("storefrontAddress"),
+                "match_score": match.get("match_score"),
+            }
+            await db.clients.update_one(
+                {"_id": new_client.id, **tenant_scope(ctx.tenant_id)},
+                {"$set": {"gbp_data": gbp_data, "updated_at": utcnow().isoformat()}},
+            )
+            if account_name and location_name:
+                gbp_binding = ClientIntegrationBinding(
+                    tenant_id=ctx.tenant_id,
+                    client_id=new_client.id,
+                    platform="google_business_profile",
+                    enabled=True,
+                    external_ids={"account_name": account_name, "location_name": location_name},
+                    config={},
+                    updated_at=utcnow().isoformat(),
+                )
+                await db.client_bindings.insert_one(gbp_binding.to_mongo())
         created.append(new_client.model_dump())
 
     return {"ok": True, "created": created, "skipped": skipped}
@@ -1586,27 +1671,42 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
     meeting = Meeting.from_mongo(m_doc)
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
-    analysis_task = asyncio.create_task(
-        ai.analyze_transcript(
-            client_name=client.name if client else (meeting.client_name or ""),
-            company=client.company if client else "",
-            am_name=meeting.account_manager_name or ctx.user.name,
-            transcript=data.transcript,
-            model_key=data.model or ai.DEFAULT_MODEL,
-            session_id=f"transcript-{meeting_id}",
+
+    pdoc = await db.prompt_templates.find_one({"tenant_id": ctx.tenant_id, "key": "monthly_touch_analysis"})
+    instructions = (PromptTemplate.from_mongo(pdoc).text if pdoc else _default_prompt_text("monthly_touch_analysis"))
+
+    models = [m for m in (data.models or []) if str(m or "").strip()]
+    if not models:
+        models = [str((data.model or ai.DEFAULT_MODEL)).strip()]
+    primary_model = models[0] if models else ai.DEFAULT_MODEL
+
+    analysis_tasks = [
+        asyncio.create_task(
+            ai.analyze_transcript(
+                client_name=client.name if client else (meeting.client_name or ""),
+                company=client.company if client else "",
+                am_name=meeting.account_manager_name or ctx.user.name,
+                transcript=data.transcript,
+                model_key=model_key,
+                session_id=f"transcript-{meeting_id}-{model_key}",
+                instructions=instructions,
+            )
         )
-    )
+        for model_key in models
+    ]
     automation_task = asyncio.create_task(
         ai.generate_meeting_workflow(
             client_name=client.name if client else (meeting.client_name or ""),
             company=client.company if client else "",
             title=meeting.title,
             transcript=data.transcript,
-            model_key=data.model or ai.DEFAULT_MODEL,
+            model_key=primary_model,
             session_id=f"automation-{meeting_id}",
         )
     )
-    analysis, automation_draft = await asyncio.gather(analysis_task, automation_task)
+    analysis_results, automation_draft = await asyncio.gather(asyncio.gather(*analysis_tasks), automation_task)
+    analysis_by_model = {models[i]: analysis_results[i] for i in range(len(models))}
+    analysis = analysis_results[0] if analysis_results else {}
     # persist transcript + sentiment
     await db.meetings.update_one(
         {"_id": meeting_id, **tenant_scope(ctx.tenant_id)},
@@ -1616,6 +1716,8 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
                 "transcript_analyzed_at": utcnow().isoformat(),
                 "sentiment": analysis.get("sentiment", "neutral"),
                 "sentiment_summary": analysis.get("sentiment_summary", ""),
+                "transcript_analysis": analysis,
+                "transcript_analysis_by_model": analysis_by_model,
                 "automation_draft": automation_draft,
                 "automation_draft_generated_at": utcnow().isoformat(),
                 "updated_at": utcnow().isoformat(),

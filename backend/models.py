@@ -71,6 +71,17 @@ class TenantSettingsIn(BaseModel):
     analysis: Dict[str, Any] = Field(default_factory=dict)
 
 
+class PromptTemplate(BaseDocument):
+    tenant_id: Optional[str] = None
+    key: str
+    text: str
+    updated_at: Optional[str] = None
+
+
+class PromptTemplateIn(BaseModel):
+    text: str
+
+
 # ===== CLIENTS =====
 class Client(BaseDocument):
     tenant_id: Optional[str] = None
@@ -85,6 +96,9 @@ class Client(BaseDocument):
     account_manager_id: Optional[str] = None
     account_manager_name: Optional[str] = None
     services: List[str] = Field(default_factory=list)  # e.g. SEO, GBP, Ads
+    assigned_products: List[str] = Field(default_factory=list)
+    crm_data: Dict[str, Any] = Field(default_factory=dict)
+    gbp_data: Dict[str, Any] = Field(default_factory=dict)
     onboarding_date: Optional[str] = None
     mrr: Optional[float] = 0.0
     health_score: int = 75
@@ -106,6 +120,9 @@ class ClientIn(BaseModel):
     location: Optional[str] = None
     account_manager_id: Optional[str] = None
     services: List[str] = Field(default_factory=list)
+    assigned_products: List[str] = Field(default_factory=list)
+    crm_data: Dict[str, Any] = Field(default_factory=dict)
+    gbp_data: Dict[str, Any] = Field(default_factory=dict)
     onboarding_date: Optional[str] = None
     mrr: Optional[float] = 0.0
     notes: Optional[str] = None
@@ -163,6 +180,7 @@ class Win(BaseModel):
     description: str
     metric: Optional[str] = None
     delta: Optional[str] = None
+    explain: Dict[str, Any] = Field(default_factory=dict)
 
 
 class Issue(BaseModel):
@@ -170,6 +188,7 @@ class Issue(BaseModel):
     description: str
     action_plan: Optional[str] = None
     severity: Literal["low", "medium", "high"] = "medium"
+    explain: Dict[str, Any] = Field(default_factory=dict)
 
 
 class TalkingPoint(BaseModel):
@@ -270,6 +289,8 @@ class Meeting(BaseDocument):
     transcript_analyzed_at: Optional[str] = None
     sentiment: Optional[Literal["positive", "neutral", "negative"]] = None
     sentiment_summary: Optional[str] = None
+    transcript_analysis: Dict[str, Any] = Field(default_factory=dict)
+    transcript_analysis_by_model: Dict[str, Any] = Field(default_factory=dict)
     recap_html: Optional[str] = None
     recap_email: Optional[str] = None
     recap_subject: Optional[str] = None
@@ -351,6 +372,7 @@ class GenerateBriefIn(BaseModel):
 class AnalyzeTranscriptIn(BaseModel):
     transcript: str
     model: Optional[str] = None
+    models: List[str] = Field(default_factory=list)
 
 
 class GenerateRecapIn(BaseModel):

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs } from "../api";
+import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs, prompts } from "../api";
 import { PageHead } from "../Layout";
 import { useAuth } from "../auth";
 import {
@@ -111,12 +111,18 @@ export function Integrations() {
   const [form, setForm] = useState({});
   const [busy, setBusy] = useState(false);
   const [oauthBusy, setOauthBusy] = useState(false);
+  const [promptBusy, setPromptBusy] = useState(false);
+  const [mtPrompt, setMtPrompt] = useState("");
   const [ghlLocs, setGhlLocs] = useState([]);
   const [ghlTokenLocId, setGhlTokenLocId] = useState("");
   const [ghlTokenValue, setGhlTokenValue] = useState("");
   const [ghlTokenSavedIds, setGhlTokenSavedIds] = useState([]);
   const load = () => integrations.status().then(setList);
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    prompts.get("monthly_touch_analysis").then((r) => setMtPrompt(String(r?.text || ""))).catch(() => {});
+  }, [user?.role]);
   useEffect(() => {
     const onMsg = (ev) => {
       if (ev?.data?.type === "google_oauth_success") {
@@ -255,6 +261,43 @@ export function Integrations() {
           </div>
         ))}
       </div>
+
+      {user?.role === "admin" && (
+        <div className="card-flat p-5 mt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="font-semibold">Prompt Manager</div>
+              <div className="text-xs text-slate-400 mt-0.5">Central prompt templates used by transcript analysis and meeting intelligence.</div>
+            </div>
+            <button
+              className="btn-primary text-xs"
+              disabled={promptBusy}
+              onClick={async () => {
+                setPromptBusy(true);
+                try {
+                  await prompts.put("monthly_touch_analysis", { text: mtPrompt || "" });
+                  alert("Prompt saved.");
+                } catch (e) {
+                  alert(e?.response?.data?.detail || e?.message || "Failed to save prompt");
+                } finally {
+                  setPromptBusy(false);
+                }
+              }}
+            >
+              {promptBusy ? "Saving…" : "Save"}
+            </button>
+          </div>
+          <div className="mt-4">
+            <label className="label">Monthly Touch Analysis Prompt</label>
+            <textarea
+              className="input mt-1.5 min-h-[220px] !py-3"
+              value={mtPrompt}
+              onChange={(e) => setMtPrompt(e.target.value)}
+              placeholder="Enter analysis prompt..."
+            />
+          </div>
+        </div>
+      )}
 
       {edit && (
         <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4" onClick={() => setEdit(null)}>

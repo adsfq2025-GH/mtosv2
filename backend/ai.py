@@ -327,23 +327,43 @@ BRIEF_USER_TEMPLATE = """Generate a Monthly Touch Meeting brief for this client.
 CLIENT:
 {client_json}
 
-KPI SNAPSHOT (last 30 days):
+KPI SNAPSHOT:
 {kpi_json}
 
 EXTRA CONTEXT:
 {extra}
 
+Use kpi_snapshot._period.current and kpi_snapshot._period.comparison for time period clarity when available.
+
 Return a JSON object with EXACTLY this shape:
 {{
   "wins": [
-    {{ "title": "...", "description": "client-friendly 1-2 sentences", "metric": "GBP Calls", "delta": "+28% MoM" }}
+    {{ "title": "...", "description": "client-friendly 1-2 sentences", "metric": "GBP Calls", "delta": "+28% MoM",
+       "explain": {{
+         "source_used": "GBP Calls",
+         "data_sources_analyzed": ["google_business_profile", "google_ads", "gohighlevel", "clickup"],
+         "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
+         "logic_used": "Compared current vs prior period",
+         "calculation": "Calls increased from 18 to 23",
+         "confidence": 0
+       }}
+    }}
   ],
   "wins_library": [
     {{ "title": "...", "description": "client-friendly 1-2 sentences", "metric": "GBP Calls", "delta": "+28% MoM" }}
   ],
   "issues": [
     {{ "title": "...", "description": "what's happening, transparent but not alarming",
-       "action_plan": "what we're already doing + next step", "severity": "low|medium|high" }}
+       "action_plan": "what we're already doing + next step", "severity": "low|medium|high",
+       "explain": {{
+         "source_used": "GBP Calls",
+         "data_sources_analyzed": ["google_business_profile", "google_ads", "gohighlevel", "clickup"],
+         "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
+         "logic_used": "Compared current vs prior period",
+         "calculation": "Calls decreased from 23 to 18",
+         "confidence": 0
+       }}
+     }}
   ],
   "issues_library": [
     {{ "title": "...", "description": "what's happening, transparent but not alarming",
@@ -374,7 +394,7 @@ Return a JSON object with EXACTLY this shape:
   "health_signal": "1 sentence summary of overall account health and trend"
 }}
 
-wins: EXACTLY 3 items · issues: EXACTLY 2 items · talking_points: 4-6 items
+wins: as many as strongly supported by the KPI snapshot (typically 3-12) · issues: all important issues (typically 1-8) · talking_points: 4-10 items
 wins_library: 8-15 items · issues_library: 6-12 items · talking_points_library: 10-18 items
 suggested_questions: 4-6 items (mix experience / emotional / outcome / future)
 strategic_recommendations: 3-5 items
@@ -398,9 +418,9 @@ async def generate_meeting_brief(
     raw = await run_chat(BRIEF_SYSTEM, user_text, model_key, session_id)
     data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
-        "wins":                      (data.get("wins") or [])[:3],
+        "wins":                      data.get("wins") or [],
         "wins_library":              data.get("wins_library") or (data.get("wins") or []),
-        "issues":                    (data.get("issues") or [])[:2],
+        "issues":                    data.get("issues") or [],
         "issues_library":            data.get("issues_library") or (data.get("issues") or []),
         "talking_points":            data.get("talking_points") or [],
         "talking_points_library":    data.get("talking_points_library") or [],
@@ -428,6 +448,9 @@ TRANSCRIPT_USER_TEMPLATE = """Analyze this Monthly Touch Meeting transcript.
 CLIENT: {client_name} ({company})
 ACCOUNT MANAGER: {am_name}
 
+SPECIAL INSTRUCTIONS:
+{instructions}
+
 TRANSCRIPT:
 \"\"\"
 {transcript}
@@ -438,6 +461,17 @@ Return a JSON object with EXACTLY this shape:
   "summary": "3-5 sentence executive summary of the meeting",
   "sentiment": "positive|neutral|negative",
   "sentiment_summary": "1-2 sentences explaining client sentiment with evidence",
+  "client_profile": {{
+    "personality": "1-3 sentences",
+    "decision_making_style": "1-2 sentences",
+    "business_goals": [ "goal 1", "..." ],
+    "growth_goals": [ "goal 1", "..." ],
+    "trust_issues": [ "signal 1", "..." ],
+    "frustrations": [ "frustration 1", "..." ],
+    "hidden_risks": [ "risk 1", "..." ],
+    "relationship_opportunities": [ "opportunity 1", "..." ],
+    "operational_bottlenecks": [ "bottleneck 1", "..." ]
+  }},
   "key_moments": [ "important moment 1", "..." ],
   "action_items": [
     {{ "title": "...", "description": "...", "owner_type": "agency|client",
@@ -464,11 +498,13 @@ async def analyze_transcript(
     transcript: str,
     model_key: str = TRANSCRIPT_MODEL,
     session_id: Optional[str] = None,
+    instructions: str = "",
 ) -> Dict[str, Any]:
     user_text = TRANSCRIPT_USER_TEMPLATE.format(
         client_name=client_name or "Client",
         company=company or "",
         am_name=am_name or "Account Manager",
+        instructions=(instructions or "").strip() or "Follow the shape exactly. Be specific and evidence-based.",
         transcript=transcript[:18_000],
     )
     raw = await run_chat(TRANSCRIPT_SYSTEM, user_text, model_key, session_id)
@@ -477,6 +513,7 @@ async def analyze_transcript(
         "summary":                 data.get("summary", ""),
         "sentiment":               data.get("sentiment", "neutral"),
         "sentiment_summary":       data.get("sentiment_summary", ""),
+        "client_profile":          data.get("client_profile") or {},
         "key_moments":             data.get("key_moments", []),
         "action_items":            data.get("action_items", []),
         "content_opportunities":   data.get("content_opportunities", []),

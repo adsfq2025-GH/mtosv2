@@ -111,6 +111,11 @@ export const settings = {
   put: (data) => api.put("/settings", data).then((r) => r.data),
 };
 
+export const prompts = {
+  get: (key) => api.get(`/prompts/${encodeURIComponent(key)}`).then((r) => r.data),
+  put: (key, payload) => api.put(`/prompts/${encodeURIComponent(key)}`, payload).then((r) => r.data),
+};
+
 export const whiteLabel = {
   uploads: () => api.get("/white-label/uploads").then((r) => r.data),
   upload: (file, purpose = "documentation") => {

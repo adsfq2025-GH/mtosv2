@@ -26,8 +26,8 @@ Monthly Touch Meetings are the single highest-leverage retention tool an agency 
 - **Phase 3 — Recap (10 min, AI-drafted, human-reviewed)**
 - **Phase 4 — Follow-through (continuous, tracked in ClickUp + GHL)**
 
-## The 3+2 Wins/Issues Rule
-Every meeting opens with **3 specific wins** and surfaces **2 transparent issues**. Wins reinforce value; issues build trust by demonstrating proactive leadership. Never more, never less.
+## Wins & Issues (No Artificial Limits)
+Every meeting opens with clear, specific wins and surfaces transparent issues. Wins reinforce value; issues build trust by demonstrating proactive leadership. Generate as many as are meaningful and supported by real data.
 
 ## The Trusted Advisor Posture
 Account managers are not status messengers — they are **strategic consultants**. Lead with insight, not data. Use phrases like *"What I'd recommend next…"*, *"Here's what we're seeing across similar accounts…"*.
@@ -52,7 +52,7 @@ Account managers are not status messengers — they are **strategic consultants*
 ## How the MTM System Solves Each
 | Cause | MTM Counter-move |
 |---|---|
-| Perceived value | 3 wins, framed in client language, every meeting |
+| Perceived value | Wins framed in client language, every meeting |
 | Communication | Recurring monthly cadence + recap email |
 | Disconnected reports | Wins → narrative → strategic recommendation |
 | Expectations | Open with last month's commitments, close with next |
@@ -80,8 +80,8 @@ Track in the transcript analyzer:
 
 ## Step-by-step
 1. **T-72h** — Open client in Monthly Touch OS. Click **Generate Brief**. AI pulls KPI snapshot from all connected integrations.
-2. **T-48h** — Review the 3 wins. Edit language to match client's vocabulary. Confirm metrics.
-3. **T-48h** — Review the 2 issues. Confirm action plan is real and credible. Add any nuance.
+2. **T-48h** — Review the wins. Edit language to match client's vocabulary. Confirm metrics.
+3. **T-48h** — Review the issues. Confirm action plans are real and credible. Add any nuance.
 4. **T-24h** — Skim last meeting's action items. Mark completed ones. Carry forward incomplete.
 5. **T-24h** — Read sentiment history + last recap email. Reread any unresolved threads in Gmail.
 6. **T-2h** — Open the Live Meeting view. Send Google Meet link if not already sent.
@@ -102,9 +102,9 @@ Track in the transcript analyzer:
 
 ## Suggested Flow (60 min)
 - **0–3 min — Rapport & Agenda** ("Before we jump in — how's the team holding up this month?")
-- **3–13 min — 3 Wins** (specific, emotional, client-language)
+- **3–13 min — Wins** (specific, emotional, client-language)
 - **13–25 min — Performance & Strategy** (1 chart max per topic; *"here's what's driving it…"*)
-- **25–35 min — 2 Issues + Plan** (own the issue, present the fix; ask for input)
+- **25–35 min — Issues + Plan** (own the issue, present the fix; ask for input)
 - **35–45 min — Client Voice** (engagement questions; testimonial moment if warranted)
 - **45–55 min — Next 30 Days** (strategy + 1 new recommendation + action items)
 - **55–60 min — Recap & Close** ("Here's what you'll get from me by Friday…")
@@ -221,8 +221,8 @@ The Monthly Touch OS auto-flags clients who meet all three.
 
 Every Monthly Touch Meeting must include:
 
-- [ ] **3 specific wins** (with metrics + client-language meaning)
-- [ ] **2 issues with action plan**
+- [ ] **Wins** (with metrics + client-language meaning)
+- [ ] **Issues with action plans**
 - [ ] **Campaign progress vs. last month's promises**
 - [ ] **One new strategic recommendation**
 - [ ] **Client voice / open-ended questions**
@@ -268,8 +268,8 @@ Every Monthly Touch Meeting must include:
 - One new strategic recommendation ready: 5
 
 ## Meeting Execution (50 pts)
-- 3 wins delivered with metric + meaning: 10
-- 2 issues with credible action plan: 10
+- Wins delivered with metric + meaning: 10
+- Issues with credible action plan: 10
 - Time managed within 60 minutes: 5
 - At least 3 open-ended client questions asked: 10
 - Strategic posture (not status messenger): 10

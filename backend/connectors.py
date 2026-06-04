@@ -57,6 +57,22 @@ def _last_30_days_range() -> Tuple[date, date]:
     return start, end
 
 
+def _period_meta() -> Dict[str, Any]:
+    cur_start, cur_end = _last_30_days_range()
+    delta_days = max((cur_end - cur_start).days, 1)
+    prev_end = cur_start - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=delta_days)
+
+    def month_label(d: date) -> str:
+        return d.strftime("%b %Y")
+
+    return {
+        "current": {"start": cur_start.isoformat(), "end": cur_end.isoformat(), "label": month_label(cur_end)},
+        "comparison": {"start": prev_start.isoformat(), "end": prev_end.isoformat(), "label": month_label(prev_end)},
+        "kind": "last_30_days_vs_prior_30_days",
+    }
+
+
 def _fmt_mmddyyyy(d: date) -> str:
     return d.strftime("%m-%d-%Y")
 
@@ -337,6 +353,7 @@ async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict) -> Dict
 
 async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = "", user_id: Optional[str] = None) -> Dict[str, Any]:
     snapshot = demo_kpi_snapshot(client_name)
+    snapshot["_period"] = _period_meta()
 
     clickup_creds = await get_credentials(tenant_id, "clickup")
     clickup_binding = await get_client_binding(tenant_id, client_id, "clickup")
@@ -1127,6 +1144,142 @@ async def list_gohighlevel_contacts(tenant_id: str, location_id: str, query: str
         q = query.strip().lower()
         out = [x for x in out if q in (x.get("name") or "").lower() or q in (x.get("company") or "").lower() or q in (x.get("email") or "").lower()]
     return {"ok": True, "contacts": out[: int(limit or 100)]}
+
+
+async def fetch_gohighlevel_contact_detail(tenant_id: str, location_id: str, contact_id: str) -> Dict[str, Any]:
+    api_key = await _gohighlevel_token_for_location(tenant_id, location_id)
+    if not api_key:
+        return {"ok": False, "error": "missing_api_key"}
+    cid = str(contact_id or "").strip()
+    if not cid:
+        return {"ok": False, "error": "missing_contact_id"}
+    headers = _ghl_headers(api_key, location_id=location_id)
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"https://services.leadconnectorhq.com/contacts/{cid}", headers=headers)
+    if resp.status_code != 200:
+        if resp.status_code in (401, 403) and not await get_gohighlevel_location_token(tenant_id, location_id):
+            return {"ok": False, "error": "missing_location_token", "error_detail": "This location requires a GoHighLevel Location Private Integration Token. Ask your tenant admin to add it in Integrations → GoHighLevel."}
+        return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    try:
+        data = resp.json() or {}
+    except Exception:
+        return {"ok": False, "error": "gohighlevel_bad_json", "error_detail": (resp.text or "")[:300]}
+    contact = data.get("contact") or data
+    return {"ok": True, "contact": contact}
+
+
+def _extract_services_products_from_ghl_contact(contact: Dict[str, Any]) -> Dict[str, Any]:
+    tags = contact.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    tags = [str(t).strip() for t in tags if str(t).strip()]
+
+    services = []
+    products = []
+    for t in tags:
+        tl = t.lower().strip()
+        if tl.startswith("service:"):
+            services.append(t.split(":", 1)[1].strip())
+        if tl.startswith("product:"):
+            products.append(t.split(":", 1)[1].strip())
+        if tl.startswith("deliverable:"):
+            services.append(t.split(":", 1)[1].strip())
+
+    custom_fields = contact.get("customFields") or []
+    if isinstance(custom_fields, dict):
+        custom_fields = [custom_fields]
+
+    crm_data = {
+        "tags": tags,
+        "customFields": custom_fields,
+        "source": contact.get("source"),
+        "dateAdded": contact.get("dateAdded") or contact.get("date_added"),
+        "timezone": contact.get("timezone"),
+        "businessId": contact.get("businessId") or contact.get("business_id"),
+        "attributions": contact.get("attributions") or [],
+    }
+    return {
+        "services": sorted({s for s in services if s}),
+        "assigned_products": sorted({p for p in products if p}),
+        "crm_data": crm_data,
+    }
+
+
+def _extract_domain(v: str) -> str:
+    s = str(v or "").strip().lower()
+    s = s.replace("https://", "").replace("http://", "")
+    s = s.split("/", 1)[0]
+    return s.strip()
+
+
+async def _gbp_list_accounts(access_token: str) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    url = "https://mybusinessaccountmanagement.googleapis.com/v1/accounts"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers, params={"pageSize": 100})
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gbp_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    return {"ok": True, "accounts": (resp.json() or {}).get("accounts") or []}
+
+
+async def _gbp_list_locations(access_token: str, account_name: str) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    url = f"https://mybusinessbusinessinformation.googleapis.com/v1/{str(account_name).strip()}/locations"
+    params = {"readMask": "name,title,websiteUri,phoneNumbers,storefrontAddress"}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gbp_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    return {"ok": True, "locations": (resp.json() or {}).get("locations") or []}
+
+
+async def find_best_gbp_location_for_client(tenant_id: str, user_id: str, company: str, website: str, phone: str) -> Dict[str, Any]:
+    rt = await get_google_refresh_token(tenant_id, user_id, "google_business_profile")
+    if not rt:
+        return {"ok": False, "error": "missing_google_connection"}
+    try:
+        access_token = await _google_ads_access_token({"refresh_token": rt})
+    except Exception as exc:
+        return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
+
+    acc_res = await _gbp_list_accounts(access_token)
+    if not acc_res.get("ok"):
+        return acc_res
+    accounts = acc_res.get("accounts") or []
+
+    want_domain = _extract_domain(website)
+    want_phone = re.sub(r"\D+", "", str(phone or ""))
+    want_name = (company or "").strip().lower()
+
+    best = None
+    best_score = -1
+    for a in accounts:
+        acct_name = a.get("name")
+        if not acct_name:
+            continue
+        loc_res = await _gbp_list_locations(access_token, acct_name)
+        if not loc_res.get("ok"):
+            continue
+        for loc in loc_res.get("locations") or []:
+            score = 0
+            title = str(loc.get("title") or "").strip()
+            loc_domain = _extract_domain(loc.get("websiteUri") or "")
+            phones = loc.get("phoneNumbers") or {}
+            prim = str((phones.get("primaryPhone") if isinstance(phones, dict) else "") or "").strip()
+            loc_phone = re.sub(r"\D+", "", prim)
+            if want_domain and loc_domain and want_domain == loc_domain:
+                score += 3
+            if want_phone and loc_phone and want_phone[-7:] == loc_phone[-7:]:
+                score += 2
+            if want_name and title and want_name in title.lower():
+                score += 2
+            if score > best_score:
+                best_score = score
+                best = {"account_name": acct_name, "location": loc, "match_score": score}
+
+    if not best:
+        return {"ok": True, "match": None}
+    return {"ok": True, "match": best}
 
 
 async def list_gohighlevel_conversations(tenant_id: str, location_id: str, contact_id: str, limit: int = 50) -> Dict[str, Any]:
