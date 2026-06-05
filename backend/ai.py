@@ -320,7 +320,10 @@ You write in a confident, warm, consultative voice.
 CRITICAL RULES:
 - Wins and issues MUST be about the CLIENT'S marketing performance and business outcomes (SEO, rankings/visibility, traffic, leads, conversions, GBP, ads, pipeline, retention).
 - NEVER mention internal tooling/ops/engineering items (data connection refreshes, integration errors, API keys/tokens, database issues, auth, CORS, "our system", "the app").
-- If some KPI sources are missing or incomplete, DO NOT surface that as an 'issue'. Instead, choose two real client-facing issues/risk areas based on available KPIs and common growth levers."""
+- If some KPI sources are missing or incomplete, DO NOT surface that as an 'issue'. Instead, choose real client-facing issues/risk areas based on available KPIs and common growth levers.
+- DO NOT fabricate facts, numbers, rankings, competitors, or time periods. Only state things directly supported by the KPI SNAPSHOT or EXTRA CONTEXT.
+- Every win/issue/campaign_recommendation MUST include explain.kpi_paths pointing to real keys inside the KPI SNAPSHOT (e.g., "google_business_profile.calls.value"). If you cannot cite KPI paths, do not include that item.
+- Surface highest-priority items first: biggest business impact, biggest retention risk, biggest opportunity."""
 
 BRIEF_USER_TEMPLATE = """Generate a Monthly Touch Meeting brief for this client.
 
@@ -343,6 +346,8 @@ Return a JSON object with EXACTLY this shape:
          "source_used": "GBP Calls",
          "data_sources_analyzed": ["google_business_profile", "google_ads", "gohighlevel", "clickup"],
          "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
+         "kpi_paths": ["google_business_profile.calls.value", "google_business_profile.calls.delta_pct"],
+         "observed_values": {{ "google_business_profile.calls.value": 23, "google_business_profile.calls.delta_pct": 28 }},
          "logic_used": "Compared current vs prior period",
          "calculation": "Calls increased from 18 to 23",
          "confidence": 0
@@ -361,6 +366,8 @@ Return a JSON object with EXACTLY this shape:
          "source_used": "GBP Calls",
          "data_sources_analyzed": ["google_business_profile", "google_ads", "gohighlevel", "clickup"],
          "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
+         "kpi_paths": ["google_business_profile.calls.value", "google_business_profile.calls.delta_pct"],
+         "observed_values": {{ "google_business_profile.calls.value": 18, "google_business_profile.calls.delta_pct": -22 }},
          "logic_used": "Compared current vs prior period",
          "calculation": "Calls decreased from 23 to 18",
          "confidence": 0
@@ -381,6 +388,8 @@ Return a JSON object with EXACTLY this shape:
         "source_used": "Google Ads CPL",
         "data_sources_analyzed": ["google_ads", "google_business_profile", "gohighlevel", "clickup"],
         "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
+        "kpi_paths": ["google_ads.cpl.value", "google_ads.cpl.previous"],
+        "observed_values": {{ "google_ads.cpl.value": 92, "google_ads.cpl.previous": 68 }},
         "logic_used": "Mapped KPI deltas to highest-leverage fixes",
         "calculation": "CPL rose from $68 to $92 while conversions stayed flat; prioritize landing page + keyword pruning",
         "confidence": 0
@@ -416,12 +425,95 @@ wins: as many as strongly supported by the KPI snapshot (typically 3-12) · issu
 wins and issues must be ordered highest-impact first (lead volume / revenue / retention risk).
 issues: every issue MUST include a non-empty solutions array (1-3 items).
 campaign_recommendations: recommendations per campaign/deliverable, tied to KPI snapshot (typically 2-8 items). No generic fluff.
+wins/issues/recommendations MUST be factual. Never guess. If you can’t cite KPI paths for an insight, omit it.
 wins_library: 8-15 items · issues_library: 6-12 items · talking_points_library: 10-18 items
 suggested_questions: 4-6 items (mix experience / emotional / outcome / future)
 strategic_recommendations: 3-5 items
 prep_checklist: 8-14 items
 ace_up_the_sleeve: 5-10 items
 """
+
+
+def _resolve_kpi_path(root: Any, path: str) -> Any:
+    cur: Any = root
+    for part in (path or "").split("."):
+        if not part:
+            return None
+        if isinstance(cur, dict):
+            if part not in cur:
+                return None
+            cur = cur.get(part)
+            continue
+        if isinstance(cur, list):
+            try:
+                idx = int(part)
+            except Exception:
+                return None
+            if idx < 0 or idx >= len(cur):
+                return None
+            cur = cur[idx]
+            continue
+        return None
+    return cur
+
+
+def _normalize_explain_evidence(item: Dict[str, Any], kpi_snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+    explain = item.get("explain") if isinstance(item.get("explain"), dict) else {}
+
+    kpi_paths = explain.get("kpi_paths") or explain.get("kpiPaths") or []
+    if isinstance(kpi_paths, str):
+        kpi_paths = [kpi_paths]
+    if not isinstance(kpi_paths, list):
+        kpi_paths = []
+
+    source_used = str(explain.get("source_used") or explain.get("sourceUsed") or "").strip()
+    if not kpi_paths and source_used:
+        aliases = {
+            "GBP Calls": ["google_business_profile.calls.value", "google_business_profile.calls.delta_pct"],
+            "GBP Directions": ["google_business_profile.direction_requests.value", "google_business_profile.direction_requests.delta_pct"],
+            "GBP Direction Requests": ["google_business_profile.direction_requests.value", "google_business_profile.direction_requests.delta_pct"],
+            "Google Ads Spend": ["google_ads.spend.value", "google_ads.spend.delta_pct"],
+            "Google Ads Leads": ["google_ads.leads.value", "google_ads.leads.delta_pct"],
+            "Google Ads CPL": ["google_ads.cpl.value", "google_ads.cpl.previous"],
+            "Meta Ads Leads": ["meta_ads.leads.value", "meta_ads.leads.delta_pct"],
+            "Meta Ads CPL": ["meta_ads.cpl.value", "meta_ads.cpl.previous"],
+            "GSC Clicks": ["google_search_console.clicks.value", "google_search_console.clicks.delta_pct"],
+            "GSC Impressions": ["google_search_console.impressions.value", "google_search_console.impressions.delta_pct"],
+            "GA Sessions": ["google_analytics.sessions.value", "google_analytics.sessions.delta_pct"],
+            "GA Conversions": ["google_analytics.conversions.value", "google_analytics.conversions.delta_pct"],
+            "Map Check-ins Avg Grid Rank": ["map_checkins.avg_grid_rank.value", "map_checkins.avg_grid_rank.previous"],
+        }
+        kpi_paths = aliases.get(source_used, [])
+
+    observed_values: Dict[str, Any] = {}
+    for p in [str(x).strip() for x in kpi_paths if str(x).strip()]:
+        v = _resolve_kpi_path(kpi_snapshot, p)
+        if v is not None:
+            observed_values[p] = v
+
+    if not observed_values:
+        return None
+
+    explain["kpi_paths"] = list(observed_values.keys())
+    explain["observed_values"] = observed_values
+    item["explain"] = explain
+    return item
+
+
+def _validate_factual_items(items: Any, kpi_snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        fixed = _normalize_explain_evidence(it, kpi_snapshot)
+        if fixed is None:
+            continue
+        out.append(fixed)
+    return out
 
 
 async def generate_meeting_brief(
@@ -458,11 +550,28 @@ async def generate_meeting_brief(
     if not isinstance(campaign_recommendations, list):
         campaign_recommendations = []
 
+    wins = _validate_factual_items(data.get("wins") or [], kpi_snapshot)
+    wins_library = _validate_factual_items(data.get("wins_library") or (data.get("wins") or []), kpi_snapshot)
+
+    issues = _validate_factual_items(issues, kpi_snapshot)
+    for iss in issues:
+        sols = iss.get("solutions")
+        if sols is None:
+            iss["solutions"] = []
+        elif isinstance(sols, str):
+            iss["solutions"] = [sols]
+        elif not isinstance(sols, list):
+            iss["solutions"] = []
+
+    campaign_recommendations = _validate_factual_items(campaign_recommendations, kpi_snapshot)
+
+    issues_library = _validate_factual_items(data.get("issues_library") or issues, kpi_snapshot)
+
     return {
-        "wins":                      data.get("wins") or [],
-        "wins_library":              data.get("wins_library") or (data.get("wins") or []),
+        "wins":                      wins,
+        "wins_library":              wins_library,
         "issues":                    issues,
-        "issues_library":            data.get("issues_library") or (data.get("issues") or []),
+        "issues_library":            issues_library,
         "talking_points":            data.get("talking_points") or [],
         "talking_points_library":    data.get("talking_points_library") or [],
         "suggested_questions":       data.get("suggested_questions") or [],

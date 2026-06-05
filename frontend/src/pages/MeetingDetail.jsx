@@ -18,6 +18,8 @@ function ExplainDialog({ title, explain }) {
   if (!explain) return null;
   const sources = explain.data_sources_analyzed || explain.dataSourcesAnalyzed || [];
   const timePeriod = explain.time_period || explain.timePeriod || {};
+  const kpiPaths = explain.kpi_paths || explain.kpiPaths || [];
+  const observed = explain.observed_values || explain.observedValues || {};
   return (
     <Dialog>
       <DialogTrigger asChild>
@@ -61,6 +63,21 @@ function ExplainDialog({ title, explain }) {
               <div className="mt-1 flex flex-wrap gap-2">
                 {sources.map((s) => (
                   <span key={String(s)} className="chip">{String(s)}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {!!(Array.isArray(kpiPaths) && kpiPaths.length) && (
+            <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+              <div className="text-xs text-white/60">KPI Evidence</div>
+              <div className="mt-2 space-y-2">
+                {kpiPaths.map((p) => (
+                  <div key={String(p)} className="flex items-start justify-between gap-3">
+                    <div className="mono text-[11px] text-slate-300 break-all">{String(p)}</div>
+                    <div className="mono text-[11px] text-slate-400">
+                      {Object.prototype.hasOwnProperty.call(observed, p) ? JSON.stringify(observed[p]) : "—"}
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
