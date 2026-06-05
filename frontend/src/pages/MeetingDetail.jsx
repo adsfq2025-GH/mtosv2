@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { meetings, aiModels, actionItems, contentCaptures, clients } from "../api";
+import { meetings, aiModels, actionItems, contentCaptures, clients, roadmap } from "../api";
 import { PageHead } from "../Layout";
 import {
   Sparkle, FileText, ChatCircle, Trophy, Warning, Lightbulb, Question, Megaphone,
@@ -111,6 +111,7 @@ function ModelSelect({ value, onChange }) {
 
 const sevChip = (s) => s === "high" ? "chip-danger" : s === "low" ? "chip-success" : "chip-warn";
 const prioChip = (p) => p === "high" ? "chip-danger" : p === "low" ? "chip-success" : "chip-warn";
+const statusChip = (s) => s === "completed" ? "chip-success" : s === "blocked" ? "chip-danger" : s === "in_progress" ? "chip-info" : "chip-warn";
 
 const _num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const _str = (v) => (v === null || v === undefined ? "" : String(v));
@@ -144,10 +145,83 @@ function ReviewSection({ title, children }) {
   );
 }
 
+function RoadmapAddDialog({ clientId, meetingId, week, onCreated }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ week, owner_type: "agency", create_action_item: true });
+  useEffect(() => { setForm((p) => ({ ...p, week })); }, [week]);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <button className="btn-ghost" type="button">Add Roadmap Item</button>
+      </DialogTrigger>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Add Roadmap Item</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <div className="label mb-1">Week</div>
+              <input className="input" type="number" min={1} max={12} value={form.week || 1} onChange={(e) => setForm((p) => ({ ...p, week: Number(e.target.value || 1) }))} />
+            </div>
+            <div>
+              <div className="label mb-1">Owner Type</div>
+              <select className="input" value={form.owner_type || "agency"} onChange={(e) => setForm((p) => ({ ...p, owner_type: e.target.value }))}>
+                <option value="agency">agency</option>
+                <option value="client">client</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <div className="label mb-1">Title</div>
+            <input className="input" value={form.title || ""} onChange={(e) => setForm((p) => ({ ...p, title: e.target.value }))} placeholder="Example: Publish 3 new city pages" />
+          </div>
+          <div>
+            <div className="label mb-1">Description</div>
+            <textarea className="input !min-h-[90px]" value={form.description || ""} onChange={(e) => setForm((p) => ({ ...p, description: e.target.value }))} placeholder="What done looks like, requirements, links/assets…" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <div className="label mb-1">Owner</div>
+              <input className="input" value={form.owner || ""} onChange={(e) => setForm((p) => ({ ...p, owner: e.target.value }))} placeholder="SEO Dept / AM / Client" />
+            </div>
+            <div>
+              <div className="label mb-1">Due Date</div>
+              <input className="input" type="date" value={form.due_date || ""} onChange={(e) => setForm((p) => ({ ...p, due_date: e.target.value }))} />
+            </div>
+            <div>
+              <div className="label mb-1">Priority</div>
+              <select className="input" value={form.priority || "medium"} onChange={(e) => setForm((p) => ({ ...p, priority: e.target.value }))}>
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <input type="checkbox" checked={!!form.create_action_item} onChange={(e) => setForm((p) => ({ ...p, create_action_item: e.target.checked }))} />
+            Also create a linked action item (recommended)
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <button className="btn-primary" type="button" onClick={async () => {
+              if (!clientId || !form.title) return;
+              await roadmap.addItem(clientId, { ...form, meeting_id: meetingId || null });
+              setOpen(false);
+              onCreated?.();
+            }}>Create</button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function MeetingDetail() {
   const { id } = useParams();
   const [m, setM] = useState(null);
   const [client, setClient] = useState(null);
+  const [roadmapData, setRoadmapData] = useState(null);
+  const [roadmapWeek, setRoadmapWeek] = useState(1);
   const [model, setModel] = useState("gemini-direct");
   const [tab, setTab] = useState("brief");
   const [transcript, setTranscript] = useState("");
@@ -178,6 +252,11 @@ export default function MeetingDetail() {
       setQaScorecard(qaRes?.scorecard || null);
       setReviewsDraft(meeting.deliverable_reviews || {});
       clients.get(meeting.client_id).then(setClient).catch(() => setClient(null));
+      roadmap.get(meeting.client_id).then((r) => {
+        setRoadmapData(r);
+        const cw = Number(r?.current_week || 1) || 1;
+        setRoadmapWeek(cw);
+      }).catch(() => setRoadmapData(null));
     }),
     [id],
   );
@@ -319,6 +398,24 @@ export default function MeetingDetail() {
     }
   };
 
+  const refreshRoadmap = async () => {
+    if (!m?.client_id) return;
+    const r = await roadmap.get(m.client_id);
+    setRoadmapData(r);
+    if (!roadmapWeek) setRoadmapWeek(Number(r?.current_week || 1) || 1);
+  };
+
+  const setRoadmapStatus = async (itemId, status) => {
+    if (!m?.client_id) return;
+    setBusy(`roadmap_${itemId}`);
+    try {
+      await roadmap.patchItem(m.client_id, itemId, { status });
+      await refreshRoadmap();
+    } finally {
+      setBusy("");
+    }
+  };
+
   const CHECKLIST_ITEMS = [
     ["wins", "Wins delivered"],
     ["issues", "Issues with action plan"],
@@ -386,6 +483,100 @@ export default function MeetingDetail() {
                 {busy === "save_reviews" ? "Saving…" : "Save Review Notes"}
               </button>
             </div>
+          </div>
+
+          <div className="card-flat p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold flex items-center gap-2">
+                  <Clock size={16} weight="duotone" /> 12-Week Roadmap
+                </div>
+                <div className="text-xs text-slate-400 mt-1">
+                  Current week, completion %, pending and overdue items. Roadmap items can create linked action items for accountability.
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <Link to={`/follow-up?client_id=${encodeURIComponent(m.client_id)}`} className="btn-ghost">Open Follow-Up</Link>
+                <RoadmapAddDialog clientId={m.client_id} meetingId={m.id} week={roadmapWeek} onCreated={refreshRoadmap} />
+              </div>
+            </div>
+
+            {!roadmapData && <div className="text-sm text-slate-500 mt-4">Loading roadmap…</div>}
+            {!!roadmapData && (
+              <div className="mt-4 space-y-4">
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="text-xs text-slate-400">Current Week</div>
+                    <div className="text-xl font-bold mt-1">{roadmapData.current_week || 1}/12</div>
+                  </div>
+                  <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="text-xs text-slate-400">Completed</div>
+                    <div className="text-xl font-bold mt-1">{roadmapData.counts?.completed_items || 0}</div>
+                  </div>
+                  <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="text-xs text-slate-400">Pending</div>
+                    <div className="text-xl font-bold mt-1">{roadmapData.counts?.pending_items || 0}</div>
+                  </div>
+                  <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="text-xs text-slate-400">Overdue</div>
+                    <div className="text-xl font-bold mt-1">{roadmapData.counts?.overdue_items || 0}</div>
+                  </div>
+                  <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="text-xs text-slate-400">Completion</div>
+                    <div className="text-xl font-bold mt-1">{roadmapData.counts?.completion_percentage || 0}%</div>
+                  </div>
+                </div>
+
+                <div className="w-full h-2 rounded-full bg-white/5 overflow-hidden">
+                  <div className="h-2 bg-[#3FA9F5]" style={{ width: `${roadmapData.counts?.completion_percentage || 0}%` }} />
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {Array.from({ length: 12 }).map((_, i) => {
+                    const w = i + 1;
+                    const isCurrent = w === (roadmapData.current_week || 1);
+                    const isSelected = w === roadmapWeek;
+                    const cls = isSelected ? "chip chip-info" : isCurrent ? "chip chip-warn" : "chip chip-muted";
+                    return (
+                      <button key={w} type="button" className={cls} onClick={() => setRoadmapWeek(w)}>
+                        Week {w}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {(() => {
+                  const items = roadmapData.items || [];
+                  const weekItems = items.filter((it) => Number(it.week || 0) === Number(roadmapWeek || 1));
+                  const overdueItems = items.filter((it) => !!it.due_date && it.due_date < (roadmapData.today || "") && it.status !== "completed");
+                  const shown = [...overdueItems.slice(0, 5), ...weekItems].slice(0, 25);
+                  return (
+                    <div className="space-y-2">
+                      {shown.length === 0 && <div className="text-sm text-slate-500 py-4 text-center">No roadmap items for this week yet.</div>}
+                      {shown.map((it) => (
+                        <div key={it.id} className={`p-4 rounded-md border border-white/5 bg-white/[0.02] flex items-start justify-between gap-3 ${busy === `roadmap_${it.id}` ? "opacity-60 pointer-events-none" : ""}`}>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <div className="text-sm font-medium truncate">{it.title}</div>
+                              <span className={`chip ${prioChip(it.priority)}`}>{it.priority}</span>
+                              {it.due_date && it.due_date < (roadmapData.today || "") && it.status !== "completed" && <span className="chip chip-danger">overdue</span>}
+                              <span className="chip chip-muted">Week {it.week}</span>
+                            </div>
+                            {it.description && <div className="text-xs text-slate-400 mt-1">{it.description}</div>}
+                            <div className="text-[11px] text-slate-500 mt-1 mono">{it.owner_type} · {it.owner || "—"} · due {it.due_date || "TBD"}</div>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button className="btn-ghost !p-2" type="button" title="In progress" onClick={() => setRoadmapStatus(it.id, "in_progress")}><Clock size={14} /></button>
+                            <button className="btn-ghost !p-2" type="button" title="Complete" onClick={() => setRoadmapStatus(it.id, "completed")}><CheckCircle size={14} /></button>
+                            <span className={`chip ${statusChip(it.status)}`}>{it.status}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
           </div>
 
           {(() => {

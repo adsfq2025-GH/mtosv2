@@ -234,6 +234,55 @@ class ActionItemIn(BaseModel):
     priority: Optional[Literal["low", "medium", "high"]] = "medium"
 
 
+class RoadmapItem(BaseModel):
+    id: str
+    week: int = 1
+    title: str
+    description: Optional[str] = None
+    owner: Optional[str] = None
+    owner_type: Literal["agency", "client"] = "agency"
+    due_date: Optional[str] = None
+    status: Literal["open", "in_progress", "completed", "blocked"] = "open"
+    priority: Literal["low", "medium", "high"] = "medium"
+    action_item_id: Optional[str] = None
+
+
+class RoadmapPlan(BaseDocument):
+    tenant_id: Optional[str] = None
+    client_id: str
+    start_date: str
+    weeks: int = 12
+    items: List[RoadmapItem] = Field(default_factory=list)
+
+
+class RoadmapPlanIn(BaseModel):
+    start_date: Optional[str] = None
+    items: List[RoadmapItem] = Field(default_factory=list)
+
+
+class RoadmapItemIn(BaseModel):
+    week: int = 1
+    title: str
+    description: Optional[str] = None
+    owner: Optional[str] = None
+    owner_type: Optional[Literal["agency", "client"]] = "agency"
+    due_date: Optional[str] = None
+    priority: Optional[Literal["low", "medium", "high"]] = "medium"
+    meeting_id: Optional[str] = None
+    create_action_item: bool = True
+
+
+class RoadmapItemPatch(BaseModel):
+    week: Optional[int] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    owner: Optional[str] = None
+    owner_type: Optional[Literal["agency", "client"]] = None
+    due_date: Optional[str] = None
+    status: Optional[Literal["open", "in_progress", "completed", "blocked"]] = None
+    priority: Optional[Literal["low", "medium", "high"]] = None
+
+
 class ContentCapture(BaseDocument):
     tenant_id: Optional[str] = None
     meeting_id: Optional[str] = None

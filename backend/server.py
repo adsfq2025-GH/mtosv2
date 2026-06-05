@@ -69,6 +69,11 @@ from models import (  # noqa: E402
     PromptTemplateIn,
     QAScorecard,
     CampaignRecommendation,
+    RoadmapItem,
+    RoadmapItemIn,
+    RoadmapItemPatch,
+    RoadmapPlan,
+    RoadmapPlanIn,
     RegisterIn,
     TenantMembership,
     TenantSettings,
@@ -2066,6 +2071,187 @@ async def action_remind(item_id: str, ctx=Depends(get_current_context)):
     await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     doc2 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     return ActionItem.from_mongo(doc2).model_dump()
+
+
+def _iso_date(d: datetime) -> str:
+    return d.date().isoformat()
+
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    try:
+        v = int(v)
+    except Exception:
+        v = lo
+    return max(lo, min(hi, v))
+
+
+def _compute_current_week(start_date: str, weeks: int = 12) -> int:
+    try:
+        sd = datetime.fromisoformat(start_date).date()
+    except Exception:
+        sd = utcnow().date()
+    delta_days = (utcnow().date() - sd).days
+    wk = (delta_days // 7) + 1
+    return _clamp_int(wk, 1, max(1, int(weeks or 12)))
+
+
+async def _get_or_create_roadmap_plan(tenant_id: str, client_id: str) -> RoadmapPlan:
+    doc = await db.roadmap_plans.find_one({"client_id": client_id, **tenant_scope(tenant_id)})
+    if doc:
+        plan = RoadmapPlan.from_mongo(doc)
+        if plan:
+            return plan
+    plan = RoadmapPlan(tenant_id=tenant_id, client_id=client_id, start_date=_iso_date(utcnow()), weeks=12, items=[])
+    await db.roadmap_plans.insert_one(plan.to_mongo())
+    return plan
+
+
+@api.get("/roadmap/{client_id}")
+async def get_roadmap(client_id: str, ctx=Depends(get_current_context)):
+    plan = await _get_or_create_roadmap_plan(ctx.tenant_id, client_id)
+    today = _iso_date(utcnow())
+    current_week = _compute_current_week(plan.start_date, plan.weeks)
+
+    items = [it.model_dump() for it in (plan.items or [])]
+    action_ids = [str(it.get("action_item_id") or "") for it in items if str(it.get("action_item_id") or "").strip()]
+    if action_ids:
+        docs = await db.action_items.find({"$and": [{"_id": {"$in": action_ids}}, tenant_scope(ctx.tenant_id)]}).to_list(2000)
+        by_id = {d.get("_id"): ActionItem.from_mongo(d).model_dump() for d in docs}
+        for it in items:
+            aid = str(it.get("action_item_id") or "").strip()
+            if not aid:
+                continue
+            a = by_id.get(aid)
+            if not a:
+                continue
+            it["status"] = a.get("status") or it.get("status")
+            it["due_date"] = a.get("due_date") or it.get("due_date")
+            it["owner_type"] = a.get("owner_type") or it.get("owner_type")
+            it["owner"] = a.get("owner") or it.get("owner")
+            it["priority"] = a.get("priority") or it.get("priority")
+
+    total = len(items)
+    completed = len([it for it in items if it.get("status") == "completed"])
+    pending = len([it for it in items if it.get("status") != "completed"])
+    overdue = len([it for it in items if it.get("due_date") and it.get("due_date") < today and it.get("status") != "completed"])
+    completion_pct = 0
+    if total > 0:
+        completion_pct = int(round((completed / total) * 100))
+
+    return {
+        "plan": plan.model_dump(),
+        "today": today,
+        "current_week": current_week,
+        "counts": {
+            "total_items": total,
+            "completed_items": completed,
+            "pending_items": pending,
+            "overdue_items": overdue,
+            "completion_percentage": completion_pct,
+        },
+        "items": items,
+    }
+
+
+@api.put("/roadmap/{client_id}")
+async def put_roadmap(client_id: str, payload: RoadmapPlanIn, ctx=Depends(get_current_context)):
+    plan = await _get_or_create_roadmap_plan(ctx.tenant_id, client_id)
+    patch: dict = {"updated_at": utcnow().isoformat()}
+    if payload.start_date:
+        patch["start_date"] = payload.start_date
+    if payload.items is not None:
+        patch["items"] = [RoadmapItem.model_validate(it).model_dump() for it in (payload.items or [])]
+    await db.roadmap_plans.update_one({"_id": plan.id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+    doc2 = await db.roadmap_plans.find_one({"_id": plan.id, **tenant_scope(ctx.tenant_id)})
+    return RoadmapPlan.from_mongo(doc2).model_dump()
+
+
+@api.post("/roadmap/{client_id}/items")
+async def add_roadmap_item(client_id: str, payload: RoadmapItemIn, ctx=Depends(get_current_context)):
+    plan = await _get_or_create_roadmap_plan(ctx.tenant_id, client_id)
+    week = _clamp_int(payload.week, 1, max(1, int(plan.weeks or 12)))
+
+    action_item_id: Optional[str] = None
+    if payload.create_action_item:
+        ai_doc = ActionItem(
+            tenant_id=ctx.tenant_id,
+            client_id=client_id,
+            meeting_id=payload.meeting_id,
+            title=payload.title,
+            description=payload.description,
+            owner=payload.owner,
+            owner_type=(payload.owner_type or "agency"),
+            due_date=payload.due_date,
+            priority=(payload.priority or "medium"),
+            status="open",
+        )
+        await db.action_items.insert_one(ai_doc.to_mongo())
+        action_item_id = ai_doc.id
+
+    item = RoadmapItem(
+        id=new_id(),
+        week=week,
+        title=payload.title,
+        description=payload.description,
+        owner=payload.owner,
+        owner_type=(payload.owner_type or "agency"),
+        due_date=payload.due_date,
+        status="open",
+        priority=(payload.priority or "medium"),
+        action_item_id=action_item_id,
+    )
+
+    items = [it.model_dump() for it in (plan.items or [])]
+    items.append(item.model_dump())
+    await db.roadmap_plans.update_one(
+        {"_id": plan.id, **tenant_scope(ctx.tenant_id)},
+        {"$set": {"items": items, "updated_at": utcnow().isoformat()}},
+    )
+    return {"ok": True, "item": item.model_dump(), "action_item_id": action_item_id}
+
+
+@api.patch("/roadmap/{client_id}/items/{item_id}")
+async def patch_roadmap_item(client_id: str, item_id: str, payload: RoadmapItemPatch, ctx=Depends(get_current_context)):
+    plan = await _get_or_create_roadmap_plan(ctx.tenant_id, client_id)
+    items = [it.model_dump() for it in (plan.items or [])]
+    idx = next((i for i, it in enumerate(items) if str(it.get("id") or "") == str(item_id)), -1)
+    if idx < 0:
+        raise HTTPException(404, "Not found")
+
+    it = dict(items[idx])
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        if k == "week":
+            it[k] = _clamp_int(v, 1, max(1, int(plan.weeks or 12)))
+        else:
+            it[k] = v
+
+    aid = str(it.get("action_item_id") or "").strip()
+    if aid:
+        a_patch = {}
+        if payload.title is not None:
+            a_patch["title"] = payload.title
+        if payload.description is not None:
+            a_patch["description"] = payload.description
+        if payload.owner is not None:
+            a_patch["owner"] = payload.owner
+        if payload.owner_type is not None:
+            a_patch["owner_type"] = payload.owner_type
+        if payload.due_date is not None:
+            a_patch["due_date"] = payload.due_date
+        if payload.priority is not None:
+            a_patch["priority"] = payload.priority
+        if payload.status is not None:
+            a_patch["status"] = payload.status
+        if a_patch:
+            a_patch["updated_at"] = utcnow().isoformat()
+            await db.action_items.update_one({"_id": aid, **tenant_scope(ctx.tenant_id)}, {"$set": a_patch})
+
+    items[idx] = it
+    await db.roadmap_plans.update_one(
+        {"_id": plan.id, **tenant_scope(ctx.tenant_id)},
+        {"$set": {"items": items, "updated_at": utcnow().isoformat()}},
+    )
+    return {"ok": True, "item": it}
 
 @api.post("/action-items")
 async def create_action(data: ActionItemIn, ctx=Depends(get_current_context)):

@@ -85,6 +85,14 @@ export const actionItems = {
   remind: (id) => api.post(`/action-items/${id}/remind`).then((r) => r.data),
 };
 
+export const roadmap = {
+  get: (clientId) => api.get(`/roadmap/${encodeURIComponent(clientId)}`).then((r) => r.data),
+  put: (clientId, payload) => api.put(`/roadmap/${encodeURIComponent(clientId)}`, payload).then((r) => r.data),
+  addItem: (clientId, payload) => api.post(`/roadmap/${encodeURIComponent(clientId)}/items`, payload).then((r) => r.data),
+  patchItem: (clientId, itemId, patch) =>
+    api.patch(`/roadmap/${encodeURIComponent(clientId)}/items/${encodeURIComponent(itemId)}`, patch).then((r) => r.data),
+};
+
 export const contentCaptures = {
   list: (clientId) => api.get(`/content-captures${clientId ? `?client_id=${clientId}` : ""}`).then((r) => r.data),
   create: (data) => api.post("/content-captures", data).then((r) => r.data),
