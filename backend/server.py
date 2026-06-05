@@ -1645,10 +1645,58 @@ async def export_meeting_html(meeting_id: str, ctx=Depends(get_current_context))
 async def update_meeting(meeting_id: str, patch: MeetingPatch, ctx=Depends(get_current_context)):
     update = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
     update["updated_at"] = utcnow().isoformat()
+    updated_feedback = False
+    feedback_payload = None
+    if "feedback" in update and isinstance(update.get("feedback"), dict):
+        fb = _validate_feedback_dict(update["feedback"])
+        if not fb.get("submitted_at"):
+            fb["submitted_at"] = utcnow().isoformat()
+        if not fb.get("submitted_by"):
+            fb["submitted_by"] = ctx.user.id
+        update["feedback"] = fb
+        updated_feedback = True
+        feedback_payload = fb
     res = await db.meetings.update_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)}, {"$set": update})
     if res.matched_count == 0:
         raise HTTPException(404, "Meeting not found")
     doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    if updated_feedback:
+        meeting = Meeting.from_mongo(doc)
+        m_docs = await db.meetings.find(
+            {"$and": [tenant_scope(ctx.tenant_id), {"client_id": meeting.client_id}, {"feedback": {"$exists": True, "$ne": None}}]}
+        ).sort("updated_at", -1).to_list(50)
+        series = []
+        for d in m_docs or []:
+            fb = (d.get("feedback") or {}) if isinstance(d, dict) else {}
+            if not isinstance(fb, dict):
+                continue
+            try:
+                series.append(
+                    {
+                        "meeting_id": d.get("_id"),
+                        "submitted_at": fb.get("submitted_at") or d.get("updated_at"),
+                        "lead_quality": _safe_int(fb.get("lead_quality"), 0),
+                        "campaign_quality": _safe_int(fb.get("campaign_quality"), 0),
+                        "satisfaction": _safe_int(fb.get("satisfaction"), 0),
+                        "results": _safe_int(fb.get("results"), 0),
+                    }
+                )
+            except Exception:
+                continue
+        alert, level, reason, rolling = _feedback_alert_from_series(series)
+        await db.clients.update_one(
+            {"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)},
+            {
+                "$set": {
+                    "feedback_last_submitted_at": (feedback_payload or {}).get("submitted_at"),
+                    "feedback_alert": alert,
+                    "feedback_alert_level": level,
+                    "feedback_alert_reason": reason,
+                    "feedback_rolling_avg": rolling,
+                    "updated_at": utcnow().isoformat(),
+                }
+            },
+        )
     return Meeting.from_mongo(doc).model_dump()
 
 
@@ -1887,6 +1935,14 @@ async def generate_recap(meeting_id: str, data: GenerateRecapIn, ctx=Depends(get
     meeting = Meeting.from_mongo(m_doc)
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
+    if client and _is_ads_client_services(client.services):
+        fb = meeting.model_dump().get("feedback") or {}
+        if not isinstance(fb, dict):
+            fb = {}
+        required = ("lead_quality", "campaign_quality", "satisfaction", "results")
+        ok = all((k in fb and isinstance(fb.get(k), int) and 1 <= int(fb.get(k)) <= 5) for k in required)
+        if not ok:
+            raise HTTPException(400, "Client feedback (Lead Quality, Campaign Quality, Satisfaction, Results) is required for Ads clients before completing the meeting.")
     actions = await db.action_items.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(ctx.tenant_id)]}).to_list(100)
     actions_p = [ActionItem.from_mongo(a).model_dump() for a in actions]
     try:
@@ -1915,6 +1971,33 @@ async def generate_recap(meeting_id: str, data: GenerateRecapIn, ctx=Depends(get
     )
     asyncio.create_task(_bg_publish_clickup_summary(ctx.tenant_id, meeting_id))
     return recap
+
+
+@api.get("/feedback/{client_id}/trend")
+async def feedback_trend(client_id: str, limit: int = 24, ctx=Depends(get_current_context)):
+    limit = max(1, min(int(limit or 24), 60))
+    m_docs = await db.meetings.find(
+        {"$and": [tenant_scope(ctx.tenant_id), {"client_id": client_id}, {"feedback": {"$exists": True, "$ne": None}}]}
+    ).sort("updated_at", -1).to_list(limit)
+    series = []
+    for d in m_docs or []:
+        fb = (d.get("feedback") or {}) if isinstance(d, dict) else {}
+        if not isinstance(fb, dict):
+            continue
+        series.append(
+            {
+                "meeting_id": d.get("_id"),
+                "meeting_title": d.get("title") or "",
+                "submitted_at": fb.get("submitted_at") or d.get("updated_at"),
+                "lead_quality": _safe_int(fb.get("lead_quality"), 0),
+                "campaign_quality": _safe_int(fb.get("campaign_quality"), 0),
+                "satisfaction": _safe_int(fb.get("satisfaction"), 0),
+                "results": _safe_int(fb.get("results"), 0),
+                "notes": fb.get("notes") or None,
+            }
+        )
+    alert, level, reason, rolling = _feedback_alert_from_series(series)
+    return {"client_id": client_id, "alert": alert, "alert_level": level, "alert_reason": reason, "rolling_avg": rolling, "items": series}
 
 
 @api.get("/meetings/{meeting_id}/automation")
@@ -2203,6 +2286,71 @@ def _safe_int(v: Any, default: int = 0) -> int:
         return int(v)
     except Exception:
         return default
+
+
+def _is_ads_client_services(services: list[str]) -> bool:
+    ss = [str(s or "").lower() for s in (services or [])]
+    return any(
+        ("google ads" in s)
+        or ("meta" in s)
+        or ("facebook" in s)
+        or ("instagram" in s)
+        or ("paid ads" in s)
+        for s in ss
+    )
+
+
+def _validate_feedback_dict(fb: dict) -> dict:
+    out = dict(fb or {})
+    for k in ("lead_quality", "campaign_quality", "satisfaction", "results"):
+        if k not in out:
+            raise HTTPException(400, f"Missing feedback field: {k}")
+        v = _safe_int(out.get(k), 0)
+        if v < 1 or v > 5:
+            raise HTTPException(400, f"{k} must be between 1 and 5")
+        out[k] = v
+    if out.get("notes") is not None:
+        out["notes"] = str(out.get("notes") or "")
+    return out
+
+
+def _feedback_alert_from_series(series: list[dict]) -> tuple[bool, str, str | None, dict]:
+    if not series:
+        return False, "low", None, {}
+
+    def avg(key: str, items: list[dict]) -> float:
+        vals = [float(x.get(key) or 0) for x in items if x.get(key) is not None]
+        return round(sum(vals) / max(1, len(vals)), 3)
+
+    rolling = {
+        "lead_quality": avg("lead_quality", series[:3]),
+        "campaign_quality": avg("campaign_quality", series[:3]),
+        "satisfaction": avg("satisfaction", series[:3]),
+        "results": avg("results", series[:3]),
+    }
+    last3 = series[:3]
+    prev3 = series[3:6]
+    last3_sat = avg("satisfaction", last3)
+    prev3_sat = avg("satisfaction", prev3) if prev3 else last3_sat
+    last2_sat_min = min([int(x.get("satisfaction") or 5) for x in series[:2]]) if series else 5
+    last3_res_avg = avg("results", last3)
+
+    level = "low"
+    reason = None
+    if last2_sat_min <= 2:
+        level = "high"
+        reason = "Satisfaction has been very low in recent meetings."
+    elif prev3 and (prev3_sat - last3_sat) >= 1.5:
+        level = "high"
+        reason = "Satisfaction has dropped sharply compared to prior meetings."
+    elif prev3 and (prev3_sat - last3_sat) >= 0.75:
+        level = "medium"
+        reason = "Satisfaction is trending down compared to prior meetings."
+    elif last3_res_avg <= 2.0:
+        level = "medium"
+        reason = "Results score is low over recent meetings."
+
+    return level != "low", level, reason, rolling
 
 
 def _default_discovery_templates() -> list[dict]:

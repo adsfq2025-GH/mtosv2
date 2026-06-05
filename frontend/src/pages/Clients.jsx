@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { clients, meetings, actionItems, integrations, reviews } from "../api";
+import { clients, meetings, actionItems, integrations, reviews, feedback } from "../api";
 import { PageHead } from "../Layout";
 import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle, Star, TrendUp } from "@phosphor-icons/react";
 import { useAuth } from "../auth";
@@ -253,6 +253,7 @@ export function ClientDetail() {
   const [suggestions, setSuggestions] = useState([]);
   const [suggestionsMeta, setSuggestionsMeta] = useState({ generated_at: null, model: null });
   const [generatingSuggestions, setGeneratingSuggestions] = useState(false);
+  const [feedbackTrend, setFeedbackTrend] = useState(null);
 
   const reload = useCallback(
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
@@ -278,6 +279,8 @@ export function ClientDetail() {
         setSuggestions([]);
         setSuggestionsMeta({ generated_at: null, model: null });
       });
+
+      feedback.trend(id, 24).then(setFeedbackTrend).catch(() => setFeedbackTrend(null));
     }),
     [id],
   );
@@ -588,6 +591,58 @@ export function ClientDetail() {
         </div>
 
         <div className="lg:col-span-2 space-y-6">
+          {feedbackTrend && (
+            <div className="card-flat p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-semibold">Client Feedback Trend</div>
+                  {!!feedbackTrend.alert_reason && <div className="text-xs text-slate-400 mt-1">{feedbackTrend.alert_reason}</div>}
+                </div>
+                <span className={`chip ${feedbackTrend.alert_level === "high" ? "chip-danger" : feedbackTrend.alert_level === "medium" ? "chip-warn" : "chip-success"}`}>{feedbackTrend.alert_level || "low"}</span>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Lead Quality</div>
+                  <div className="text-xl font-bold mt-1">{feedbackTrend.rolling_avg?.lead_quality ?? "—"}</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Campaign Quality</div>
+                  <div className="text-xl font-bold mt-1">{feedbackTrend.rolling_avg?.campaign_quality ?? "—"}</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Satisfaction</div>
+                  <div className="text-xl font-bold mt-1">{feedbackTrend.rolling_avg?.satisfaction ?? "—"}</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Results</div>
+                  <div className="text-xl font-bold mt-1">{feedbackTrend.rolling_avg?.results ?? "—"}</div>
+                </div>
+              </div>
+
+              <div className="mt-4">
+                <div className="text-xs text-slate-400 mb-2">Recent meetings</div>
+                <div className="space-y-2">
+                  {(feedbackTrend.items || []).slice(0, 6).map((it) => (
+                    <div key={it.meeting_id} className="p-3 rounded-md border border-white/5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium truncate">{it.meeting_title || "Meeting"}</div>
+                        <div className="text-[11px] text-slate-500 mono mt-0.5">{it.submitted_at || "—"}</div>
+                      </div>
+                      <div className="flex items-center gap-2 mono text-[12px] text-slate-300 shrink-0">
+                        <span>L {it.lead_quality}</span>
+                        <span>C {it.campaign_quality}</span>
+                        <span>S {it.satisfaction}</span>
+                        <span>R {it.results}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {(feedbackTrend.items || []).length === 0 && <div className="text-slate-500 text-sm py-2">No feedback submitted yet.</div>}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="card-flat p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">

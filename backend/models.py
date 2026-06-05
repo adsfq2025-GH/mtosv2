@@ -110,6 +110,11 @@ class Client(BaseDocument):
     suggestions: List[Dict[str, Any]] = Field(default_factory=list)
     suggestions_generated_at: Optional[str] = None
     suggestions_model: Optional[str] = None
+    feedback_alert: Optional[bool] = False
+    feedback_alert_level: Optional[Literal["low", "medium", "high"]] = "low"
+    feedback_alert_reason: Optional[str] = None
+    feedback_last_submitted_at: Optional[str] = None
+    feedback_rolling_avg: Dict[str, float] = Field(default_factory=dict)
 
 
 class ClientIn(BaseModel):
@@ -384,6 +389,16 @@ class MeetingDiscoveryQuestion(BaseModel):
     notes: Optional[str] = None
 
 
+class MeetingFeedback(BaseModel):
+    lead_quality: int
+    campaign_quality: int
+    satisfaction: int
+    results: int
+    notes: Optional[str] = None
+    submitted_at: Optional[str] = None
+    submitted_by: Optional[str] = None
+
+
 class Meeting(BaseDocument):
     tenant_id: Optional[str] = None
     client_id: str
@@ -439,6 +454,7 @@ class Meeting(BaseDocument):
     checklist: Dict[str, bool] = Field(default_factory=dict)
     deliverable_reviews: Dict[str, Any] = Field(default_factory=dict)
     discovery_questions: List[MeetingDiscoveryQuestion] = Field(default_factory=list)
+    feedback: Optional[MeetingFeedback] = None
 
 
 class MeetingIn(BaseModel):
@@ -461,6 +477,7 @@ class MeetingPatch(BaseModel):
     meeting_score: Optional[int] = None
     deliverable_reviews: Optional[Dict[str, Any]] = None
     discovery_questions: Optional[List[MeetingDiscoveryQuestion]] = None
+    feedback: Optional[MeetingFeedback] = None
 
 
 # ===== INTEGRATIONS =====

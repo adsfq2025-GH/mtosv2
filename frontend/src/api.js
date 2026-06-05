@@ -110,6 +110,11 @@ export const reviews = {
   },
 };
 
+export const feedback = {
+  trend: (clientId, limit = 24) =>
+    api.get(`/feedback/${encodeURIComponent(clientId)}/trend?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
+};
+
 export const contentCaptures = {
   list: (clientId) => api.get(`/content-captures${clientId ? `?client_id=${clientId}` : ""}`).then((r) => r.data),
   create: (data) => api.post("/content-captures", data).then((r) => r.data),

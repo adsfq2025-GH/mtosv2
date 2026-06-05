@@ -234,6 +234,8 @@ export default function MeetingDetail() {
   const [automation, setAutomation] = useState(null);
   const [qaScorecard, setQaScorecard] = useState(null);
   const [reviewsDraft, setReviewsDraft] = useState({});
+  const [feedbackDraft, setFeedbackDraft] = useState({ lead_quality: 3, campaign_quality: 3, satisfaction: 3, results: 3, notes: "" });
+  const [savingFeedback, setSavingFeedback] = useState(false);
 
   const reload = useCallback(
     () => Promise.all([
@@ -251,6 +253,15 @@ export default function MeetingDetail() {
       setAutomation(autoRes);
       setQaScorecard(qaRes?.scorecard || null);
       setReviewsDraft(meeting.deliverable_reviews || {});
+      if (meeting.feedback) {
+        setFeedbackDraft({
+          lead_quality: Number(meeting.feedback.lead_quality || 3),
+          campaign_quality: Number(meeting.feedback.campaign_quality || 3),
+          satisfaction: Number(meeting.feedback.satisfaction || 3),
+          results: Number(meeting.feedback.results || 3),
+          notes: meeting.feedback.notes || "",
+        });
+      }
       clients.get(meeting.client_id).then(setClient).catch(() => setClient(null));
       roadmap.get(meeting.client_id).then((r) => {
         setRoadmapData(r);
@@ -314,6 +325,37 @@ export default function MeetingDetail() {
       alert(e?.response?.data?.detail || "Recap generation failed");
     } finally {
       setBusy("");
+    }
+  };
+
+  const isAdsClient = (() => {
+    const ss = (client?.services || []).map((s) => String(s || "").toLowerCase());
+    return ss.some((s) => s.includes("google ads") || s.includes("meta") || s.includes("facebook") || s.includes("instagram") || s.includes("paid ads"));
+  })();
+  const feedbackComplete = (() => {
+    const f = m?.feedback || null;
+    if (!f) return false;
+    const vals = [f.lead_quality, f.campaign_quality, f.satisfaction, f.results];
+    return vals.every((v) => typeof v === "number" && v >= 1 && v <= 5);
+  })();
+
+  const saveFeedback = async () => {
+    setSavingFeedback(true);
+    try {
+      const payload = {
+        lead_quality: Number(feedbackDraft.lead_quality || 0),
+        campaign_quality: Number(feedbackDraft.campaign_quality || 0),
+        satisfaction: Number(feedbackDraft.satisfaction || 0),
+        results: Number(feedbackDraft.results || 0),
+        notes: feedbackDraft.notes || "",
+      };
+      const updated = await meetings.update(id, { feedback: payload });
+      setM(updated);
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save feedback");
+    } finally {
+      setSavingFeedback(false);
     }
   };
 
@@ -1137,9 +1179,57 @@ export default function MeetingDetail() {
                 </div>
               </div>
               <div className="card-flat p-5">
-                <button className="btn-primary flex items-center gap-2" onClick={genRecap} disabled={busy === "recap"} data-testid="generate-recap-btn">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="font-semibold">Client Feedback</h3>
+                    <div className="text-xs text-slate-400 mt-1">
+                      Capture structured feedback after the meeting. {isAdsClient ? "Required for Ads clients before generating recap." : "Optional but recommended."}
+                    </div>
+                  </div>
+                  {isAdsClient && <span className={`chip ${feedbackComplete ? "chip-success" : "chip-danger"}`}>{feedbackComplete ? "completed" : "required"}</span>}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
+                  <div>
+                    <div className="label">Lead Quality (1–5)</div>
+                    <select className="input mt-1.5" value={feedbackDraft.lead_quality} onChange={(e) => setFeedbackDraft((p) => ({ ...p, lead_quality: Number(e.target.value) }))}>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="label">Campaign Quality (1–5)</div>
+                    <select className="input mt-1.5" value={feedbackDraft.campaign_quality} onChange={(e) => setFeedbackDraft((p) => ({ ...p, campaign_quality: Number(e.target.value) }))}>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="label">Satisfaction (1–5)</div>
+                    <select className="input mt-1.5" value={feedbackDraft.satisfaction} onChange={(e) => setFeedbackDraft((p) => ({ ...p, satisfaction: Number(e.target.value) }))}>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="label">Results (1–5)</div>
+                    <select className="input mt-1.5" value={feedbackDraft.results} onChange={(e) => setFeedbackDraft((p) => ({ ...p, results: Number(e.target.value) }))}>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <div className="label">Notes</div>
+                  <textarea className="input mt-1.5 !min-h-[90px]" value={feedbackDraft.notes} onChange={(e) => setFeedbackDraft((p) => ({ ...p, notes: e.target.value }))} placeholder="Optional details…" />
+                </div>
+                <div className="mt-4 flex items-center justify-end">
+                  <button className="btn-primary" type="button" onClick={saveFeedback} disabled={savingFeedback}>
+                    {savingFeedback ? "Saving…" : "Save Feedback"}
+                  </button>
+                </div>
+              </div>
+              <div className="card-flat p-5">
+                <button className="btn-primary flex items-center gap-2" onClick={genRecap} disabled={busy === "recap" || (isAdsClient && !feedbackComplete)} data-testid="generate-recap-btn">
                   {busy === "recap" ? <ArrowsClockwise size={14} className="animate-spin" /> : <EnvelopeSimple size={14} weight="duotone" />} Generate Recap Email
                 </button>
+                {isAdsClient && !feedbackComplete && <div className="text-xs text-slate-400 mt-2">Feedback is required for Ads clients before generating recap.</div>}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
