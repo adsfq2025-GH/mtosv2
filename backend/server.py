@@ -1714,7 +1714,7 @@ async def export_meeting_html(meeting_id: str, ctx=Depends(get_current_context))
   <h2>Suggested Questions</h2>
   <ul>{qs or "<li>—</li>"}</ul>
 
-  <h2>Strategic Recommendations</h2>
+  <h2>Recommendations</h2>
   <ul>{recs or "<li>—</li>"}</ul>
 
   <h2>Testimonial Opportunity</h2>
@@ -1734,6 +1734,8 @@ async def update_meeting(meeting_id: str, patch: MeetingPatch, ctx=Depends(get_c
     update["updated_at"] = utcnow().isoformat()
     updated_feedback = False
     feedback_payload = None
+    updated_health = False
+    health_payload: Dict[str, Any] = {}
     if "feedback" in update and isinstance(update.get("feedback"), dict):
         fb = _validate_feedback_dict(update["feedback"])
         if not fb.get("submitted_at"):
@@ -1743,6 +1745,18 @@ async def update_meeting(meeting_id: str, patch: MeetingPatch, ctx=Depends(get_c
         update["feedback"] = fb
         updated_feedback = True
         feedback_payload = fb
+    if "nps_score" in update:
+        update["nps_score"] = _validate_nps(update.get("nps_score"))
+        updated_health = True
+        health_payload["nps_score"] = update.get("nps_score")
+    if "sentiment_classification" in update:
+        update["sentiment_classification"] = _validate_sentiment_classification(update.get("sentiment_classification"))
+        updated_health = True
+        health_payload["sentiment_classification"] = update.get("sentiment_classification")
+    if "health_notes" in update:
+        update["health_notes"] = str(update.get("health_notes") or "")
+        updated_health = True
+        health_payload["health_notes"] = update.get("health_notes")
     res = await db.meetings.update_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)}, {"$set": update})
     if res.matched_count == 0:
         raise HTTPException(404, "Meeting not found")
@@ -1780,6 +1794,51 @@ async def update_meeting(meeting_id: str, patch: MeetingPatch, ctx=Depends(get_c
                     "feedback_alert_level": level,
                     "feedback_alert_reason": reason,
                     "feedback_rolling_avg": rolling,
+                    "updated_at": utcnow().isoformat(),
+                }
+            },
+        )
+    if updated_health:
+        meeting = Meeting.from_mongo(doc)
+        m_docs = await db.meetings.find(
+            {
+                "$and": [
+                    tenant_scope(ctx.tenant_id),
+                    {"client_id": meeting.client_id},
+                    {
+                        "$or": [
+                            {"nps_score": {"$exists": True, "$ne": None}},
+                            {"sentiment_classification": {"$exists": True, "$ne": None}},
+                        ]
+                    },
+                ]
+            }
+        ).sort("updated_at", -1).to_list(60)
+        series = []
+        for d in m_docs or []:
+            if not isinstance(d, dict):
+                continue
+            series.append(
+                {
+                    "meeting_id": d.get("_id"),
+                    "submitted_at": d.get("updated_at"),
+                    "nps_score": _safe_int(d.get("nps_score"), 0) if d.get("nps_score") is not None else None,
+                    "sentiment_classification": str(d.get("sentiment_classification") or "").strip().lower() or None,
+                }
+            )
+        alert, level, reason, churn_score, indicators, roll = _health_alert_from_series(series)
+        await db.clients.update_one(
+            {"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)},
+            {
+                "$set": {
+                    "health_last_submitted_at": utcnow().isoformat(),
+                    "health_alert": alert,
+                    "health_alert_level": level,
+                    "health_alert_reason": reason,
+                    "churn_risk_score": churn_score,
+                    "churn_risk_indicators": indicators,
+                    "nps_rolling_avg": roll.get("nps_avg"),
+                    "sentiment_rolling": roll.get("sentiment_counts") or {},
                     "updated_at": utcnow().isoformat(),
                 }
             },
@@ -2085,6 +2144,51 @@ async def feedback_trend(client_id: str, limit: int = 24, ctx=Depends(get_curren
         )
     alert, level, reason, rolling = _feedback_alert_from_series(series)
     return {"client_id": client_id, "alert": alert, "alert_level": level, "alert_reason": reason, "rolling_avg": rolling, "items": series}
+
+
+@api.get("/health/{client_id}/trend")
+async def health_trend(client_id: str, limit: int = 24, ctx=Depends(get_current_context)):
+    limit = max(1, min(int(limit or 24), 60))
+    m_docs = await db.meetings.find(
+        {
+            "$and": [
+                tenant_scope(ctx.tenant_id),
+                {"client_id": client_id},
+                {
+                    "$or": [
+                        {"nps_score": {"$exists": True, "$ne": None}},
+                        {"sentiment_classification": {"$exists": True, "$ne": None}},
+                    ]
+                },
+            ]
+        }
+    ).sort("updated_at", -1).to_list(limit)
+    series = []
+    for d in m_docs or []:
+        if not isinstance(d, dict):
+            continue
+        series.append(
+            {
+                "meeting_id": d.get("_id"),
+                "meeting_title": d.get("title") or "",
+                "submitted_at": d.get("updated_at"),
+                "nps_score": _safe_int(d.get("nps_score"), 0) if d.get("nps_score") is not None else None,
+                "sentiment_classification": str(d.get("sentiment_classification") or "").strip().lower() or None,
+                "health_notes": d.get("health_notes") or None,
+            }
+        )
+    alert, level, reason, churn_score, indicators, roll = _health_alert_from_series(series)
+    return {
+        "client_id": client_id,
+        "alert": alert,
+        "alert_level": level,
+        "alert_reason": reason,
+        "churn_risk_score": churn_score,
+        "churn_risk_indicators": indicators,
+        "nps_avg": roll.get("nps_avg"),
+        "sentiment_counts": roll.get("sentiment_counts") or {},
+        "items": series,
+    }
 
 
 @api.get("/meetings/{meeting_id}/automation")
@@ -2438,6 +2542,99 @@ def _feedback_alert_from_series(series: list[dict]) -> tuple[bool, str, str | No
         reason = "Results score is low over recent meetings."
 
     return level != "low", level, reason, rolling
+
+
+def _validate_nps(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    n = _safe_int(v, 0)
+    if n < 1 or n > 10:
+        raise HTTPException(400, "nps_score must be between 1 and 10")
+    return n
+
+
+def _validate_sentiment_classification(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v or "").strip().lower()
+    if s not in ("happy", "neutral", "concerned", "at_risk"):
+        raise HTTPException(400, "sentiment_classification must be one of: happy, neutral, concerned, at_risk")
+    return s
+
+
+def _health_alert_from_series(series: list[dict]) -> tuple[bool, str, str | None, int, list[str], dict]:
+    if not series:
+        return False, "low", None, 0, [], {"nps_avg": None, "sentiment_counts": {}}
+
+    def avg_nps(items: list[dict]) -> Optional[float]:
+        vals = [float(x.get("nps_score")) for x in items if isinstance(x.get("nps_score"), (int, float))]
+        if not vals:
+            return None
+        return round(sum(vals) / float(len(vals)), 3)
+
+    sent_weight = {"happy": 0, "neutral": 1, "concerned": 2, "at_risk": 3}
+    last3 = series[:3]
+    prev3 = series[3:6]
+    nps_last3 = avg_nps(last3)
+    nps_prev3 = avg_nps(prev3) if prev3 else nps_last3
+    last_sent = str(series[0].get("sentiment_classification") or "").strip().lower()
+    last2_sent = [str(x.get("sentiment_classification") or "").strip().lower() for x in series[:2]]
+
+    counts: dict[str, int] = {"happy": 0, "neutral": 0, "concerned": 0, "at_risk": 0}
+    for it in series[:12]:
+        s = str(it.get("sentiment_classification") or "").strip().lower()
+        if s in counts:
+            counts[s] += 1
+
+    indicators: list[str] = []
+    level = "low"
+    reason = None
+
+    if last_sent == "at_risk":
+        level = "high"
+        reason = "Latest meeting sentiment is At Risk."
+        indicators.append("latest_sentiment_at_risk")
+    elif "at_risk" in last2_sent:
+        level = "high"
+        reason = "At Risk sentiment occurred recently."
+        indicators.append("recent_at_risk_sentiment")
+    elif last_sent == "concerned":
+        level = "medium"
+        reason = "Latest meeting sentiment is Concerned."
+        indicators.append("latest_sentiment_concerned")
+
+    if nps_last3 is not None:
+        if nps_last3 <= 4:
+            level = "high"
+            if not reason:
+                reason = "NPS is very low in recent meetings."
+            indicators.append("nps_very_low")
+        elif nps_last3 <= 6 and level == "low":
+            level = "medium"
+            if not reason:
+                reason = "NPS is low in recent meetings."
+            indicators.append("nps_low")
+
+        if nps_prev3 is not None and (nps_prev3 - nps_last3) >= 2.0:
+            level = "high"
+            reason = "NPS dropped sharply compared to prior meetings."
+            indicators.append("nps_drop_sharp")
+        elif nps_prev3 is not None and (nps_prev3 - nps_last3) >= 1.0 and level == "low":
+            level = "medium"
+            reason = "NPS is trending down compared to prior meetings."
+            indicators.append("nps_drop")
+
+    churn_score = 0
+    churn_score += 45 if "latest_sentiment_at_risk" in indicators else 0
+    churn_score += 25 if "recent_at_risk_sentiment" in indicators else 0
+    churn_score += 15 if "latest_sentiment_concerned" in indicators else 0
+    churn_score += 20 if "nps_very_low" in indicators else 0
+    churn_score += 10 if "nps_low" in indicators else 0
+    churn_score += 20 if "nps_drop_sharp" in indicators else 0
+    churn_score += 10 if "nps_drop" in indicators else 0
+    churn_score = int(max(0, min(100, churn_score)))
+
+    return level != "low", level, reason, churn_score, indicators, {"nps_avg": nps_last3, "sentiment_counts": counts}
 
 
 def _default_discovery_templates() -> list[dict]:

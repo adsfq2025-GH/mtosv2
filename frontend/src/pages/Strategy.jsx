@@ -17,8 +17,8 @@ export default function Strategy() {
 
   return (
     <div>
-      <PageHead title="Strategy" subtitle="Account-specific recommendations, opportunities, and next moves." />
-      {rows.length === 0 && <div className="card-flat p-10 text-center text-slate-400">No strategic recommendations yet. Generate briefs and analyze transcripts to populate this feed.</div>}
+      <PageHead title="Recommendations" subtitle="Account-specific recommendations and opportunities." />
+      {rows.length === 0 && <div className="card-flat p-10 text-center text-slate-400">No recommendations yet. Generate briefs and analyze transcripts to populate this feed.</div>}
       <div className="space-y-4">
         {rows.map((m) => (
           <div key={m.id} className="card-flat p-5" data-testid={`strategy-card-${m.id}`}>
@@ -42,4 +42,3 @@ export default function Strategy() {
     </div>
   );
 }
-

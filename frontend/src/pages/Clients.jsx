@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { clients, meetings, actionItems, integrations, reviews, feedback } from "../api";
+import { clients, meetings, actionItems, integrations, reviews, feedback, health } from "../api";
 import { PageHead } from "../Layout";
 import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle, Star, TrendUp } from "@phosphor-icons/react";
 import { useAuth } from "../auth";
@@ -254,6 +254,7 @@ export function ClientDetail() {
   const [suggestionsMeta, setSuggestionsMeta] = useState({ generated_at: null, model: null });
   const [generatingSuggestions, setGeneratingSuggestions] = useState(false);
   const [feedbackTrend, setFeedbackTrend] = useState(null);
+  const [healthTrend, setHealthTrend] = useState(null);
 
   const reload = useCallback(
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
@@ -281,6 +282,7 @@ export function ClientDetail() {
       });
 
       feedback.trend(id, 24).then(setFeedbackTrend).catch(() => setFeedbackTrend(null));
+      health.trend(id, 24).then(setHealthTrend).catch(() => setHealthTrend(null));
     }),
     [id],
   );
@@ -591,6 +593,71 @@ export function ClientDetail() {
         </div>
 
         <div className="lg:col-span-2 space-y-6">
+          {healthTrend && (
+            <div className="card-flat p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="font-semibold">Client Health Trend</div>
+                  {!!healthTrend.alert_reason && <div className="text-xs text-slate-400 mt-1">{healthTrend.alert_reason}</div>}
+                </div>
+                <span className={`chip ${healthTrend.alert_level === "high" ? "chip-danger" : healthTrend.alert_level === "medium" ? "chip-warn" : "chip-success"}`}>{healthTrend.alert_level || "low"}</span>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Avg NPS</div>
+                  <div className="text-xl font-bold mt-1">{healthTrend.nps_avg === null || healthTrend.nps_avg === undefined ? "—" : Number(healthTrend.nps_avg).toFixed(1)}</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Churn Risk Score</div>
+                  <div className="text-xl font-bold mt-1">{healthTrend.churn_risk_score ?? "—"}</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Concerned</div>
+                  <div className="text-xl font-bold mt-1">{healthTrend.sentiment_counts?.concerned ?? 0}</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">At Risk</div>
+                  <div className="text-xl font-bold mt-1">{healthTrend.sentiment_counts?.at_risk ?? 0}</div>
+                </div>
+              </div>
+
+              {(healthTrend.churn_risk_indicators || []).length > 0 && (
+                <div className="mt-4">
+                  <div className="text-xs text-slate-400 mb-2">Churn indicators</div>
+                  <div className="flex flex-wrap gap-2">
+                    {(healthTrend.churn_risk_indicators || []).slice(0, 8).map((x, idx2) => (
+                      <span key={`${x}-${idx2}`} className="chip chip-muted">{x}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-4">
+                <div className="text-xs text-slate-400 mb-2">Recent health check-ins</div>
+                <div className="space-y-2">
+                  {(healthTrend.items || []).slice(0, 6).map((it) => (
+                    <div key={it.meeting_id} className="p-3 rounded-md border border-white/5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium truncate">{it.meeting_title || "Meeting"}</div>
+                        <div className="text-[11px] text-slate-500 mono mt-0.5">{it.submitted_at || "—"}</div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {it.nps_score !== null && it.nps_score !== undefined && <span className="chip chip-muted">NPS {it.nps_score}</span>}
+                        {it.sentiment_classification && <span className={`chip ${it.sentiment_classification === "at_risk" ? "chip-danger" : it.sentiment_classification === "concerned" ? "chip-warn" : it.sentiment_classification === "neutral" ? "chip-info" : "chip-success"}`}>{String(it.sentiment_classification).replaceAll("_", " ")}</span>}
+                      </div>
+                    </div>
+                  ))}
+                  {(healthTrend.items || []).length === 0 && <div className="text-slate-500 text-sm py-2">No health check-ins logged yet.</div>}
+                </div>
+              </div>
+
+              <div className="divider my-4" />
+              <div className="text-xs text-slate-400">
+                Calculated from recent meeting check-ins (NPS + sentiment). Higher churn risk scores are triggered by low NPS, repeated “Concerned/At Risk” sentiment, and negative trend over time.
+              </div>
+            </div>
+          )}
           {feedbackTrend && (
             <div className="card-flat p-5">
               <div className="flex items-start justify-between gap-3">

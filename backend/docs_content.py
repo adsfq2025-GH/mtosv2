@@ -7,18 +7,18 @@ DOCS: List[Dict] = [
         "slug": "mtm-framework",
         "category": "Framework",
         "title": "The Monthly Touch Meeting Framework",
-        "summary": "Master framework: turn repetitive reporting calls into strategic growth conversations that drive retention.",
+        "summary": "Turn repetitive reporting calls into clear, client-focused business conversations that improve retention.",
         "body": """# The Monthly Touch Meeting (MTM) Operating System
 
 ## Why MTMs Matter
-Monthly Touch Meetings are the single highest-leverage retention tool an agency owns. Done well they reduce churn 20–40%, lift NRR, and surface 3–5 testimonial opportunities per quarter.
+Monthly Touch Meetings help clients feel confident about the work, understand what is changing, and stay aligned on next steps.
 
 ## The 5 Outcomes Every MTM Must Deliver
 1. The client feels **informed** — they know exactly what we did, what worked, what didn't.
 2. The client feels **involved** — they participated in the strategy, didn't just receive a report.
 3. The client feels **confident** — perceived value increased, not decreased.
 4. The client feels **supported** — they know what's next and who owns it.
-5. The agency captures **strategic intel** — sentiment, churn signals, upsell, content.
+5. The agency captures **key context** — sentiment, churn signals, upsell, content.
 
 ## The 4-Phase MTM Lifecycle
 - **Phase 1 — Prep (45 min, automated to <10 min via Monthly Touch OS)**
@@ -30,7 +30,7 @@ Monthly Touch Meetings are the single highest-leverage retention tool an agency 
 Every meeting opens with clear, specific wins and surfaces transparent issues. Wins reinforce value; issues build trust by demonstrating proactive leadership. Generate as many as are meaningful and supported by real data.
 
 ## The Trusted Advisor Posture
-Account managers are not status messengers — they are **strategic consultants**. Lead with insight, not data. Use phrases like *"What I'd recommend next…"*, *"Here's what we're seeing across similar accounts…"*.
+Account managers are not status messengers. Lead with insight, not raw data. Use phrases like *"What I'd recommend next…"*, *"Here's what we are seeing across similar accounts…"*. 
 """,
     },
     {
@@ -54,10 +54,10 @@ Account managers are not status messengers — they are **strategic consultants*
 |---|---|
 | Perceived value | Wins framed in client language, every meeting |
 | Communication | Recurring monthly cadence + recap email |
-| Disconnected reports | Wins → narrative → strategic recommendation |
+| Disconnected reports | Wins → narrative → recommendation |
 | Expectations | Open with last month's commitments, close with next |
 | Relationship neglect | Live human conversation, named action items |
-| Strategy fatigue | Always 1 new strategic recommendation per meeting |
+| Strategy fatigue | Always leave the client with clear recommendations and owners |
 | No future | "Next 30/60/90" closing always covered |
 
 ## Sentiment Watch Signals
@@ -90,7 +90,7 @@ Track in the transcript analyzer:
 ## Quality Bar
 - Each win includes a number AND a "what it means for your business" sentence.
 - Each issue includes "what we're already doing" — never raise an issue without an in-flight solution.
-- Talking points are framed as questions or strategic suggestions, not status updates.
+- Talking points are framed as questions or clear recommendations, not status updates.
 """,
     },
     {
@@ -102,11 +102,11 @@ Track in the transcript analyzer:
 
 ## Suggested Flow (60 min)
 - **0–3 min — Rapport & Agenda** ("Before we jump in — how's the team holding up this month?")
-- **3–13 min — Wins** (specific, emotional, client-language)
+- **3–13 min — Wins** (specific, client-language)
 - **13–25 min — Performance & Strategy** (1 chart max per topic; *"here's what's driving it…"*)
 - **25–35 min — Issues + Plan** (own the issue, present the fix; ask for input)
 - **35–45 min — Client Voice** (engagement questions; testimonial moment if warranted)
-- **45–55 min — Next 30 Days** (strategy + 1 new recommendation + action items)
+- **45–55 min — Next 30 Days** (plan + recommendations + action items)
 - **55–60 min — Recap & Close** ("Here's what you'll get from me by Friday…")
 
 ## Phrases that Sound Like a Consultant
@@ -224,7 +224,7 @@ Every Monthly Touch Meeting must include:
 - [ ] **Wins** (with metrics + client-language meaning)
 - [ ] **Issues with action plans**
 - [ ] **Campaign progress vs. last month's promises**
-- [ ] **One new strategic recommendation**
+- [ ] **Clear recommendations**
 - [ ] **Client voice / open-ended questions**
 - [ ] **Testimonial/content opportunity assessment**
 - [ ] **Next 30 days plan**
@@ -249,7 +249,7 @@ Every Monthly Touch Meeting must include:
 - [ ] Map Check-ins heat map open and ready to share
 - [ ] Google Meet link sent
 - [ ] Testimonial-readiness checked
-- [ ] One new strategic recommendation prepared
+- [ ] Recommendations prepared
 """,
     },
 
@@ -265,13 +265,13 @@ Every Monthly Touch Meeting must include:
 - Auto-brief reviewed and personalized: 5
 - Action items from last meeting closed or carried forward: 5
 - Open Gmail threads addressed: 5
-- One new strategic recommendation ready: 5
+- Recommendations prepared: 5
 
 ## Meeting Execution (50 pts)
 - Wins delivered with metric + meaning: 10
 - Issues with credible action plan: 10
 - Time managed within 60 minutes: 5
-- At least 3 open-ended client questions asked: 10
+- Open-ended client questions asked: 10
 - Strategic posture (not status messenger): 10
 - Confident closing with named owners + dates: 5
 

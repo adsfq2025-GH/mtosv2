@@ -236,6 +236,8 @@ export default function MeetingDetail() {
   const [reviewsDraft, setReviewsDraft] = useState({});
   const [feedbackDraft, setFeedbackDraft] = useState({ lead_quality: 3, campaign_quality: 3, satisfaction: 3, results: 3, notes: "" });
   const [savingFeedback, setSavingFeedback] = useState(false);
+  const [healthDraft, setHealthDraft] = useState({ nps_score: "", sentiment_classification: "", health_notes: "" });
+  const [savingHealth, setSavingHealth] = useState(false);
 
   const reload = useCallback(
     () => Promise.all([
@@ -253,6 +255,11 @@ export default function MeetingDetail() {
       setAutomation(autoRes);
       setQaScorecard(qaRes?.scorecard || null);
       setReviewsDraft(meeting.deliverable_reviews || {});
+      setHealthDraft({
+        nps_score: meeting.nps_score === null || meeting.nps_score === undefined ? "" : String(meeting.nps_score),
+        sentiment_classification: String(meeting.sentiment_classification || ""),
+        health_notes: String(meeting.health_notes || ""),
+      });
       if (meeting.feedback) {
         setFeedbackDraft({
           lead_quality: Number(meeting.feedback.lead_quality || 3),
@@ -359,6 +366,26 @@ export default function MeetingDetail() {
     }
   };
 
+  const saveHealth = async () => {
+    setSavingHealth(true);
+    try {
+      const nps = healthDraft.nps_score === "" ? null : Number(healthDraft.nps_score || 0);
+      const sentiment = String(healthDraft.sentiment_classification || "").trim() || null;
+      const notes = String(healthDraft.health_notes || "").trim();
+      const updated = await meetings.update(id, {
+        nps_score: nps,
+        sentiment_classification: sentiment,
+        health_notes: notes ? notes : null,
+      });
+      setM(updated);
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save client health");
+    } finally {
+      setSavingHealth(false);
+    }
+  };
+
   const syncMeetTranscript = async () => {
     setBusy("sync_meet");
     try {
@@ -459,16 +486,16 @@ export default function MeetingDetail() {
   };
 
   const CHECKLIST_ITEMS = [
-    ["wins", "Wins delivered"],
-    ["issues", "Issues with action plan"],
+    ["wins", "Review wins"],
+    ["issues", "Review issues & next steps"],
     ["progress", "Campaign progress reviewed"],
-    ["strategic", "Strategic recommendation shared"],
+    ["strategic", "Share one clear recommendation"],
     ["client_voice", "Open-ended client questions asked"],
     ["testimonial", "Testimonial / content opportunity assessed"],
     ["next30", "Next 30 days plan agreed"],
     ["actions", "Named action items with owners + dates"],
     ["nextmeeting", "Next meeting date confirmed"],
-    ["sentiment", "Sentiment read logged"],
+    ["sentiment", "Log client sentiment"],
   ];
 
   if (!m) return <div className="text-slate-400">Loading…</div>;
@@ -976,7 +1003,7 @@ export default function MeetingDetail() {
             </section>
             <section className="card-flat p-5">
               <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2"><Sparkle size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Strategic Recommendations</h3></div>
+                <div className="flex items-center gap-2"><Sparkle size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Recommendations</h3></div>
                 <Link to="/strategy" className="text-xs text-[#3FA9F5] hover:underline">View all</Link>
               </div>
               <ul className="space-y-2 list-disc pl-5">{(m.strategic_recommendations || []).map((r, i) => <li key={i} className="text-sm text-slate-300">{r}</li>)}</ul>
@@ -1043,9 +1070,9 @@ export default function MeetingDetail() {
             <h3 className="font-semibold mb-3 flex items-center gap-2"><Clock size={18} weight="duotone" /> Suggested Pacing</h3>
             <ol className="space-y-2 text-sm text-slate-300">
               <li><span className="mono text-[#3FA9F5]">0–3</span> · Rapport & agenda</li>
-              <li><span className="mono text-[#3FA9F5]">3–13</span> · 3 Wins</li>
+              <li><span className="mono text-[#3FA9F5]">3–13</span> · Wins</li>
               <li><span className="mono text-[#3FA9F5]">13–25</span> · Performance & strategy</li>
-              <li><span className="mono text-[#3FA9F5]">25–35</span> · 2 Issues + plan</li>
+              <li><span className="mono text-[#3FA9F5]">25–35</span> · Issues + next steps</li>
               <li><span className="mono text-[#3FA9F5]">35–45</span> · Client voice + testimonial moment</li>
               <li><span className="mono text-[#3FA9F5]">45–55</span> · Next 30 days</li>
               <li><span className="mono text-[#3FA9F5]">55–60</span> · Recap & close</li>
@@ -1176,6 +1203,69 @@ export default function MeetingDetail() {
                       </div>
                     ))}
                   </div>
+                </div>
+              </div>
+              <div className="card-flat p-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 className="font-semibold">Client Health</h3>
+                    <div className="text-xs text-slate-400 mt-1">
+                      Log NPS and sentiment so we can track trends and flag churn risk early.
+                    </div>
+                  </div>
+                  {!!m.sentiment_classification && (
+                    <span
+                      className={`chip ${
+                        m.sentiment_classification === "at_risk"
+                          ? "chip-danger"
+                          : m.sentiment_classification === "concerned"
+                            ? "chip-warn"
+                            : m.sentiment_classification === "neutral"
+                              ? "chip-info"
+                              : "chip-success"
+                      }`}
+                    >
+                      {String(m.sentiment_classification).replaceAll("_", " ")}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+                  <div>
+                    <div className="label">NPS (1–10)</div>
+                    <select className="input mt-1.5" value={healthDraft.nps_score} onChange={(e) => setHealthDraft((p) => ({ ...p, nps_score: e.target.value }))}>
+                      <option value="">—</option>
+                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => <option key={n} value={String(n)}>{n}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <div className="label">Sentiment</div>
+                    <select
+                      className="input mt-1.5"
+                      value={healthDraft.sentiment_classification}
+                      onChange={(e) => setHealthDraft((p) => ({ ...p, sentiment_classification: e.target.value }))}
+                    >
+                      <option value="">—</option>
+                      <option value="happy">Happy</option>
+                      <option value="neutral">Neutral</option>
+                      <option value="concerned">Concerned</option>
+                      <option value="at_risk">At Risk</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <div className="label">Notes</div>
+                  <textarea
+                    className="input mt-1.5 !min-h-[90px]"
+                    value={healthDraft.health_notes}
+                    onChange={(e) => setHealthDraft((p) => ({ ...p, health_notes: e.target.value }))}
+                    placeholder="What’s driving this rating? What do we need to fix next?"
+                  />
+                </div>
+                <div className="mt-4 flex items-center justify-end">
+                  <button className="btn-primary" type="button" onClick={saveHealth} disabled={savingHealth}>
+                    {savingHealth ? "Saving…" : "Save Client Health"}
+                  </button>
                 </div>
               </div>
               <div className="card-flat p-5">

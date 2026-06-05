@@ -115,6 +115,14 @@ class Client(BaseDocument):
     feedback_alert_reason: Optional[str] = None
     feedback_last_submitted_at: Optional[str] = None
     feedback_rolling_avg: Dict[str, float] = Field(default_factory=dict)
+    health_alert: Optional[bool] = False
+    health_alert_level: Optional[Literal["low", "medium", "high"]] = "low"
+    health_alert_reason: Optional[str] = None
+    churn_risk_score: Optional[int] = 0
+    churn_risk_indicators: List[str] = Field(default_factory=list)
+    nps_rolling_avg: Optional[float] = None
+    sentiment_rolling: Dict[str, int] = Field(default_factory=dict)
+    health_last_submitted_at: Optional[str] = None
 
 
 class ClientIn(BaseModel):
@@ -468,6 +476,9 @@ class Meeting(BaseDocument):
     sentiment_summary: Optional[str] = None
     transcript_analysis: Dict[str, Any] = Field(default_factory=dict)
     transcript_analysis_by_model: Dict[str, Any] = Field(default_factory=dict)
+    nps_score: Optional[int] = None
+    sentiment_classification: Optional[Literal["happy", "neutral", "concerned", "at_risk"]] = None
+    health_notes: Optional[str] = None
     recap_html: Optional[str] = None
     recap_email: Optional[str] = None
     recap_subject: Optional[str] = None
@@ -502,6 +513,9 @@ class MeetingPatch(BaseModel):
     deliverable_reviews: Optional[Dict[str, Any]] = None
     discovery_questions: Optional[List[MeetingDiscoveryQuestion]] = None
     feedback: Optional[MeetingFeedback] = None
+    nps_score: Optional[int] = None
+    sentiment_classification: Optional[Literal["happy", "neutral", "concerned", "at_risk"]] = None
+    health_notes: Optional[str] = None
 
 
 # ===== INTEGRATIONS =====

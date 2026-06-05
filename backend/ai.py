@@ -209,8 +209,7 @@ async def run_chat(
     """
     Route a chat request through the provider chain.
 
-    Failover order:
-        Groq → OpenRouter (claude-sonnet) → OpenAI (gpt-premium) → AIProviderError
+    The provider is selected by model_key. Requests use retries; provider failover may be configured via FAILOVER_CHAIN.
     """
     entry = MODEL_REGISTRY.get(model_key)
     if entry is None:
@@ -313,7 +312,7 @@ async def _extract_or_repair_json(
 # ─────────────────────────────────────────────
 
 BRIEF_SYSTEM = """You are a Senior Client Success Director at a digital marketing agency.
-You prepare Monthly Touch Meeting briefs that are strategic, retention-focused, and emotionally intelligent.
+You prepare Monthly Touch Meeting briefs that are accurate, specific, and useful for the client.
 You ALWAYS return a single valid JSON object (no markdown fences, no commentary).
 You write in a confident, warm, consultative voice.
 
@@ -390,7 +389,7 @@ Return a JSON object with EXACTLY this shape:
         "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
         "kpi_paths": ["google_ads.cpl.value", "google_ads.cpl.previous"],
         "observed_values": {{ "google_ads.cpl.value": 92, "google_ads.cpl.previous": 68 }},
-        "logic_used": "Mapped KPI deltas to highest-leverage fixes",
+        "logic_used": "Mapped KPI changes to the most important fixes",
         "calculation": "CPL rose from $68 to $92 while conversions stayed flat; prioritize landing page + keyword pruning",
         "confidence": 0
       }}
@@ -415,7 +414,7 @@ Return a JSON object with EXACTLY this shape:
   ],
   "testimonial_opportunity": "1-2 sentences naming whether this client is ready for testimonial ask and how to ask naturally — or 'Not yet, focus on results first'",
   "strategic_recommendations": [
-    "specific upsell/cross-sell/CRO/AI/operations recommendation 1",
+    "specific business recommendation 1",
     "..."
   ],
   "health_signal": "1 sentence summary of overall account health and trend"
@@ -711,6 +710,12 @@ TRANSCRIPT:
 
 Return a JSON object with EXACTLY this shape:
 {{
+  "explain": {{
+    "why": "1-3 sentences explaining why these conclusions were reached, using evidence from the transcript",
+    "sources": [ "meeting transcript", "meeting metadata" ],
+    "context": "1-2 sentences on why this matters for the business relationship",
+    "calculation_logic": "How you determined sentiment, churn signals, and health score suggestion"
+  }},
   "summary": "3-5 sentence executive summary of the meeting",
   "sentiment": "positive|neutral|negative",
   "sentiment_summary": "1-2 sentences explaining client sentiment with evidence",
@@ -763,6 +768,7 @@ async def analyze_transcript(
     raw = await run_chat(TRANSCRIPT_SYSTEM, user_text, model_key, session_id)
     data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
+        "explain":                 data.get("explain") or {},
         "summary":                 data.get("summary", ""),
         "sentiment":               data.get("sentiment", "neutral"),
         "sentiment_summary":       data.get("sentiment_summary", ""),
@@ -782,7 +788,7 @@ async def analyze_transcript(
 # ─────────────────────────────────────────────
 
 RECAP_SYSTEM = """You are a senior account manager writing a polished Monthly Touch Meeting recap email.
-Tone: warm, professional, confident, retention-focused. Use clear structure with short sections."""
+Tone: clear, friendly, and direct. Use short sections focused on what happened and what happens next."""
 
 RECAP_USER_TEMPLATE = """Write a Monthly Touch Meeting recap email to the client.
 
@@ -838,7 +844,7 @@ async def generate_recap(
     }
 
 
-WORKFLOW_SYSTEM = """You are an expert account management operations engine.
+WORKFLOW_SYSTEM = """You are an expert account management operations assistant.
 You convert meeting transcripts into a structured post-meeting workflow.
 You ALWAYS return a single valid JSON object only (no markdown, no commentary)."""
 

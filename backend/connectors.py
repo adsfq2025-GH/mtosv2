@@ -908,11 +908,11 @@ async def publish_clickup_meeting_brief(tenant_id: str, meeting: dict, client: d
         f"Client: {str((client or {}).get('company') or '')}".strip()
         + "\n"
         + f"Contact: {str((client or {}).get('name') or '')}".strip()
-        + "\n\nWINS:\n"
+        + "\n\nWins:\n"
         + (_fmt_bullets((meeting or {}).get("wins") or []) or "—")
-        + "\n\nISSUES:\n"
+        + "\n\nIssues:\n"
         + (_fmt_bullets((meeting or {}).get("issues") or []) or "—")
-        + "\n\nTALKING POINTS:\n"
+        + "\n\nTalking points:\n"
         + (
             _fmt_bullets(
                 [
@@ -922,9 +922,9 @@ async def publish_clickup_meeting_brief(tenant_id: str, meeting: dict, client: d
             )
             or "—"
         )
-        + "\n\nSUGGESTED QUESTIONS:\n"
+        + "\n\nSuggested questions:\n"
         + (_fmt_bullets((meeting or {}).get("suggested_questions") or []) or "—")
-        + "\n\nSTRATEGIC RECOMMENDATIONS:\n"
+        + "\n\nRecommendations:\n"
         + (_fmt_bullets((meeting or {}).get("strategic_recommendations") or []) or "—")
     )
 
@@ -954,11 +954,11 @@ async def publish_clickup_meeting_summary(tenant_id: str, meeting: dict, client:
         + "\n"
         + f"Contact: {str((client or {}).get('name') or '')}".strip()
         + (f"\n\nSENTIMENT: {sent}\n{sent_sum}".strip() if (sent or sent_sum) else "")
-        + "\n\nRECAP EMAIL:\n"
+        + "\n\nRecap email:\n"
         + (recap or "—")
-        + "\n\nACTION ITEMS:\n"
+        + "\n\nAction items:\n"
         + (_fmt_bullets([{"title": a.get("title"), "description": a.get("description")} for a in (actions or []) if isinstance(a, dict)]) or "—")
-        + "\n\nDEPARTMENT TICKETS:\n"
+        + "\n\nDepartment tickets:\n"
         + (
             _fmt_bullets(
                 [

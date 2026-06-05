@@ -1,14 +1,14 @@
 # Monthly Touch OS — Product Requirements Document
 
 ## Original Problem Statement
-Advanced Monthly Touch Meeting Operating System + Automation Framework. Transform Monthly Touch Meetings from repetitive reporting into strategic, retention-focused growth conversations. Build a complete operational framework + scalable client communication system + retention-focused client success process + standardized account management operating system + automation-ready infrastructure + meeting intelligence and preparation engine.
+Monthly Touch Meeting Operating System + Automation Framework. Turn repetitive reporting into clear, client-focused conversations. Centralize meeting prep, action items, follow-through, and visibility into account health.
 
 **Brand**: Monthly Touch OS — Powered by Map Ranking.
 
 ## Architecture
 - **Frontend**: React (CRA) + React Router + Tailwind + Phosphor Icons
 - **Backend**: FastAPI + Motor (MongoDB async)
-- **AI Engine**: Provider router (`backend/ai.py`) with automatic failover (Groq → OpenRouter → OpenAI)
+- **AI Engine**: Provider router (`backend/ai.py`) with retries (Groq / OpenAI / Gemini, depending on model_key)
 - **Auth**: JWT (HS256) + bcrypt; first user auto-promotes to admin
 - **Integration credentials**: Fernet-encrypted at rest
 
@@ -23,7 +23,7 @@ Advanced Monthly Touch Meeting Operating System + Automation Framework. Transfor
 | JWT Auth (login/register/me) | DONE | `backend/auth.py`, `pages/Auth.jsx` |
 | Client roster + detail | DONE | `backend/models.py`, `pages/Clients.jsx` |
 | Meetings CRUD | DONE | `pages/MeetingDetail.jsx` |
-| AI Meeting Brief (3 wins / 2 issues / talking points / questions / strategic recs / testimonial opp) | DONE | `backend/ai.py::generate_meeting_brief` |
+| AI Meeting Brief (wins / issues / talking points / questions / recommendations / testimonial opp) | DONE | `backend/ai.py::generate_meeting_brief` |
 | Transcript Analysis (action items, content opps, sentiment, churn risk, health score) | DONE | `backend/ai.py::analyze_transcript` |
 | Recap email generator | DONE | `backend/ai.py::generate_recap` |
 | Action Items tracker | DONE | `pages/Others.jsx::Actions` |
@@ -66,6 +66,6 @@ Advanced Monthly Touch Meeting Operating System + Automation Framework. Transfor
 
 ## Next Action Items
 1. User provides API credentials → flip integrations to live one at a time
-2. Wire first live integration: ClickUp (most leverage for action item sync)
+2. Wire first live integration: ClickUp (highest impact for action item sync)
 3. Then GHL, then Google Workspace OAuth bundle
 4. Add per-client onboarding context aggregation
