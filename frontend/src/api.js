@@ -72,6 +72,7 @@ export const meetings = {
   approveAutomation: (id) => api.post(`/meetings/${id}/automation/approve`).then((r) => r.data),
   qa: (id) => api.get(`/meetings/${id}/qa`).then((r) => r.data),
   scoreQa: (id) => api.post(`/meetings/${id}/qa/score`).then((r) => r.data),
+  generateDiscovery: (id) => api.post(`/meetings/${id}/discovery/generate`).then((r) => r.data),
 };
 
 export const actionItems = {

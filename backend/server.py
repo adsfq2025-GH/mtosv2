@@ -75,6 +75,9 @@ from models import (  # noqa: E402
     ReviewEvent,
     ReviewEventIn,
     ReviewMonthlySnapshot,
+    DiscoveryQuestionTemplate,
+    DiscoveryQuestionTemplateIn,
+    MeetingDiscoveryQuestion,
     RoadmapItem,
     RoadmapItemIn,
     RoadmapItemPatch,
@@ -2202,6 +2205,79 @@ def _safe_int(v: Any, default: int = 0) -> int:
         return default
 
 
+def _default_discovery_templates() -> list[dict]:
+    return [
+        {"kind": "operational", "category": "Lead Handling", "question": "Who answers the phone and how quickly do you typically respond to new leads?", "tags": ["calls", "follow_up"], "deliverables": ["google_ads", "meta_ads", "gbp", "seo"], "active": True},
+        {"kind": "operational", "category": "Lead Handling", "question": "How are leads followed up (SMS, call, email), and what is the follow-up cadence?", "tags": ["follow_up", "sms"], "deliverables": ["google_ads", "meta_ads"], "active": True},
+        {"kind": "operational", "category": "CRM Process", "question": "What CRM process is used today (stages, ownership, notes), and who is responsible for updating it?", "tags": ["crm", "pipeline"], "deliverables": ["google_ads", "meta_ads", "seo"], "active": True},
+        {"kind": "operational", "category": "Sales Cycle", "question": "What is the average sales cycle from first contact to closed sale, and what are the biggest drop-off points?", "tags": ["sales_cycle", "conversion"], "deliverables": ["google_ads", "meta_ads", "seo"], "active": True},
+        {"kind": "operational", "category": "After Lead", "question": "What happens after a lead submits a form or calls—what is the exact step-by-step workflow?", "tags": ["workflow", "conversion"], "deliverables": ["google_ads", "meta_ads"], "active": True},
+        {"kind": "operational", "category": "Missed Calls", "question": "How are missed calls handled, and do you have a process for calling back within 5–15 minutes?", "tags": ["missed_calls", "calls"], "deliverables": ["gbp", "google_ads"], "active": True},
+        {"kind": "operational", "category": "Reviews", "question": "When and how do you ask for reviews today, and who is responsible for requesting them?", "tags": ["reviews"], "deliverables": ["gbp", "seo"], "active": True},
+        {"kind": "operational", "category": "Offers", "question": "What offers are you currently running (discounts, bundles, guarantees), and which one converts best?", "tags": ["offers", "promotions"], "deliverables": ["google_ads", "meta_ads"], "active": True},
+
+        {"kind": "market", "category": "Competitors", "question": "Who are your top 3 competitors in this market, and what do you believe they do better than you?", "tags": ["competitors"], "deliverables": ["seo", "gbp", "google_ads", "meta_ads"], "active": True},
+        {"kind": "market", "category": "Customer Behavior", "question": "What does a high-intent customer typically search for right before they call or fill out a form?", "tags": ["intent", "keywords"], "deliverables": ["seo", "gbp", "google_ads"], "active": True},
+        {"kind": "market", "category": "Buying Process", "question": "What are the most common reasons customers choose you vs. delay or choose someone else?", "tags": ["objections", "decision"], "deliverables": ["google_ads", "meta_ads", "seo"], "active": True},
+        {"kind": "market", "category": "Decision Factors", "question": "What are the top decision factors: price, speed, trust, warranties, reviews, expertise—what matters most in your area?", "tags": ["decision_factors"], "deliverables": ["seo", "gbp", "google_ads", "meta_ads"], "active": True},
+        {"kind": "market", "category": "Local Market", "question": "Are there seasonal trends or local events that heavily impact demand?", "tags": ["seasonality"], "deliverables": ["seo", "google_ads", "meta_ads", "gbp"], "active": True},
+        {"kind": "market", "category": "Pricing Positioning", "question": "How do you want to be positioned on price (budget, mid, premium), and do customers understand the difference?", "tags": ["pricing"], "deliverables": ["google_ads", "meta_ads", "seo"], "active": True},
+    ]
+
+
+def _prio_from_score(score: int) -> str:
+    if score >= 6:
+        return "high"
+    if score >= 3:
+        return "medium"
+    return "low"
+
+
+def _score_template(t: dict, issues: list[dict], kpi: dict, deliverables: list[str]) -> tuple[int, str]:
+    q = f"{t.get('category','')} {t.get('question','')}".lower()
+    score = 0
+    reasons: list[str] = []
+
+    if deliverables:
+        td = [str(x).lower() for x in (t.get("deliverables") or [])]
+        if any(d in td for d in deliverables):
+            score += 1
+
+    for iss in issues or []:
+        txt = f"{iss.get('title','')} {iss.get('description','')}".lower()
+        sev = str(iss.get("severity") or "medium").lower()
+        w = 2 if sev == "high" else 1
+        if any(k in q for k in ("missed call", "phone", "answer", "follow up", "follow-up", "lead")) and any(k in txt for k in ("call", "lead", "conversion", "follow")):
+            score += 2 * w
+            reasons.append("Ties to current client issues around lead handling")
+        if any(k in q for k in ("offer", "promotion", "pricing")) and any(k in txt for k in ("cpl", "lead", "conversion", "cost", "offer")):
+            score += 2 * w
+            reasons.append("Ties to current client issues around offers/conversion")
+        if "review" in q and any(k in txt for k in ("review", "gbp", "rating")):
+            score += 2 * w
+            reasons.append("Ties to reputation/reviews issues")
+
+    gbp = (kpi or {}).get("google_business_profile") or {}
+    calls = (gbp.get("calls") or {}).get("delta_pct")
+    if any(k in q for k in ("missed call", "answer", "phone", "follow")) and isinstance(calls, (int, float)) and calls < 0:
+        score += 2
+        reasons.append("Calls are down; verify lead handling workflow")
+
+    gads = (kpi or {}).get("google_ads") or {}
+    cpl = (gads.get("cpl") or {}).get("value")
+    prev_cpl = (gads.get("cpl") or {}).get("previous")
+    if any(k in q for k in ("offer", "pricing", "conversion", "follow")) and isinstance(cpl, (int, float)) and isinstance(prev_cpl, (int, float)) and cpl > prev_cpl:
+        score += 2
+        reasons.append("CPL is rising; validate offer and conversion steps")
+
+    recs = (gbp.get("new_reviews") or {}).get("value")
+    if "review" in q and isinstance(recs, (int, float)) and recs <= 1:
+        score += 2
+        reasons.append("Review velocity is low; tighten review request process")
+
+    return score, "; ".join(dict.fromkeys([r for r in reasons if r]))
+
+
 @api.get("/reviews/{client_id}/goal")
 async def get_review_goal(client_id: str, ctx=Depends(get_current_context)):
     doc = await db.client_review_goals.find_one({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
@@ -2356,6 +2432,108 @@ async def review_stats(client_id: str, months: int = 12, ctx=Depends(get_current
         "suggested_scripts": scripts,
         "qr_code_recommendations": qr_recs,
     }
+
+
+@api.get("/discovery/library")
+async def discovery_library(ctx=Depends(get_current_context)):
+    docs = await db.discovery_question_templates.find(tenant_scope(ctx.tenant_id)).sort("created_at", -1).to_list(2000)
+    if docs:
+        items = [DiscoveryQuestionTemplate.from_mongo(d).model_dump() for d in docs]
+        return {"items": items}
+    return {"items": _default_discovery_templates()}
+
+
+@api.post("/discovery/library")
+async def discovery_library_create(payload: DiscoveryQuestionTemplateIn, ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    item = DiscoveryQuestionTemplate(tenant_id=ctx.tenant_id, **payload.model_dump())
+    await db.discovery_question_templates.insert_one(item.to_mongo())
+    return item.model_dump()
+
+
+@api.patch("/discovery/library/{template_id}")
+async def discovery_library_patch(template_id: str, patch: dict, ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    patch["updated_at"] = utcnow().isoformat()
+    res = await db.discovery_question_templates.update_one({"_id": template_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    doc = await db.discovery_question_templates.find_one({"_id": template_id, **tenant_scope(ctx.tenant_id)})
+    return DiscoveryQuestionTemplate.from_mongo(doc).model_dump()
+
+
+@api.delete("/discovery/library/{template_id}")
+async def discovery_library_delete(template_id: str, ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    res = await db.discovery_question_templates.delete_one({"_id": template_id, **tenant_scope(ctx.tenant_id)})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.post("/meetings/{meeting_id}/discovery/generate")
+async def meeting_generate_discovery(meeting_id: str, ctx=Depends(get_current_context)):
+    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    if not m_doc:
+        raise HTTPException(404, "Meeting not found")
+    meeting = Meeting.from_mongo(m_doc)
+
+    c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
+    client = Client.from_mongo(c_doc) if c_doc else None
+    services = [(s or "").lower() for s in (client.services if client else [])]
+    deliverables = []
+    if any("seo" in s for s in services):
+        deliverables.append("seo")
+    if any("gbp" in s or "google business" in s for s in services):
+        deliverables.append("gbp")
+        deliverables.append("google_business_profile")
+    if any("google ads" in s or "ppc" in s for s in services):
+        deliverables.append("google_ads")
+    if any("meta" in s or "facebook" in s or "instagram" in s for s in services):
+        deliverables.append("meta_ads")
+
+    kpi = meeting.kpi_snapshot or {}
+    if not kpi:
+        cd = client.model_dump() if client else {"company": meeting.client_name or ""}
+        kpi = await connectors.build_kpi_snapshot(ctx.tenant_id, meeting.client_id, cd.get("company", ""), user_id=ctx.user.id)
+
+    issues = [i if isinstance(i, dict) else {} for i in (meeting.model_dump().get("issues") or [])]
+
+    lib = await db.discovery_question_templates.find(tenant_scope(ctx.tenant_id)).to_list(2000)
+    templates = [DiscoveryQuestionTemplate.from_mongo(d).model_dump() for d in lib] if lib else _default_discovery_templates()
+    templates = [t for t in templates if bool(t.get("active", True))]
+
+    ranked = []
+    for t in templates:
+        sc, why = _score_template(t, issues, kpi, deliverables)
+        ranked.append((sc, why, t))
+    ranked.sort(key=lambda x: x[0], reverse=True)
+
+    selected = ranked[:12]
+    out: list[MeetingDiscoveryQuestion] = []
+    for sc, why, t in selected:
+        out.append(
+            MeetingDiscoveryQuestion(
+                id=new_id(),
+                kind=t.get("kind") or "operational",
+                category=str(t.get("category") or "General"),
+                question=str(t.get("question") or "").strip(),
+                priority=_prio_from_score(int(sc)),
+                rationale=why or None,
+                status="suggested",
+                notes=None,
+            )
+        )
+
+    await db.meetings.update_one(
+        {"_id": meeting_id, **tenant_scope(ctx.tenant_id)},
+        {"$set": {"discovery_questions": [q.model_dump() for q in out], "updated_at": utcnow().isoformat()}},
+    )
+    doc2 = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    return {"ok": True, "meeting": Meeting.from_mongo(doc2).model_dump()}
 
 
 def _iso_date(d: datetime) -> str:

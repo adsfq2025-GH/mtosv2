@@ -354,6 +354,36 @@ class ReviewMonthlySnapshot(BaseDocument):
     kpi_period_current_end: Optional[str] = None
 
 
+class DiscoveryQuestionTemplate(BaseDocument):
+    tenant_id: Optional[str] = None
+    kind: Literal["operational", "market"] = "operational"
+    category: str
+    question: str
+    tags: List[str] = Field(default_factory=list)
+    deliverables: List[str] = Field(default_factory=list)
+    active: bool = True
+
+
+class DiscoveryQuestionTemplateIn(BaseModel):
+    kind: Literal["operational", "market"] = "operational"
+    category: str
+    question: str
+    tags: List[str] = Field(default_factory=list)
+    deliverables: List[str] = Field(default_factory=list)
+    active: bool = True
+
+
+class MeetingDiscoveryQuestion(BaseModel):
+    id: str
+    kind: Literal["operational", "market"] = "operational"
+    category: str
+    question: str
+    priority: Literal["high", "medium", "low"] = "medium"
+    rationale: Optional[str] = None
+    status: Literal["suggested", "asked", "skipped"] = "suggested"
+    notes: Optional[str] = None
+
+
 class Meeting(BaseDocument):
     tenant_id: Optional[str] = None
     client_id: str
@@ -408,6 +438,7 @@ class Meeting(BaseDocument):
     meeting_score: Optional[int] = None
     checklist: Dict[str, bool] = Field(default_factory=dict)
     deliverable_reviews: Dict[str, Any] = Field(default_factory=dict)
+    discovery_questions: List[MeetingDiscoveryQuestion] = Field(default_factory=list)
 
 
 class MeetingIn(BaseModel):
@@ -429,6 +460,7 @@ class MeetingPatch(BaseModel):
     checklist: Optional[Dict[str, bool]] = None
     meeting_score: Optional[int] = None
     deliverable_reviews: Optional[Dict[str, Any]] = None
+    discovery_questions: Optional[List[MeetingDiscoveryQuestion]] = None
 
 
 # ===== INTEGRATIONS =====

@@ -851,6 +851,57 @@ export default function MeetingDetail() {
             </section>
 
             <section className="card-flat p-5">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2"><Question size={18} weight="duotone" color="#F59E0B" /><h3 className="font-semibold">Discovery Questions</h3></div>
+                <button className="btn-ghost" type="button" onClick={async () => {
+                  setBusy("discovery");
+                  try {
+                    const res = await meetings.generateDiscovery(id);
+                    setM(res.meeting);
+                  } catch (e) {
+                    alert(e?.response?.data?.detail || "Failed to generate discovery questions");
+                  } finally {
+                    setBusy("");
+                  }
+                }} disabled={busy === "discovery"}>
+                  {busy === "discovery" ? "Generating…" : "Generate"}
+                </button>
+              </div>
+              {(m.discovery_questions || []).length === 0 && <EmptyHint label="Generate guided discovery questions prioritized by current performance issues." />}
+              <div className="space-y-2">
+                {(m.discovery_questions || []).slice(0, 12).map((q, i) => (
+                  <div key={q.id || i} className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-[10px] mono text-slate-400 uppercase tracking-wider">{q.kind} · {q.category}</div>
+                        <div className="text-sm text-slate-200 mt-1">{q.question}</div>
+                        {!!q.rationale && <div className="text-xs text-slate-400 mt-2">Why: {q.rationale}</div>}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={`chip ${prioChip(q.priority)}`}>{q.priority}</span>
+                        <select className="input !py-1 !text-xs !w-[120px]" value={q.status || "suggested"} onChange={async (e) => {
+                          const next = (m.discovery_questions || []).map((x) => (x.id === q.id ? { ...x, status: e.target.value } : x));
+                          setM((prev) => ({ ...prev, discovery_questions: next }));
+                          await meetings.update(id, { discovery_questions: next });
+                        }}>
+                          <option value="suggested">suggested</option>
+                          <option value="asked">asked</option>
+                          <option value="skipped">skipped</option>
+                        </select>
+                      </div>
+                    </div>
+                    <textarea className="input mt-2 !min-h-[70px]" placeholder="Notes / answer…" value={q.notes || ""} onChange={async (e) => {
+                      const next = (m.discovery_questions || []).map((x) => (x.id === q.id ? { ...x, notes: e.target.value } : x));
+                      setM((prev) => ({ ...prev, discovery_questions: next }));
+                    }} onBlur={async () => {
+                      await meetings.update(id, { discovery_questions: (m.discovery_questions || []) });
+                    }} />
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="card-flat p-5">
               <div className="flex items-center gap-2 mb-3"><ListChecks size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Preparation Checklist</h3></div>
               {(m.prep_checklist || []).length === 0 && <EmptyHint label="Generate the brief to get a tailored pre-meeting checklist." />}
               <ul className="space-y-2 list-disc pl-5">{(m.prep_checklist || []).map((p, i) => <li key={i} className="text-sm text-slate-300">{p}</li>)}</ul>
