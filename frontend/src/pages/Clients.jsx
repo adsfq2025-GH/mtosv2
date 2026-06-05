@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { clients, meetings, actionItems, integrations } from "../api";
+import { clients, meetings, actionItems, integrations, reviews } from "../api";
 import { PageHead } from "../Layout";
-import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle } from "@phosphor-icons/react";
+import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle, Star, TrendUp } from "@phosphor-icons/react";
 import { useAuth } from "../auth";
 
 const healthChip = (h) => h >= 80 ? "chip-success" : h >= 60 ? "chip-info" : h >= 40 ? "chip-warn" : "chip-danger";
@@ -243,6 +243,13 @@ export function ClientDetail() {
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
   const [website, setWebsite] = useState("");
   const [savingClient, setSavingClient] = useState(false);
+  const [reviewGoal, setReviewGoal] = useState(10);
+  const [reviewStats, setReviewStats] = useState(null);
+  const [reviewEvents, setReviewEvents] = useState([]);
+  const [savingReviewGoal, setSavingReviewGoal] = useState(false);
+  const [showReviewEvent, setShowReviewEvent] = useState(false);
+  const [reviewEventForm, setReviewEventForm] = useState({ kind: "requested", count: 1, occurred_on: "", channel: "other", notes: "" });
+  const [savingReviewEvent, setSavingReviewEvent] = useState(false);
 
   const reload = useCallback(
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
@@ -257,6 +264,10 @@ export function ClientDetail() {
       const gads = (b || []).find((x) => x.platform === "google_ads");
       const custId = gads?.external_ids?.customer_id || gads?.config?.customer_id || "";
       setGoogleAdsCustomerId(custId ? String(custId) : "");
+
+      reviews.goal.get(id).then((g) => setReviewGoal(Number(g?.monthly_goal || 10) || 10)).catch(() => {});
+      reviews.stats(id, 12).then(setReviewStats).catch(() => setReviewStats(null));
+      reviews.events.list(id, 200).then(setReviewEvents).catch(() => setReviewEvents([]));
     }),
     [id],
   );
@@ -277,6 +288,45 @@ export function ClientDetail() {
   const generateMonthlyTouch = async () => {
     const m = await clients.generateMonthlyTouch(id, {});
     navigate(`/meetings/${m.id}`);
+  };
+
+  const saveReviewGoal = async () => {
+    setSavingReviewGoal(true);
+    try {
+      const g = await reviews.goal.put(id, { monthly_goal: Number(reviewGoal || 0) || 0 });
+      setReviewGoal(Number(g?.monthly_goal || 0) || 0);
+      await reload();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save review goal");
+    } finally {
+      setSavingReviewGoal(false);
+    }
+  };
+
+  const openReviewEvent = (kind) => {
+    const today = new Date().toISOString().slice(0, 10);
+    setReviewEventForm({ kind, count: 1, occurred_on: today, channel: "other", notes: "" });
+    setShowReviewEvent(true);
+  };
+
+  const createReviewEvent = async (e) => {
+    e.preventDefault();
+    setSavingReviewEvent(true);
+    try {
+      await reviews.events.create(id, {
+        kind: reviewEventForm.kind,
+        count: Number(reviewEventForm.count || 1) || 1,
+        occurred_on: reviewEventForm.occurred_on,
+        channel: reviewEventForm.channel,
+        notes: reviewEventForm.notes || null,
+      });
+      setShowReviewEvent(false);
+      await reload();
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed to create review event");
+    } finally {
+      setSavingReviewEvent(false);
+    }
   };
 
   const saveClickupBinding = async () => {
@@ -516,6 +566,134 @@ export function ClientDetail() {
 
         <div className="lg:col-span-2 space-y-6">
           <div className="card-flat p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 font-semibold"><Star size={16} weight="duotone" /> Review Tracker</div>
+                <div className="text-xs text-slate-400 mt-1">
+                  Track requested vs received reviews, goal progress, missed opportunities, and trends.
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button className="btn-ghost" type="button" onClick={() => openReviewEvent("requested")}>Log Request</button>
+                <button className="btn-ghost" type="button" onClick={() => openReviewEvent("received")}>Log Received</button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4">
+              <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                <div className="text-xs text-slate-400">This Month Requested</div>
+                <div className="text-xl font-bold mt-1">{reviewStats?.current?.requested ?? "—"}</div>
+              </div>
+              <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                <div className="text-xs text-slate-400">This Month Received</div>
+                <div className="text-xl font-bold mt-1">{reviewStats?.current?.received ?? "—"}</div>
+              </div>
+              <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                <div className="text-xs text-slate-400">Missed Opportunities</div>
+                <div className="text-xl font-bold mt-1">{reviewStats?.current?.missed_opportunities ?? "—"}</div>
+              </div>
+              <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                <div className="text-xs text-slate-400">Conversion Rate</div>
+                <div className="text-xl font-bold mt-1">{reviewStats?.current?.conversion_rate !== undefined ? `${Math.round((reviewStats.current.conversion_rate || 0) * 100)}%` : "—"}</div>
+              </div>
+              <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                <div className="text-xs text-slate-400">Forecast (Next Month)</div>
+                <div className="text-xl font-bold mt-1 flex items-center gap-2"><TrendUp size={16} /> {reviewStats?.forecast?.next_month_received ?? "—"}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 flex items-end justify-between gap-4">
+              <div className="flex-1">
+                <div className="text-xs text-slate-400 mb-2">Goal Progress</div>
+                <div className="w-full h-2 rounded-full bg-white/5 overflow-hidden">
+                  <div className="h-2 bg-[#2FE0C2]" style={{ width: `${Math.min(100, Math.round(((reviewStats?.current?.goal_progress || 0) * 100)))}%` }} />
+                </div>
+                <div className="text-[11px] text-slate-500 mt-2">
+                  {reviewStats?.current?.received ?? 0}/{reviewGoal} reviews this month
+                </div>
+              </div>
+              <div className="w-[240px]">
+                <div className="text-xs text-slate-400 mb-2">Monthly Goal</div>
+                <div className="flex gap-2">
+                  <input className="input flex-1" type="number" min={0} value={reviewGoal} onChange={(e) => setReviewGoal(Number(e.target.value || 0))} />
+                  <button className="btn-ghost" type="button" disabled={savingReviewGoal} onClick={saveReviewGoal}>{savingReviewGoal ? "Saving…" : "Save"}</button>
+                </div>
+              </div>
+            </div>
+
+            <div className="divider my-4" />
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              <div>
+                <div className="text-xs text-slate-400 mb-2">Review Growth Trend (last 6 months)</div>
+                {(() => {
+                  const t = (reviewStats?.trend || []).slice(-6);
+                  const maxV = Math.max(1, ...t.map((x) => Number(x.received || 0)));
+                  return (
+                    <div className="space-y-2">
+                      {t.map((x) => (
+                        <div key={x.month} className="flex items-center gap-3">
+                          <div className="mono text-[11px] text-slate-500 w-16">{x.month}</div>
+                          <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
+                            <div className="h-2 bg-[#3FA9F5]" style={{ width: `${Math.round((Number(x.received || 0) / maxV) * 100)}%` }} />
+                          </div>
+                          <div className="mono text-[11px] text-slate-400 w-10 text-right">{x.received}</div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <div className="text-xs text-slate-400 mb-2">Opportunity Detection</div>
+                  {(reviewStats?.opportunities || []).length === 0 && <div className="text-sm text-slate-500">No alerts.</div>}
+                  <div className="space-y-2">
+                    {(reviewStats?.opportunities || []).slice(0, 4).map((o, idx2) => (
+                      <div key={`${o.type}-${idx2}`} className="p-3 rounded-md border border-white/5 bg-white/[0.02] text-sm text-slate-200">{o.message}</div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-400 mb-2">Suggested Review Scripts</div>
+                  <div className="space-y-2">
+                    {(reviewStats?.suggested_scripts || []).slice(0, 3).map((s, idx2) => (
+                      <div key={idx2} className="p-3 rounded-md border border-white/5 bg-white/[0.02] text-sm text-slate-200">{s}</div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-400 mb-2">QR Code Recommendations</div>
+                  <div className="space-y-2">
+                    {(reviewStats?.qr_code_recommendations || []).slice(0, 3).map((s, idx2) => (
+                      <div key={idx2} className="p-3 rounded-md border border-white/5 bg-white/[0.02] text-sm text-slate-200">{s}</div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="divider my-4" />
+
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-slate-400">Recent Review Activity</div>
+              <Link to={`/follow-up?client_id=${encodeURIComponent(id)}`} className="text-xs text-[#3FA9F5] hover:underline">Open Follow-Up</Link>
+            </div>
+            <div className="space-y-2">
+              {reviewEvents.slice(0, 6).map((ev) => (
+                <div key={ev.id} className="flex items-center justify-between p-3 rounded-md border border-white/5">
+                  <div>
+                    <div className="text-sm font-medium">{ev.kind} · {ev.count}</div>
+                    <div className="text-xs text-slate-400 mt-0.5">{ev.occurred_on} · {ev.channel || "other"}</div>
+                  </div>
+                  <span className={`chip ${ev.kind === "received" ? "chip-success" : "chip-info"}`}>{ev.source || "manual"}</span>
+                </div>
+              ))}
+              {reviewEvents.length === 0 && <div className="text-slate-500 text-sm py-2">No logged review activity yet.</div>}
+            </div>
+          </div>
+
+          <div className="card-flat p-5">
             <div className="flex items-center justify-between mb-3"><h3 className="font-semibold">Meetings</h3><span className="text-xs text-slate-400">{meets.length} total</span></div>
             {meets.length === 0 && <div className="text-slate-500 text-sm py-4">No meetings yet. Schedule a Monthly Touch.</div>}
             <div className="flex flex-col gap-2">
@@ -547,6 +725,42 @@ export function ClientDetail() {
           </div>
         </div>
       </div>
+
+      {showReviewEvent && (
+        <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowReviewEvent(false)}>
+          <form onClick={(e) => e.stopPropagation()} onSubmit={createReviewEvent} className="card-flat p-6 w-full max-w-lg">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Log Review {reviewEventForm.kind}</h3>
+              <button type="button" className="btn-ghost !p-2" onClick={() => setShowReviewEvent(false)}><X size={14} /></button>
+            </div>
+            <label className="label">Kind</label>
+            <select className="input mt-1.5 mb-3" value={reviewEventForm.kind} onChange={(e) => setReviewEventForm((p) => ({ ...p, kind: e.target.value }))}>
+              <option value="requested">requested</option>
+              <option value="received">received</option>
+            </select>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="label">Count</label>
+                <input className="input mt-1.5 mb-3" type="number" min={1} value={reviewEventForm.count} onChange={(e) => setReviewEventForm((p) => ({ ...p, count: Number(e.target.value || 1) }))} />
+              </div>
+              <div>
+                <label className="label">Date</label>
+                <input className="input mt-1.5 mb-3" type="date" value={reviewEventForm.occurred_on} onChange={(e) => setReviewEventForm((p) => ({ ...p, occurred_on: e.target.value }))} />
+              </div>
+            </div>
+            <label className="label">Channel</label>
+            <select className="input mt-1.5 mb-3" value={reviewEventForm.channel} onChange={(e) => setReviewEventForm((p) => ({ ...p, channel: e.target.value }))}>
+              <option value="sms">sms</option>
+              <option value="email">email</option>
+              <option value="in_person">in_person</option>
+              <option value="other">other</option>
+            </select>
+            <label className="label">Notes</label>
+            <textarea className="input mt-1.5 mb-4 !min-h-[90px]" value={reviewEventForm.notes} onChange={(e) => setReviewEventForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Optional context…" />
+            <button type="submit" className="btn-primary w-full" disabled={savingReviewEvent}>{savingReviewEvent ? "Saving…" : "Save"}</button>
+          </form>
+        </div>
+      )}
 
       {showMeet && (
         <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowMeet(false)}>

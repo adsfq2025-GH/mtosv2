@@ -93,6 +93,18 @@ export const roadmap = {
     api.patch(`/roadmap/${encodeURIComponent(clientId)}/items/${encodeURIComponent(itemId)}`, patch).then((r) => r.data),
 };
 
+export const reviews = {
+  goal: {
+    get: (clientId) => api.get(`/reviews/${encodeURIComponent(clientId)}/goal`).then((r) => r.data),
+    put: (clientId, payload) => api.put(`/reviews/${encodeURIComponent(clientId)}/goal`, payload).then((r) => r.data),
+  },
+  stats: (clientId, months = 12) => api.get(`/reviews/${encodeURIComponent(clientId)}/stats?months=${encodeURIComponent(months)}`).then((r) => r.data),
+  events: {
+    list: (clientId, limit = 200) => api.get(`/reviews/${encodeURIComponent(clientId)}/events?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
+    create: (clientId, payload) => api.post(`/reviews/${encodeURIComponent(clientId)}/events`, payload).then((r) => r.data),
+  },
+};
+
 export const contentCaptures = {
   list: (clientId) => api.get(`/content-captures${clientId ? `?client_id=${clientId}` : ""}`).then((r) => r.data),
   create: (data) => api.post("/content-captures", data).then((r) => r.data),

@@ -307,6 +307,49 @@ class ContentCaptureIn(BaseModel):
     notes: Optional[str] = None
 
 
+class ReviewEvent(BaseDocument):
+    tenant_id: Optional[str] = None
+    client_id: str
+    kind: Literal["requested", "received"] = "requested"
+    count: int = 1
+    occurred_on: str
+    channel: Optional[Literal["sms", "email", "in_person", "other"]] = "other"
+    source: Optional[Literal["manual", "gbp", "imported"]] = "manual"
+    notes: Optional[str] = None
+    meeting_id: Optional[str] = None
+
+
+class ReviewEventIn(BaseModel):
+    kind: Literal["requested", "received"] = "requested"
+    count: int = 1
+    occurred_on: str
+    channel: Optional[Literal["sms", "email", "in_person", "other"]] = "other"
+    notes: Optional[str] = None
+    meeting_id: Optional[str] = None
+
+
+class ClientReviewGoal(BaseDocument):
+    tenant_id: Optional[str] = None
+    client_id: str
+    monthly_goal: int = 10
+    updated_at: Optional[str] = None
+
+
+class ClientReviewGoalIn(BaseModel):
+    monthly_goal: int = 10
+
+
+class ReviewMonthlySnapshot(BaseDocument):
+    tenant_id: Optional[str] = None
+    client_id: str
+    month: str
+    received: int = 0
+    avg_rating: Optional[float] = None
+    source: Optional[str] = "gbp"
+    kpi_period_kind: Optional[str] = None
+    kpi_period_current_end: Optional[str] = None
+
+
 class Meeting(BaseDocument):
     tenant_id: Optional[str] = None
     client_id: str

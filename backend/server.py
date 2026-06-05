@@ -69,6 +69,11 @@ from models import (  # noqa: E402
     PromptTemplateIn,
     QAScorecard,
     CampaignRecommendation,
+    ClientReviewGoal,
+    ClientReviewGoalIn,
+    ReviewEvent,
+    ReviewEventIn,
+    ReviewMonthlySnapshot,
     RoadmapItem,
     RoadmapItemIn,
     RoadmapItemPatch,
@@ -1640,6 +1645,31 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get
         "updated_at": utcnow().isoformat(),
     }
     await db.meetings.update_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)}, {"$set": update})
+    try:
+        gbp = (kpi or {}).get("google_business_profile") or {}
+        nr = gbp.get("new_reviews") or {}
+        received = _safe_int(nr.get("value"), 0)
+        avg_rating = nr.get("avg_rating")
+        period = (kpi or {}).get("_period") or {}
+        cur_end = ((period.get("current") or {}).get("end") or "")[:10]
+        month = _month_key(cur_end or utcnow().date().isoformat())
+        snap = ReviewMonthlySnapshot(
+            tenant_id=ctx.tenant_id,
+            client_id=meeting.client_id,
+            month=month,
+            received=max(0, int(received)),
+            avg_rating=float(avg_rating) if isinstance(avg_rating, (int, float)) else None,
+            source="gbp",
+            kpi_period_kind=str(period.get("kind") or ""),
+            kpi_period_current_end=cur_end or None,
+        )
+        await db.review_monthly_snapshots.update_one(
+            {"client_id": meeting.client_id, "month": month, **tenant_scope(ctx.tenant_id)},
+            {"$set": snap.to_mongo(), "$setOnInsert": {"_id": snap.id}},
+            upsert=True,
+        )
+    except Exception:
+        pass
     doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
     asyncio.create_task(_bg_publish_clickup_brief(ctx.tenant_id, meeting_id))
     return Meeting.from_mongo(doc).model_dump()
@@ -2071,6 +2101,193 @@ async def action_remind(item_id: str, ctx=Depends(get_current_context)):
     await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     doc2 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     return ActionItem.from_mongo(doc2).model_dump()
+
+
+def _month_key(iso_date: str) -> str:
+    try:
+        d = datetime.fromisoformat(iso_date).date()
+        return f"{d.year:04d}-{d.month:02d}"
+    except Exception:
+        d = utcnow().date()
+        return f"{d.year:04d}-{d.month:02d}"
+
+
+def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    m = (year * 12 + (month - 1)) + int(delta)
+    return (m // 12, (m % 12) + 1)
+
+
+def _last_n_months(n: int) -> list[str]:
+    n = max(1, min(int(n or 12), 36))
+    today = utcnow().date()
+    out: list[str] = []
+    for i in range(n - 1, -1, -1):
+        y, m = _add_months(today.year, today.month, -i)
+        out.append(f"{y:04d}-{m:02d}")
+    return out
+
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+@api.get("/reviews/{client_id}/goal")
+async def get_review_goal(client_id: str, ctx=Depends(get_current_context)):
+    doc = await db.client_review_goals.find_one({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        goal = ClientReviewGoal(tenant_id=ctx.tenant_id, client_id=client_id, monthly_goal=10, updated_at=utcnow().isoformat())
+        await db.client_review_goals.insert_one(goal.to_mongo())
+        return goal.model_dump()
+    return ClientReviewGoal.from_mongo(doc).model_dump()
+
+
+@api.put("/reviews/{client_id}/goal")
+async def put_review_goal(client_id: str, payload: ClientReviewGoalIn, ctx=Depends(get_current_context)):
+    monthly_goal = max(0, _safe_int(payload.monthly_goal, 10))
+    now = utcnow().isoformat()
+    await db.client_review_goals.update_one(
+        {"client_id": client_id, **tenant_scope(ctx.tenant_id)},
+        {"$set": {"monthly_goal": monthly_goal, "updated_at": now}, "$setOnInsert": {"_id": new_id(), "tenant_id": ctx.tenant_id, "client_id": client_id, "created_at": now}},
+        upsert=True,
+    )
+    doc = await db.client_review_goals.find_one({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
+    return ClientReviewGoal.from_mongo(doc).model_dump()
+
+
+@api.post("/reviews/{client_id}/events")
+async def create_review_event(client_id: str, payload: ReviewEventIn, ctx=Depends(get_current_context)):
+    if payload.count is None or int(payload.count) <= 0:
+        raise HTTPException(400, "count must be > 0")
+    try:
+        datetime.fromisoformat(payload.occurred_on)
+    except Exception:
+        raise HTTPException(400, "occurred_on must be ISO date (YYYY-MM-DD)")
+    ev = ReviewEvent(
+        tenant_id=ctx.tenant_id,
+        client_id=client_id,
+        kind=payload.kind,
+        count=int(payload.count),
+        occurred_on=payload.occurred_on,
+        channel=payload.channel or "other",
+        source="manual",
+        notes=payload.notes,
+        meeting_id=payload.meeting_id,
+    )
+    await db.review_events.insert_one(ev.to_mongo())
+    return ev.model_dump()
+
+
+@api.get("/reviews/{client_id}/events")
+async def list_review_events(client_id: str, limit: int = 200, ctx=Depends(get_current_context)):
+    limit = max(1, min(int(limit or 200), 1000))
+    docs = await db.review_events.find({"client_id": client_id, **tenant_scope(ctx.tenant_id)}).sort("occurred_on", -1).to_list(limit)
+    return [ReviewEvent.from_mongo(d).model_dump() for d in docs]
+
+
+@api.get("/reviews/{client_id}/stats")
+async def review_stats(client_id: str, months: int = 12, ctx=Depends(get_current_context)):
+    months_list = _last_n_months(months)
+    month_set = set(months_list)
+
+    events = await db.review_events.find({"client_id": client_id, **tenant_scope(ctx.tenant_id)}).to_list(5000)
+    requested_by_month: dict[str, int] = {m: 0 for m in months_list}
+    for d in events:
+        ev = ReviewEvent.from_mongo(d)
+        if not ev:
+            continue
+        mk = _month_key(ev.occurred_on)
+        if mk not in month_set:
+            continue
+        if ev.kind == "requested":
+            requested_by_month[mk] = requested_by_month.get(mk, 0) + int(ev.count or 0)
+
+    snaps = await db.review_monthly_snapshots.find({"client_id": client_id, **tenant_scope(ctx.tenant_id)}).to_list(1000)
+    received_by_month: dict[str, int] = {m: 0 for m in months_list}
+    rating_by_month: dict[str, Optional[float]] = {m: None for m in months_list}
+    for d in snaps:
+        s = ReviewMonthlySnapshot.from_mongo(d)
+        if not s:
+            continue
+        if s.month in month_set:
+            received_by_month[s.month] = max(received_by_month.get(s.month, 0), int(s.received or 0))
+            if s.avg_rating is not None:
+                rating_by_month[s.month] = s.avg_rating
+
+    goal_doc = await db.client_review_goals.find_one({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
+    goal = (ClientReviewGoal.from_mongo(goal_doc).monthly_goal if goal_doc else 10)
+
+    trend = []
+    for m in months_list:
+        req = requested_by_month.get(m, 0)
+        rec = received_by_month.get(m, 0)
+        missed = max(0, req - rec)
+        conv = 0.0
+        if req > 0:
+            conv = float(rec) / float(req)
+        goal_pct = 0.0
+        if goal > 0:
+            goal_pct = float(rec) / float(goal)
+        trend.append({
+            "month": m,
+            "requested": req,
+            "received": rec,
+            "missed_opportunities": missed,
+            "conversion_rate": round(conv, 4),
+            "goal": goal,
+            "goal_progress": round(goal_pct, 4),
+            "avg_rating": rating_by_month.get(m),
+        })
+
+    cur_month = months_list[-1]
+    cur_received = received_by_month.get(cur_month, 0)
+    cur_requested = requested_by_month.get(cur_month, 0)
+    cur_missed = max(0, cur_requested - cur_received)
+    cur_conv = round((float(cur_received) / float(cur_requested)) if cur_requested > 0 else 0.0, 4)
+    cur_goal_pct = round((float(cur_received) / float(goal)) if goal > 0 else 0.0, 4)
+
+    recent = [t["received"] for t in trend[-3:] if isinstance(t.get("received"), int)]
+    avg3 = int(round(sum(recent) / max(1, len(recent))))
+    forecast_next = avg3
+
+    opportunities = []
+    if cur_goal_pct < 1.0:
+        opportunities.append({"type": "goal_gap", "message": f"Current month is at {cur_received}/{goal} reviews. Increase request volume and follow-up to hit goal."})
+    if cur_requested > 0 and cur_conv < 0.25:
+        opportunities.append({"type": "low_conversion", "message": "Review request conversion rate is low. Improve script, timing, and follow-up cadence."})
+    if cur_missed >= 5:
+        opportunities.append({"type": "missed_opportunities", "message": "There are many requests not turning into reviews. Add a 48-hour follow-up and QR code option."})
+
+    scripts = [
+        "Quick ask (SMS): Thanks again for choosing us. If you were happy with the service, would you mind leaving a quick Google review? It helps a lot. <review link>",
+        "After win: Glad we got that handled. Would you be open to leaving a short Google review about your experience? <review link>",
+        "For busy customers: If you only have 30 seconds, a quick star rating and one sentence is perfect. <review link>",
+    ]
+    qr_recs = [
+        "Place a QR code at front desk / checkout area with a short CTA: “Scan to leave a Google review”.",
+        "Add QR code to invoices/receipts and job-complete emails.",
+        "For field teams: add QR code on business cards or vehicle flyer.",
+    ]
+
+    return {
+        "client_id": client_id,
+        "goal": {"monthly_goal": goal},
+        "current": {
+            "month": cur_month,
+            "requested": cur_requested,
+            "received": cur_received,
+            "missed_opportunities": cur_missed,
+            "conversion_rate": cur_conv,
+            "goal_progress": cur_goal_pct,
+        },
+        "trend": trend,
+        "forecast": {"next_month_received": forecast_next, "based_on_months": 3},
+        "opportunities": opportunities,
+        "suggested_scripts": scripts,
+        "qr_code_recommendations": qr_recs,
+    }
 
 
 def _iso_date(d: datetime) -> str:
