@@ -39,6 +39,10 @@ export const clients = {
   get: (id) => api.get(`/clients/${id}`).then((r) => r.data),
   update: (id, patch) => api.patch(`/clients/${id}`, patch).then((r) => r.data),
   remove: (id) => api.delete(`/clients/${id}`).then((r) => r.data),
+  suggestions: {
+    get: (id) => api.get(`/clients/${encodeURIComponent(id)}/suggestions`).then((r) => r.data),
+    generate: (id, payload = {}) => api.post(`/clients/${encodeURIComponent(id)}/suggestions/generate`, payload).then((r) => r.data),
+  },
   listBindings: (id) => api.get(`/clients/${id}/bindings`).then((r) => r.data),
   upsertBinding: (id, platform, payload) => api.put(`/clients/${id}/bindings/${platform}`, payload).then((r) => r.data),
   deleteBinding: (id, platform) => api.delete(`/clients/${id}/bindings/${platform}`).then((r) => r.data),

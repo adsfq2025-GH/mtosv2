@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { dashboard } from "../api";
 import { PageHead } from "../Layout";
-import { Users, Heartbeat, Warning, CalendarCheck, CheckSquare, Megaphone, TrendUp, ArrowRight } from "@phosphor-icons/react";
+import { Users, Heartbeat, Warning, CalendarCheck, CheckSquare, Megaphone, TrendUp, ArrowRight, Sparkle } from "@phosphor-icons/react";
 
 const StatCard = ({ icon: Icon, label, value, hint, tone = "info", testid }) => {
   const toneClass = { success: "chip-success", warn: "chip-warn", danger: "chip-danger", info: "chip-info" }[tone] || "chip-info";
@@ -40,8 +40,8 @@ export default function Dashboard() {
             <StatCard icon={CalendarCheck} label="Prep Queue" value={data.prep_queue_count || 0} hint="Meetings needing brief" tone={data.prep_queue_count ? "warn" : "success"} testid="stat-prep" />
             <StatCard icon={CheckSquare} label="Open Action Items" value={data.open_action_items} hint={`${data.overdue_action_items} overdue`} tone={data.overdue_action_items ? "warn" : "info"} testid="stat-actions" />
             <StatCard icon={Megaphone} label="Content Captures" value={data.content_captures_total} hint={`${data.content_pending_routing} pending route`} tone="success" testid="stat-content" />
-            <StatCard icon={TrendUp} label="Top-3 Local Rank" value="41%" hint="Avg across roster (demo)" tone="success" testid="stat-rank" />
-            <StatCard icon={Heartbeat} label="Retention Trend" value="+18%" hint="vs 90 days ago (demo)" tone="success" testid="stat-retention" />
+            <StatCard icon={Sparkle} label="Suggestions Ready" value={data.suggestions_ready_clients || 0} hint="Clients with proactive recs" tone={(data.suggestions_ready_clients || 0) ? "success" : "info"} testid="stat-suggestions" />
+            <StatCard icon={TrendUp} label="Review Forecast" value={`${data.review_forecast_next_month || "—"}`} hint="Next month (avg across roster)" tone="info" testid="stat-review-forecast" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -100,6 +100,30 @@ export default function Dashboard() {
                   </Link>
                 ))}
               </div>
+            </div>
+          </div>
+
+          <div className="card-flat p-5 mt-6">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold flex items-center gap-2"><Sparkle size={16} weight="duotone" /> Proactive Recommendations</h3>
+              <Link to="/clients" className="text-xs text-[#3FA9F5] hover:underline">Open clients</Link>
+            </div>
+            {(data.top_suggestions || []).length === 0 && (
+              <div className="text-slate-500 text-sm py-6 text-center">No saved suggestions yet. Generate suggestions from a client page.</div>
+            )}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {(data.top_suggestions || []).slice(0, 8).map((s, idx) => (
+                <Link key={`${s.client_id}-${idx}`} to={`/clients/${s.client_id}`} className="p-4 rounded-md border border-white/5 hover:bg-white/[0.03]">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-medium">{s.client_name}</div>
+                    <span className={`chip ${String(s.priority || "medium") === "high" ? "chip-danger" : String(s.priority || "medium") === "low" ? "chip-success" : "chip-warn"}`}>{s.priority}</span>
+                  </div>
+                  <div className="text-xs text-slate-400 mt-1">{String(s.category || "").replaceAll("_", " ")}</div>
+                  <div className="text-sm mt-2 text-slate-200">{s.title}</div>
+                  {!!s.expected_impact && <div className="text-xs text-slate-400 mt-1">Impact: {s.expected_impact}</div>}
+                  <div className="text-[11px] text-slate-500 mt-1 mono">confidence {(Math.round((Number(s.confidence || 0) * 100)))}%</div>
+                </Link>
+              ))}
             </div>
           </div>
         </>

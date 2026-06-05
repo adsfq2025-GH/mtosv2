@@ -57,6 +57,7 @@ from models import (  # noqa: E402
     ContentCapture,
     ContentCaptureIn,
     GenerateBriefIn,
+    GenerateSuggestionsIn,
     GenerateRecapIn,
     Integration,
     IntegrationConfigureIn,
@@ -1026,6 +1027,73 @@ async def get_client(client_id: str, ctx=Depends(get_current_context)):
     if not doc:
         raise HTTPException(404, "Client not found")
     return Client.from_mongo(doc).model_dump()
+
+
+@api.get("/clients/{client_id}/suggestions")
+async def get_client_suggestions(client_id: str, ctx=Depends(get_current_context)):
+    doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        raise HTTPException(404, "Client not found")
+    c = Client.from_mongo(doc)
+    return {
+        "client_id": c.id,
+        "suggestions": c.suggestions or [],
+        "generated_at": c.suggestions_generated_at,
+        "model": c.suggestions_model,
+    }
+
+
+@api.post("/clients/{client_id}/suggestions/generate")
+async def generate_client_suggestions(client_id: str, data: GenerateSuggestionsIn, ctx=Depends(get_current_context)):
+    c_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not c_doc:
+        raise HTTPException(404, "Client not found")
+    client = Client.from_mongo(c_doc)
+    client_d = client.model_dump()
+
+    kpi = await connectors.build_kpi_snapshot(ctx.tenant_id, client_id, client_d.get("company", ""), user_id=ctx.user.id)
+    kpi_for_ai = copy.deepcopy(kpi)
+
+    def scrub(o):
+        if isinstance(o, dict):
+            o.pop("error", None)
+            o.pop("error_detail", None)
+            for v in list(o.values()):
+                scrub(v)
+        elif isinstance(o, list):
+            for it in o:
+                scrub(it)
+
+    scrub(kpi_for_ai)
+
+    try:
+        out = await ai.generate_client_suggestions(
+            client=client_d,
+            kpi_snapshot=kpi_for_ai,
+            extra_context=data.extra_context,
+            model_key=data.model or ai.DEFAULT_MODEL,
+            session_id=f"suggestions-{client_id}",
+        )
+    except ai.AIProviderError as e:
+        raise HTTPException(400, str(e))
+
+    patch = {
+        "suggestions": out.get("suggestions") or [],
+        "suggestions_generated_at": utcnow().isoformat(),
+        "suggestions_model": data.model or ai.DEFAULT_MODEL,
+        "updated_at": utcnow().isoformat(),
+    }
+    await db.clients.update_one({"_id": client_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+    doc2 = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    c2 = Client.from_mongo(doc2)
+    return {
+        "client_id": c2.id,
+        "suggestions": c2.suggestions or [],
+        "generated_at": c2.suggestions_generated_at,
+        "model": c2.suggestions_model,
+        "kpi_snapshot": kpi,
+        "_raw": out.get("_raw"),
+    }
 
 
 @api.patch("/clients/{client_id}")
@@ -2908,6 +2976,23 @@ async def dashboard_overview(ctx=Depends(get_current_context)):
         {"$and": [tenant_scope(ctx.tenant_id), {"routed_to_marketing": {"$ne": True}}]}
     )
 
+    review_forecast_next_month = None
+    try:
+        m3 = _last_n_months(3)
+        snaps = await db.review_monthly_snapshots.find(
+            {"$and": [tenant_scope(ctx.tenant_id), {"month": {"$in": m3}}]}
+        ).to_list(5000)
+        by_month = {m: 0 for m in m3}
+        for d in snaps or []:
+            s = ReviewMonthlySnapshot.from_mongo(d)
+            if not s:
+                continue
+            if s.month in by_month:
+                by_month[s.month] += int(s.received or 0)
+        review_forecast_next_month = int(round(sum(by_month.values()) / max(1, len(by_month))))
+    except Exception:
+        review_forecast_next_month = None
+
     meeting_docs = await db.meetings.find(tenant_scope(ctx.tenant_id)).sort("created_at", -1).limit(5).to_list(5)
     recent_meetings = [Meeting.from_mongo(m).model_dump() for m in (meeting_docs or [])]
 
@@ -2941,6 +3026,37 @@ async def dashboard_overview(ctx=Depends(get_current_context)):
     ).sort("health_score", 1).limit(5).to_list(5)
     at_risk_clients = [Client.from_mongo(c).model_dump() for c in (at_risk_docs or [])]
 
+    suggestion_docs = await db.clients.find(
+        {"$and": [tenant_scope(ctx.tenant_id), {"suggestions": {"$exists": True, "$ne": []}}]}
+    ).sort("suggestions_generated_at", -1).limit(20).to_list(20)
+    suggestions_ready_clients = len(suggestion_docs or [])
+    top_suggestions = []
+    pr_w = {"high": 3, "medium": 2, "low": 1}
+    for c in suggestion_docs or []:
+        cid = c.get("_id")
+        cname = c.get("name") or c.get("company") or "Client"
+        for s in (c.get("suggestions") or [])[:20]:
+            if not isinstance(s, dict):
+                continue
+            top_suggestions.append(
+                {
+                    "client_id": cid,
+                    "client_name": cname,
+                    "category": str(s.get("category") or ""),
+                    "priority": str(s.get("priority") or "medium"),
+                    "confidence": float(s.get("confidence") or 0.0),
+                    "title": str(s.get("title") or s.get("recommendation") or "")[:200],
+                    "expected_impact": str(s.get("expected_impact") or "")[:240],
+                }
+            )
+    top_suggestions.sort(
+        key=lambda x: (
+            -pr_w.get(str(x.get("priority") or "medium").lower(), 2),
+            -float(x.get("confidence") or 0.0),
+        )
+    )
+    top_suggestions = top_suggestions[:8]
+
     return {
         "total_clients": total_clients,
         "avg_health_score": avg_health_score,
@@ -2953,9 +3069,12 @@ async def dashboard_overview(ctx=Depends(get_current_context)):
         "prep_queue": prep_queue,
         "content_captures_total": content_captures_total,
         "content_pending_routing": content_pending_routing,
+        "review_forecast_next_month": review_forecast_next_month,
         "recent_meetings": recent_meetings,
         "top_health_clients": top_health_clients,
         "at_risk_clients": at_risk_clients,
+        "suggestions_ready_clients": suggestions_ready_clients,
+        "top_suggestions": top_suggestions,
     }
 
 

@@ -585,6 +585,108 @@ async def generate_meeting_brief(
     }
 
 
+SUGGESTIONS_SYSTEM = """You are a senior growth strategist for a digital marketing agency.
+You generate proactive, high-impact recommendations for a specific client based ONLY on the provided KPI SNAPSHOT and EXTRA CONTEXT.
+You ALWAYS return a single valid JSON object only (no markdown, no commentary).
+
+CRITICAL RULES:
+- DO NOT fabricate facts, numbers, rankings, competitors, or time periods. Only use what is directly supported by KPI SNAPSHOT or EXTRA CONTEXT.
+- Every suggestion MUST include explain.kpi_paths that point to real keys inside KPI SNAPSHOT (e.g., "google_business_profile.calls.value").
+- If you cannot cite KPI paths, omit the suggestion entirely.
+- Every suggestion MUST include: reasoning, supporting data (via explain.kpi_paths + explain.observed_values), expected_impact, and confidence (0.0–1.0).
+- Surface highest-priority suggestions first (largest business impact and/or retention risk)."""
+
+
+SUGGESTIONS_USER_TEMPLATE = """Generate proactive recommendations for this client.
+
+CLIENT JSON:
+{client_json}
+
+KPI SNAPSHOT JSON:
+{kpi_json}
+
+EXTRA CONTEXT:
+{extra}
+
+Return JSON in this exact shape:
+{{
+  "suggestions": [
+    {{
+      "category": "new_offers | promotions | gbp_improvements | content_ideas | checkin_improvements | campaign_optimization | conversion_opportunities",
+      "priority": "high | medium | low",
+      "title": "short, specific title",
+      "recommendation": "what to do (concrete next step)",
+      "reasoning": "why this matters for this client (plain English)",
+      "expected_impact": "what changes if implemented (e.g., more calls, better lead quality, lower CPL)",
+      "confidence": 0,
+      "explain": {{
+        "source_used": "GBP Calls",
+        "data_sources_analyzed": ["google_business_profile", "google_ads", "gohighlevel", "clickup"],
+        "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
+        "kpi_paths": ["google_business_profile.calls.value", "google_business_profile.calls.delta_pct"],
+        "observed_values": {{ "google_business_profile.calls.value": 23, "google_business_profile.calls.delta_pct": 28 }},
+        "logic_used": "Short reasoning about which KPI movement triggered the suggestion",
+        "calculation": "Optional math or comparisons when relevant",
+        "confidence": 0
+      }}
+    }}
+  ]
+}}
+"""
+
+
+async def generate_client_suggestions(
+    client: Dict[str, Any],
+    kpi_snapshot: Dict[str, Any],
+    extra_context: Optional[str],
+    model_key: str = DEFAULT_MODEL,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    user_text = SUGGESTIONS_USER_TEMPLATE.format(
+        client_json=json.dumps(client, default=str),
+        kpi_json=json.dumps(kpi_snapshot, default=str, indent=2),
+        extra=extra_context or "(none)",
+    )
+    raw = await run_chat(SUGGESTIONS_SYSTEM, user_text, model_key, session_id)
+    data = await _extract_or_repair_json(raw, model_key, session_id)
+    items = data.get("suggestions") or []
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        items = []
+
+    validated = _validate_factual_items(items, kpi_snapshot)
+    for s in validated:
+        if not isinstance(s, dict):
+            continue
+        try:
+            conf = float(s.get("confidence") if s.get("confidence") is not None else 0.0)
+        except Exception:
+            conf = 0.0
+        s["confidence"] = max(0.0, min(1.0, conf))
+        pr = str(s.get("priority") or "medium").lower().strip()
+        if pr not in ("high", "medium", "low"):
+            pr = "medium"
+        s["priority"] = pr
+        cat = str(s.get("category") or "campaign_optimization").lower().strip()
+        allowed = {
+            "new_offers",
+            "promotions",
+            "gbp_improvements",
+            "content_ideas",
+            "checkin_improvements",
+            "campaign_optimization",
+            "conversion_opportunities",
+        }
+        if cat not in allowed:
+            cat = "campaign_optimization"
+        s["category"] = cat
+        for key in ("title", "recommendation", "reasoning", "expected_impact"):
+            s[key] = str(s.get(key) or "").strip()
+
+    return {"suggestions": validated, "_raw": raw if not data else None}
+
+
 # ─────────────────────────────────────────────
 # Transcript Analysis
 # ─────────────────────────────────────────────

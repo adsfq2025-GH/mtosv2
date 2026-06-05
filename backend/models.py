@@ -107,6 +107,9 @@ class Client(BaseDocument):
     notes: Optional[str] = None
     avatar_url: Optional[str] = None
     status: Literal["active", "paused", "churned"] = "active"
+    suggestions: List[Dict[str, Any]] = Field(default_factory=list)
+    suggestions_generated_at: Optional[str] = None
+    suggestions_model: Optional[str] = None
 
 
 class ClientIn(BaseModel):
@@ -127,6 +130,7 @@ class ClientIn(BaseModel):
     mrr: Optional[float] = 0.0
     notes: Optional[str] = None
     avatar_url: Optional[str] = None
+
 
 
 class ImportGhlClientsIn(BaseModel):
@@ -471,6 +475,11 @@ class ClientIntegrationBindingIn(BaseModel):
 
 # ===== AI GENERATE =====
 class GenerateBriefIn(BaseModel):
+    model: Optional[str] = None
+    extra_context: Optional[str] = None
+
+
+class GenerateSuggestionsIn(BaseModel):
     model: Optional[str] = None
     extra_context: Optional[str] = None
 

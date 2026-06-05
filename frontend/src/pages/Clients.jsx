@@ -250,6 +250,9 @@ export function ClientDetail() {
   const [showReviewEvent, setShowReviewEvent] = useState(false);
   const [reviewEventForm, setReviewEventForm] = useState({ kind: "requested", count: 1, occurred_on: "", channel: "other", notes: "" });
   const [savingReviewEvent, setSavingReviewEvent] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [suggestionsMeta, setSuggestionsMeta] = useState({ generated_at: null, model: null });
+  const [generatingSuggestions, setGeneratingSuggestions] = useState(false);
 
   const reload = useCallback(
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
@@ -268,6 +271,13 @@ export function ClientDetail() {
       reviews.goal.get(id).then((g) => setReviewGoal(Number(g?.monthly_goal || 10) || 10)).catch(() => {});
       reviews.stats(id, 12).then(setReviewStats).catch(() => setReviewStats(null));
       reviews.events.list(id, 200).then(setReviewEvents).catch(() => setReviewEvents([]));
+      clients.suggestions.get(id).then((r) => {
+        setSuggestions(r?.suggestions || []);
+        setSuggestionsMeta({ generated_at: r?.generated_at || null, model: r?.model || null });
+      }).catch(() => {
+        setSuggestions([]);
+        setSuggestionsMeta({ generated_at: null, model: null });
+      });
     }),
     [id],
   );
@@ -326,6 +336,19 @@ export function ClientDetail() {
       alert(err?.response?.data?.detail || "Failed to create review event");
     } finally {
       setSavingReviewEvent(false);
+    }
+  };
+
+  const generateSuggestions = async () => {
+    setGeneratingSuggestions(true);
+    try {
+      const r = await clients.suggestions.generate(id, {});
+      setSuggestions(r?.suggestions || []);
+      setSuggestionsMeta({ generated_at: r?.generated_at || null, model: r?.model || null });
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to generate suggestions");
+    } finally {
+      setGeneratingSuggestions(false);
     }
   };
 
@@ -565,6 +588,66 @@ export function ClientDetail() {
         </div>
 
         <div className="lg:col-span-2 space-y-6">
+          <div className="card-flat p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 font-semibold"><Sparkle size={16} weight="duotone" /> Proactive Recommendations</div>
+                <div className="text-xs text-slate-400 mt-1">
+                  Suggestions include reasoning, supporting KPI evidence, expected impact, and confidence.
+                </div>
+                {!!suggestionsMeta.generated_at && (
+                  <div className="text-[11px] text-slate-500 mt-1 mono">generated {suggestionsMeta.generated_at} · {suggestionsMeta.model || "default model"}</div>
+                )}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button className="btn-primary" type="button" onClick={generateSuggestions} disabled={generatingSuggestions}>
+                  {generatingSuggestions ? "Generating…" : "Generate Suggestions"}
+                </button>
+              </div>
+            </div>
+
+            {suggestions.length === 0 && (
+              <div className="text-slate-500 text-sm py-6 text-center">No suggestions yet. Generate them to convert KPI movement into next actions.</div>
+            )}
+            <div className="space-y-3 mt-4">
+              {suggestions.slice(0, 12).map((s, idx2) => {
+                const explain = s.explain || {};
+                const paths = explain.kpi_paths || [];
+                const obs = explain.observed_values || {};
+                return (
+                  <div key={idx2} className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm font-medium">{s.title || s.recommendation}</div>
+                          <span className={`chip ${String(s.priority || "medium") === "high" ? "chip-danger" : String(s.priority || "medium") === "low" ? "chip-success" : "chip-warn"}`}>{s.priority || "medium"}</span>
+                          <span className="chip chip-muted">{String(s.category || "").replaceAll("_", " ")}</span>
+                        </div>
+                        {!!s.recommendation && <div className="text-sm text-slate-200 mt-2">{s.recommendation}</div>}
+                        {!!s.reasoning && <div className="text-xs text-slate-400 mt-2">Why: {s.reasoning}</div>}
+                        {!!s.expected_impact && <div className="text-xs text-slate-400 mt-1">Impact: {s.expected_impact}</div>}
+                        <div className="text-[11px] text-slate-500 mt-1 mono">confidence {Math.round((Number(s.confidence || 0) * 100))}%</div>
+                      </div>
+                    </div>
+                    {Array.isArray(paths) && paths.length > 0 && (
+                      <div className="mt-3">
+                        <div className="text-[11px] text-slate-500 mb-1">Supporting data</div>
+                        <div className="space-y-1">
+                          {paths.slice(0, 6).map((p) => (
+                            <div key={String(p)} className="flex items-start justify-between gap-3">
+                              <div className="mono text-[11px] text-slate-400 break-all">{String(p)}</div>
+                              <div className="mono text-[11px] text-slate-500">{Object.prototype.hasOwnProperty.call(obs, p) ? JSON.stringify(obs[p]) : "—"}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="card-flat p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
