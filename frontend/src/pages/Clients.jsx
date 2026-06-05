@@ -10,16 +10,18 @@ const healthChip = (h) => h >= 80 ? "chip-success" : h >= 60 ? "chip-info" : h >
 export function ClientsList() {
   const [list, setList] = useState([]); const [showNew, setShowNew] = useState(false); const [showImport, setShowImport] = useState(false);
   const [form, setForm] = useState({ name: "", company: "", industry: "", email: "", phone: "", website: "", location: "", services: "" });
-  const [ghlLocations, setGhlLocations] = useState([]);
-  const [importLocationId, setImportLocationId] = useState("");
-  const [importQuery, setImportQuery] = useState("");
-  const [importContacts, setImportContacts] = useState([]);
-  const [importSelected, setImportSelected] = useState({});
   const [importBusy, setImportBusy] = useState(false);
   const [importErr, setImportErr] = useState("");
+  const [syncStatus, setSyncStatus] = useState(null);
+  const [syncResult, setSyncResult] = useState(null);
+  const { user } = useAuth();
   const navigate = useNavigate();
   const load = useCallback(() => clients.list().then(setList), []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!showImport) return;
+    clients.clickupSyncStatus().then((r) => setSyncStatus(r?.state || null)).catch(() => {});
+  }, [showImport]);
 
   const create = async (e) => {
     e.preventDefault();
@@ -32,7 +34,7 @@ export function ClientsList() {
     <div>
       <PageHead title="Client Roster" subtitle="Health, churn signals, and recent activity at a glance." actions={
         <div className="flex items-center gap-2">
-          <button className="btn-secondary flex items-center gap-2" onClick={() => setShowImport(true)}><ArrowRight size={14} weight="bold" /> Import Clients</button>
+          <button className="btn-secondary flex items-center gap-2" onClick={() => setShowImport(true)}><ArrowRight size={14} weight="bold" /> Sync Clients</button>
           <button className="btn-primary flex items-center gap-2" onClick={() => setShowNew(true)} data-testid="new-client-btn"><Plus size={14} weight="bold" /> New Client</button>
         </div>
       } />
@@ -82,79 +84,49 @@ export function ClientsList() {
       )}
 
       {showImport && (
-        <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4" onClick={() => { setShowImport(false); setImportErr(""); }}>
+        <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4" onClick={() => { setShowImport(false); setImportErr(""); setSyncResult(null); }}>
           <div onClick={(e) => e.stopPropagation()} className="card-flat p-6 w-full max-w-3xl">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold">Import Clients (GoHighLevel)</h3>
-              <button type="button" className="btn-ghost !p-2" onClick={() => { setShowImport(false); setImportErr(""); }}><X size={14} /></button>
+              <h3 className="text-lg font-semibold">Sync Clients (ClickUp)</h3>
+              <button type="button" className="btn-ghost !p-2" onClick={() => { setShowImport(false); setImportErr(""); setSyncResult(null); }}><X size={14} /></button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="md:col-span-2">
-                <label className="label">Map Ranking Location</label>
-                <select
-                  className="input mt-1.5"
-                  value={importLocationId}
-                  onChange={(e) => setImportLocationId(e.target.value)}
-                  onFocus={async () => {
-                    if (ghlLocations.length) return;
-                    try {
-                      const r = await integrations.gohighlevelLocations();
-                      setGhlLocations(r?.locations || []);
-                    } catch (e2) {
-                      setImportErr(e2?.response?.data?.detail || e2?.message || "Failed to load GoHighLevel locations");
-                    }
-                  }}
-                >
-                  <option value="">Select a location…</option>
-                  {ghlLocations.map((l) => <option key={l.id} value={l.id}>{l.name || l.id}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="label">Search</label>
-                <input className="input mt-1.5" value={importQuery} onChange={(e) => setImportQuery(e.target.value)} placeholder="Name, company, email…" />
-              </div>
+            <div className="text-sm text-slate-300">
+              This pulls your assigned clients from the <span className="font-semibold">Client Health Tracker</span> in ClickUp.
+              We match the <span className="font-semibold">Account Manager</span> field to your user name (and email when available).
             </div>
 
             <div className="flex items-center gap-2 mt-4">
               <button
                 className="btn-secondary"
-                disabled={!importLocationId || importBusy}
+                disabled={importBusy}
                 onClick={async () => {
                   setImportErr("");
                   setImportBusy(true);
                   try {
-                    const r = await clients.ghlImportContacts({ locationId: importLocationId, query: importQuery, limit: 200 });
-                    setImportContacts(r?.contacts || []);
-                    setImportSelected({});
+                    const r = await clients.clickupSyncStatus();
+                    setSyncStatus(r?.state || null);
                   } catch (e2) {
-                    setImportErr(e2?.response?.data?.detail || e2?.message || "Failed to load contacts");
+                    setImportErr(e2?.response?.data?.detail || e2?.message || "Failed to load sync status");
                   } finally {
                     setImportBusy(false);
                   }
                 }}
               >
-                {importBusy ? "Loading…" : "Load Contacts"}
+                {importBusy ? "Loading…" : "Refresh Status"}
               </button>
               <button
                 className="btn-primary"
-                disabled={!importContacts.length || importBusy}
+                disabled={importBusy}
                 onClick={async () => {
                   setImportErr("");
                   setImportBusy(true);
                   try {
-                    const chosen = importContacts.filter((c) => importSelected[c.id]);
-                    const payload = { location_id: importLocationId, contacts: chosen.length ? chosen : importContacts };
-                    const r = await clients.importFromGhl(payload);
+                    const r = await clients.clickupSyncNow();
+                    setSyncResult(r);
                     await load();
-                    setShowImport(false);
-                    setImportContacts([]);
-                    setImportSelected({});
-                    setImportLocationId("");
-                    setImportQuery("");
-                    if ((r?.skipped || []).length) {
-                      setTimeout(() => alert(`Imported ${r?.created?.length || 0} client(s). Skipped ${r?.skipped?.length || 0} duplicate(s).`), 50);
-                    }
+                    const s = await clients.clickupSyncStatus();
+                    setSyncStatus(s?.state || null);
                   } catch (e2) {
                     setImportErr(e2?.response?.data?.detail || e2?.message || "Import failed");
                   } finally {
@@ -162,8 +134,31 @@ export function ClientsList() {
                   }
                 }}
               >
-                Import {Object.values(importSelected).some(Boolean) ? "Selected" : "All Loaded"}
+                {importBusy ? "Syncing…" : "Sync Now"}
               </button>
+              {user?.role === "admin" && (
+                <button
+                  className="btn-ghost"
+                  disabled={importBusy}
+                  onClick={async () => {
+                    setImportErr("");
+                    setImportBusy(true);
+                    try {
+                      const r = await clients.clickupSyncAll();
+                      await load();
+                      setSyncResult(r);
+                      const s = await clients.clickupSyncStatus();
+                      setSyncStatus(s?.state || null);
+                    } catch (e2) {
+                      setImportErr(e2?.response?.data?.detail || e2?.message || "Sync all failed");
+                    } finally {
+                      setImportBusy(false);
+                    }
+                  }}
+                >
+                  Sync All (Admin)
+                </button>
+              )}
             </div>
 
             {importErr && (
@@ -172,38 +167,46 @@ export function ClientsList() {
               </div>
             )}
 
-            <div className="mt-4 max-h-[48vh] overflow-auto border border-white/5 rounded-xl">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-[#0B1222]">
-                  <tr className="text-left text-slate-400">
-                    <th className="p-3 w-10"> </th>
-                    <th className="p-3">Company</th>
-                    <th className="p-3">Contact</th>
-                    <th className="p-3">Email</th>
-                    <th className="p-3">Phone</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {importContacts.map((c) => (
-                    <tr key={c.id} className="border-t border-white/5">
-                      <td className="p-3">
-                        <input
-                          type="checkbox"
-                          checked={!!importSelected[c.id]}
-                          onChange={(e) => setImportSelected({ ...importSelected, [c.id]: e.target.checked })}
-                        />
-                      </td>
-                      <td className="p-3">{c.company || "—"}</td>
-                      <td className="p-3">{c.name || "—"}</td>
-                      <td className="p-3">{c.email || "—"}</td>
-                      <td className="p-3">{c.phone || "—"}</td>
-                    </tr>
-                  ))}
-                  {!importContacts.length && (
-                    <tr><td className="p-6 text-slate-500" colSpan={5}>Load contacts to preview and select what to import.</td></tr>
+            <div className="mt-4 space-y-3">
+              <div className="card-flat p-4">
+                <div className="text-xs text-slate-400">Last successful sync</div>
+                <div className="text-sm mt-1 mono">{syncStatus?.last_success_at ? new Date(syncStatus.last_success_at).toLocaleString() : "—"}</div>
+                {!!syncStatus?.last_error && (
+                  <div className="text-xs text-rose-200 mt-2">
+                    Last error: {syncStatus.last_error}
+                  </div>
+                )}
+              </div>
+              {!!syncResult && (
+                <div className="card-flat p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold">Latest sync result</div>
+                    <span className={`chip ${syncResult.ok ? "chip-success" : "chip-danger"}`}>{syncResult.ok ? "ok" : "error"}</span>
+                  </div>
+                  {syncResult.ok ? (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 text-sm">
+                      <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="text-xs text-slate-400">Assigned found</div>
+                        <div className="text-lg font-bold mt-1">{syncResult.assigned_found ?? 0}</div>
+                      </div>
+                      <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="text-xs text-slate-400">Created</div>
+                        <div className="text-lg font-bold mt-1">{syncResult.created ?? 0}</div>
+                      </div>
+                      <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="text-xs text-slate-400">Updated</div>
+                        <div className="text-lg font-bold mt-1">{syncResult.updated ?? 0}</div>
+                      </div>
+                      <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                        <div className="text-xs text-slate-400">Paused</div>
+                        <div className="text-lg font-bold mt-1">{syncResult.paused ?? 0}</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-rose-200 mt-3">{syncResult.error || "Sync failed"}</div>
                   )}
-                </tbody>
-              </table>
+                </div>
+              )}
             </div>
           </div>
         </div>

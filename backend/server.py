@@ -97,6 +97,7 @@ import ai
 import ai_visibility
 import connectors
 import monthly_touch
+import clickup_client_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("mtos")
@@ -1095,13 +1096,18 @@ async def analyze_white_label(ctx=Depends(get_current_context)):
 # ===================== CLIENTS =====================
 @api.get("/clients")
 async def list_clients(ctx=Depends(get_current_context)):
-    docs = await db.clients.find(tenant_scope(ctx.tenant_id)).sort("created_at", -1).to_list(1000)
+    q = tenant_scope(ctx.tenant_id)
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        q = {"$and": [q, {"account_manager_id": ctx.user.id, "status": "active"}]}
+    docs = await db.clients.find(q).sort("created_at", -1).to_list(1000)
     return [Client.from_mongo(d).model_dump() for d in docs]
 
 
 @api.post("/clients")
 async def create_client(data: ClientIn, ctx=Depends(get_current_context)):
     am_name = None
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        data.account_manager_id = ctx.user.id
     if data.account_manager_id:
         am_doc = await db.users.find_one({"_id": data.account_manager_id})
         if am_doc:
@@ -1116,6 +1122,9 @@ async def get_client(client_id: str, ctx=Depends(get_current_context)):
     doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
     if not doc:
         raise HTTPException(404, "Client not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
     return Client.from_mongo(doc).model_dump()
 
 
@@ -1124,6 +1133,9 @@ async def get_client_suggestions(client_id: str, ctx=Depends(get_current_context
     doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
     if not doc:
         raise HTTPException(404, "Client not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
     c = Client.from_mongo(doc)
     return {
         "client_id": c.id,
@@ -1138,6 +1150,9 @@ async def generate_client_suggestions(client_id: str, data: GenerateSuggestionsI
     c_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
     if not c_doc:
         raise HTTPException(404, "Client not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(c_doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
     client = Client.from_mongo(c_doc)
     client_d = client.model_dump()
 
@@ -1188,10 +1203,14 @@ async def generate_client_suggestions(client_id: str, data: GenerateSuggestionsI
 
 @api.patch("/clients/{client_id}")
 async def update_client(client_id: str, patch: dict, ctx=Depends(get_current_context)):
-    patch["updated_at"] = utcnow().isoformat()
-    res = await db.clients.update_one({"_id": client_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-    if res.matched_count == 0:
+    existing = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not existing:
         raise HTTPException(404, "Client not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(existing.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
+    patch["updated_at"] = utcnow().isoformat()
+    await db.clients.update_one({"_id": client_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
     return Client.from_mongo(doc).model_dump()
 
@@ -1264,6 +1283,7 @@ async def ghl_contacts_for_import(
     limit: int = Query(default=100, ge=1, le=200),
     ctx=Depends(get_current_context),
 ):
+    raise HTTPException(410, "GoHighLevel contact import has been replaced by ClickUp Client Assignment Sync.")
     res = await connectors.list_gohighlevel_contacts(ctx.tenant_id, location_id=location_id, query=query, limit=limit)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "GoHighLevel import failed")
@@ -1272,6 +1292,7 @@ async def ghl_contacts_for_import(
 
 @api.post("/import/gohighlevel/clients")
 async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(get_current_context)):
+    raise HTTPException(410, "GoHighLevel contact import has been replaced by ClickUp Client Assignment Sync.")
     location_id = (data.location_id or "").strip()
     if not location_id:
         raise HTTPException(400, "Missing location_id")
@@ -1372,6 +1393,46 @@ async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(
         created.append(new_client.model_dump())
 
     return {"ok": True, "created": created, "skipped": skipped}
+
+
+@api.get("/import/clickup/clients/status")
+async def clickup_client_sync_status(user_id: str = Query(default=""), ctx=Depends(get_current_context)):
+    target_user_id = ctx.user.id
+    if user_id and (ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")):
+        target_user_id = user_id
+    doc = await db.clickup_client_sync_state.find_one({"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
+    state = doc or {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id), "last_success_at": None, "last_error": None}
+    return {"ok": True, "state": state}
+
+
+@api.post("/import/clickup/clients/sync")
+async def clickup_client_sync_now(ctx=Depends(get_current_context)):
+    res = await clickup_client_sync.sync_assigned_clients_for_user(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user.id,
+        user_name=ctx.user.name,
+        user_email=ctx.user.email,
+    )
+    if res.get("ok"):
+        await db.integrations.update_one(
+            {"tenant_id": ctx.tenant_id, "platform": "clickup"},
+            {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_synced_at": utcnow().isoformat(), "last_error": None, "status": "connected", "updated_at": utcnow().isoformat()}},
+            upsert=True,
+        )
+    else:
+        await db.integrations.update_one(
+            {"tenant_id": ctx.tenant_id, "platform": "clickup"},
+            {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_error": res.get("error"), "updated_at": utcnow().isoformat()}},
+            upsert=True,
+        )
+    return res
+
+
+@api.post("/import/clickup/clients/sync/all")
+async def clickup_client_sync_all(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    return await clickup_client_sync.sync_assigned_clients_for_all_users(tenant_id=ctx.tenant_id)
 
 
 def _client_comms_html(client: dict, ghl_msgs: List[dict], gmail_msgs: List[dict]) -> str:
