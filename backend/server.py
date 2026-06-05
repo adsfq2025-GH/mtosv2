@@ -48,6 +48,7 @@ from models import (  # noqa: E402
     AiVisibilityConfig,
     AiVisibilityConfigIn,
     AiVisibilityRun,
+    AiVisibilityScan,
     Client,
     ClientIn,
     ImportGhlClientsIn,
@@ -721,10 +722,7 @@ async def list_ai_visibility_configs(
     for d in docs or []:
         cfg = AiVisibilityConfig.from_mongo(d).model_dump()
         brand, domain = ai_visibility.infer_brand_and_domain(client_obj, cfg.get("brand_override"), cfg.get("domain_override"))
-        keywords = [str(x or "").strip() for x in (cfg.get("keywords") or []) if str(x or "").strip()]
-        while len(keywords) < 5:
-            keywords.append("")
-        cfg["keyword_slots"] = keywords
+        cfg["keyword_slots"] = []
         cfg["inferred_brand"] = brand
         cfg["inferred_domain"] = domain
         out.append(cfg)
@@ -737,18 +735,26 @@ async def create_ai_visibility_config(
     client_id: str = Query(...),
     ctx=Depends(_require_ai_visibility),
 ):
-    kw = [str(x or "").strip() for x in (data.keywords or []) if str(x or "").strip()]
+    existing = await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]})
+    if existing:
+        return {"ok": True, "config": AiVisibilityConfig.from_mongo(existing).model_dump()}
+
+    client_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not client_doc:
+        raise HTTPException(404, "Client not found")
+
+    intel = await ai_visibility.generate_prompt_intelligence(client_doc)
     cfg = AiVisibilityConfig(
         tenant_id=ctx.tenant_id,
         client_id=client_id,
-        market=str(data.market or "").strip(),
-        keywords=kw,
-        brand_override=str(data.brand_override or "").strip() or None,
-        domain_override=str(data.domain_override or "").strip() or None,
-        enabled=bool(data.enabled),
+        market=str(intel.get("market") or "").strip(),
+        keywords=[],
+        brand_override=None,
+        domain_override=None,
+        enabled=True,
     )
     await db.ai_visibility_configs.insert_one(cfg.to_mongo())
-    return {"ok": True, "config": cfg.model_dump()}
+    return {"ok": True, "config": cfg.model_dump(), "prompt_intelligence": {"themes": intel.get("themes") or [], "prompts_total": intel.get("prompts_total") or 0}}
 
 
 @api.patch("/ai-visibility/configs/{config_id}")
@@ -757,30 +763,47 @@ async def update_ai_visibility_config(
     data: AiVisibilityConfigIn,
     ctx=Depends(_require_ai_visibility),
 ):
-    kw = [str(x or "").strip() for x in (data.keywords or []) if str(x or "").strip()]
+    cfg_doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+    if not cfg_doc:
+        raise HTTPException(404, "Config not found")
+    cfg = AiVisibilityConfig.from_mongo(cfg_doc)
+    client_doc = await db.clients.find_one({"_id": cfg.client_id, **tenant_scope(ctx.tenant_id)})
+    intel = await ai_visibility.generate_prompt_intelligence(client_doc or {})
     patch = {
-        "market": str(data.market or "").strip(),
-        "keywords": kw,
-        "brand_override": str(data.brand_override or "").strip() or None,
-        "domain_override": str(data.domain_override or "").strip() or None,
-        "enabled": bool(data.enabled),
+        "market": str(intel.get("market") or "").strip(),
+        "keywords": [],
+        "brand_override": None,
+        "domain_override": None,
+        "enabled": True,
         "updated_at": utcnow().isoformat(),
     }
-    res = await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-    if res.matched_count == 0:
-        raise HTTPException(404, "Config not found")
+    await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
-    return {"ok": True, "config": AiVisibilityConfig.from_mongo(doc).model_dump()}
+    return {"ok": True, "config": AiVisibilityConfig.from_mongo(doc).model_dump(), "prompt_intelligence": {"themes": intel.get("themes") or [], "prompts_total": intel.get("prompts_total") or 0}}
 
 
 @api.get("/ai-visibility/configs/{config_id}/runs")
 async def list_ai_visibility_runs(
     config_id: str,
     limit: int = Query(100, ge=1, le=500),
+    scan_id: Optional[str] = Query(None),
     ctx=Depends(_require_ai_visibility),
 ):
-    docs = await db.ai_visibility_runs.find({"$and": [{"config_id": config_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(int(limit))
+    q = {"$and": [{"config_id": config_id}, tenant_scope(ctx.tenant_id)]}
+    if scan_id:
+        q["$and"].append({"scan_id": str(scan_id)})
+    docs = await db.ai_visibility_runs.find(q).sort("created_at", -1).to_list(int(limit))
     return {"ok": True, "runs": [AiVisibilityRun.from_mongo(d).model_dump() for d in (docs or [])]}
+
+
+@api.get("/ai-visibility/configs/{config_id}/scans")
+async def list_ai_visibility_scans(
+    config_id: str,
+    limit: int = Query(30, ge=1, le=200),
+    ctx=Depends(_require_ai_visibility),
+):
+    docs = await db.ai_visibility_scans.find({"$and": [{"config_id": config_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(int(limit))
+    return {"ok": True, "scans": [AiVisibilityScan.from_mongo(d).model_dump() for d in (docs or [])]}
 
 
 @api.post("/ai-visibility/configs/{config_id}/run")
@@ -797,26 +820,46 @@ async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibil
         raise HTTPException(404, "Client not found")
 
     brand, domain = ai_visibility.infer_brand_and_domain(client_doc, cfg.brand_override, cfg.domain_override)
-    keywords = [str(x or "").strip() for x in (cfg.keywords or []) if str(x or "").strip()]
-    if not keywords:
-        raise HTTPException(400, "Add at least one keyword")
+    intel = await ai_visibility.generate_prompt_intelligence(client_doc)
+    market = str(intel.get("market") or cfg.market or "").strip()
+    themes = intel.get("themes") or []
+    prompts = []
+    for t in themes:
+        if not isinstance(t, dict):
+            continue
+        tname = str(t.get("name") or "").strip()
+        for p0 in (t.get("prompts") or []):
+            if not isinstance(p0, dict):
+                continue
+            q0 = str(p0.get("query") or "").strip()
+            pk0 = str(p0.get("kind") or "").strip()
+            if not q0:
+                continue
+            prompts.append({"query": q0, "prompt_kind": pk0 or "commercial", "theme": tname or None})
+    if not prompts:
+        raise HTTPException(400, "Prompt generation failed (no prompts)")
 
     providers = ["openai", "gemini", "perplexity"]
     created = 0
     hit_count = 0
     per_provider = {p: {"hits": 0, "total": 0, "errors": 0} for p in providers}
+    scan_id = new_id()
+    runs_for_metrics = []
 
-    for kw in keywords:
+    for it in prompts:
         for p in providers:
             per_provider[p]["total"] += 1
             try:
-                r = await ai_visibility.scan_keyword(provider=p, keyword=kw, market=cfg.market, brand=brand, domain=domain)
+                r = await ai_visibility.scan_keyword(provider=p, keyword=it["query"], market=market, brand=brand, domain=domain)
                 run = AiVisibilityRun(
                     tenant_id=ctx.tenant_id,
                     config_id=config_id,
                     client_id=cfg.client_id,
-                    market=cfg.market,
-                    keyword=kw,
+                    scan_id=scan_id,
+                    market=market,
+                    keyword=it["query"],
+                    theme=it.get("theme"),
+                    prompt_kind=it.get("prompt_kind"),
                     provider=p,
                     prompt=r.get("prompt") or "",
                     response_text=r.get("response_text") or "",
@@ -830,12 +873,56 @@ async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibil
                 if run.hit:
                     hit_count += 1
                     per_provider[p]["hits"] += 1
+                runs_for_metrics.append(run.model_dump())
             except ai.AIProviderError:
                 per_provider[p]["errors"] += 1
             except Exception:
                 per_provider[p]["errors"] += 1
 
-    return {"ok": True, "created": created, "hits": hit_count, "providers": per_provider, "brand": brand, "domain": domain}
+    total = sum(int(per_provider[p]["total"]) for p in providers)
+    score = (float(hit_count) / float(total)) * 100.0 if total else 0.0
+    comp = ai_visibility.competitor_discovery_from_runs(runs_for_metrics, brand=brand, domain=domain)
+    platform_rankings = {}
+    for p in providers:
+        pt = int(per_provider[p]["total"] or 0)
+        ph = int(per_provider[p]["hits"] or 0)
+        platform_rankings[p] = {"hits": ph, "total": pt, "score": round((float(ph) / float(pt) * 100.0) if pt else 0.0, 2)}
+
+    scan = AiVisibilityScan(
+        tenant_id=ctx.tenant_id,
+        config_id=config_id,
+        client_id=cfg.client_id,
+        scan_id=scan_id,
+        market=market,
+        brand=brand,
+        domain=domain,
+        providers=per_provider,
+        total=total,
+        hits=hit_count,
+        overall_visibility_score=round(score, 2),
+        share_of_voice={"items": comp.get("share_of_voice") or [], "market_rank": comp.get("market_rank")},
+        platform_rankings=platform_rankings,
+        themes=themes,
+        prompts_total=len(prompts),
+        competitors=comp.get("competitors") or [],
+        content_intelligence={"status": "generated", "source": "website+gbp"},
+        growth_engine={"status": "generated", "source": "scan_mentions"},
+    )
+    await db.ai_visibility_scans.insert_one(scan.to_mongo())
+    await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": {"market": market, "updated_at": utcnow().isoformat()}})
+
+    return {
+        "ok": True,
+        "scan_id": scan_id,
+        "scan": scan.model_dump(),
+        "created": created,
+        "hits": hit_count,
+        "total": total,
+        "providers": per_provider,
+        "brand": brand,
+        "domain": domain,
+        "market": market,
+    }
 
 
 @api.get("/white-label/domains")

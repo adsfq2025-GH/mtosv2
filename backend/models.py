@@ -172,8 +172,11 @@ class AiVisibilityRun(BaseDocument):
     tenant_id: Optional[str] = None
     config_id: str
     client_id: str
+    scan_id: Optional[str] = None
     market: str = ""
     keyword: str
+    theme: Optional[str] = None
+    prompt_kind: Optional[str] = None
     provider: Literal["openai", "gemini", "perplexity"]
     prompt: str
     response_text: str
@@ -181,6 +184,27 @@ class AiVisibilityRun(BaseDocument):
     hit: bool = False
     hit_brand: bool = False
     hit_domain: bool = False
+
+
+class AiVisibilityScan(BaseDocument):
+    tenant_id: Optional[str] = None
+    config_id: str
+    client_id: str
+    scan_id: Optional[str] = None
+    market: str = ""
+    brand: str = ""
+    domain: str = ""
+    providers: Dict[str, Any] = Field(default_factory=dict)
+    total: int = 0
+    hits: int = 0
+    overall_visibility_score: float = 0.0
+    share_of_voice: Dict[str, Any] = Field(default_factory=dict)
+    platform_rankings: Dict[str, Any] = Field(default_factory=dict)
+    themes: List[Dict[str, Any]] = Field(default_factory=list)
+    prompts_total: int = 0
+    competitors: List[Dict[str, Any]] = Field(default_factory=list)
+    content_intelligence: Dict[str, Any] = Field(default_factory=dict)
+    growth_engine: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ===== MEETINGS =====

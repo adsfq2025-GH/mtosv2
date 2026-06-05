@@ -183,7 +183,9 @@ export const aiVisibility = {
   listConfigs: (clientId) => api.get(`/ai-visibility/configs?client_id=${encodeURIComponent(clientId)}`).then((r) => r.data),
   createConfig: (clientId, payload) => api.post(`/ai-visibility/configs?client_id=${encodeURIComponent(clientId)}`, payload).then((r) => r.data),
   updateConfig: (configId, payload) => api.patch(`/ai-visibility/configs/${configId}`, payload).then((r) => r.data),
-  listRuns: (configId, limit = 100) => api.get(`/ai-visibility/configs/${configId}/runs?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
+  listRuns: (configId, limit = 100, scanId = "") =>
+    api.get(`/ai-visibility/configs/${configId}/runs?limit=${encodeURIComponent(limit)}${scanId ? `&scan_id=${encodeURIComponent(scanId)}` : ""}`).then((r) => r.data),
+  listScans: (configId, limit = 30) => api.get(`/ai-visibility/configs/${configId}/scans?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
   run: (configId) => api.post(`/ai-visibility/configs/${configId}/run`).then((r) => r.data),
   superGrant: (tenantId, enabled = true, trialDays = 14) =>
     api.post(`/super/ai-visibility/grant?tenant_id=${encodeURIComponent(tenantId)}&enabled=${encodeURIComponent(enabled)}&trial_days=${encodeURIComponent(trialDays)}`).then((r) => r.data),

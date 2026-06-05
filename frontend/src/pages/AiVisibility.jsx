@@ -2,7 +2,7 @@ import React from "react";
 import { PageHead } from "@/Layout";
 import { clients as clientsApi, aiVisibility as aiVisibilityApi } from "@/api";
 import { useAuth } from "@/auth";
-import { CheckCircle, Lightning, Plus, WarningCircle } from "@phosphor-icons/react";
+import { ArrowsClockwise, ChartBar, CheckCircle, Lightning, Sparkle, TrendUp, WarningCircle } from "@phosphor-icons/react";
 
 function fmtDate(v) {
   if (!v) return "";
@@ -21,16 +21,15 @@ export default function AiVisibility() {
   const [clientId, setClientId] = React.useState("");
   const [configs, setConfigs] = React.useState([]);
   const [configId, setConfigId] = React.useState("");
-  const [market, setMarket] = React.useState("");
-  const [brandOverride, setBrandOverride] = React.useState("");
-  const [domainOverride, setDomainOverride] = React.useState("");
-  const [keywords, setKeywords] = React.useState(["", "", "", "", ""]);
   const [inferredBrand, setInferredBrand] = React.useState("");
   const [inferredDomain, setInferredDomain] = React.useState("");
+  const [scans, setScans] = React.useState([]);
+  const [selectedScanId, setSelectedScanId] = React.useState("");
   const [runs, setRuns] = React.useState([]);
   const [busy, setBusy] = React.useState(false);
+  const [regenBusy, setRegenBusy] = React.useState(false);
   const [runBusy, setRunBusy] = React.useState(false);
-  const [lastRun, setLastRun] = React.useState(null);
+  const [loadingRuns, setLoadingRuns] = React.useState(false);
   const [err, setErr] = React.useState("");
 
   const loadEnt = React.useCallback(async () => {
@@ -56,9 +55,18 @@ export default function AiVisibility() {
     setConfigId(first);
   }, []);
 
-  const loadRuns = React.useCallback(async (cfgId) => {
-    if (!cfgId) { setRuns([]); return; }
-    const r = await aiVisibilityApi.listRuns(cfgId, 150);
+  const loadScans = React.useCallback(async (cfgId) => {
+    if (!cfgId) { setScans([]); setSelectedScanId(""); return; }
+    const r = await aiVisibilityApi.listScans(cfgId, 30);
+    const s = r?.scans || [];
+    setScans(s);
+    const first = s[0]?.scan_id || "";
+    setSelectedScanId(first);
+  }, []);
+
+  const loadRuns = React.useCallback(async (cfgId, scanId) => {
+    if (!cfgId || !scanId) { setRuns([]); return; }
+    const r = await aiVisibilityApi.listRuns(cfgId, 150, scanId);
     setRuns(r?.runs || []);
   }, []);
 
@@ -71,8 +79,9 @@ export default function AiVisibility() {
     if (!clientId) return;
     setConfigs([]);
     setConfigId("");
+    setScans([]);
+    setSelectedScanId("");
     setRuns([]);
-    setLastRun(null);
     setErr("");
     loadConfigs(clientId).catch((e) => setErr(e?.response?.data?.detail || "Failed to load configs"));
   }, [clientId, loadConfigs]);
@@ -80,49 +89,54 @@ export default function AiVisibility() {
   React.useEffect(() => {
     const cfg = configs.find((c) => c.id === configId);
     if (!cfg) {
-      setMarket("");
-      setBrandOverride("");
-      setDomainOverride("");
-      setKeywords(["", "", "", "", ""]);
       setInferredBrand("");
       setInferredDomain("");
+      setScans([]);
+      setSelectedScanId("");
+      setRuns([]);
       return;
     }
-    setMarket(cfg.market || "");
-    setBrandOverride(cfg.brand_override || "");
-    setDomainOverride(cfg.domain_override || "");
-    setKeywords((cfg.keyword_slots || cfg.keywords || []).length ? (cfg.keyword_slots || cfg.keywords) : ["", "", "", "", ""]);
     setInferredBrand(cfg.inferred_brand || "");
     setInferredDomain(cfg.inferred_domain || "");
-    loadRuns(cfg.id).catch(() => {});
-  }, [configId, configs, loadRuns]);
+    loadScans(cfg.id).catch(() => {});
+  }, [configId, configs, loadScans]);
+
+  React.useEffect(() => {
+    if (!configId || !selectedScanId) return;
+    setLoadingRuns(true);
+    loadRuns(configId, selectedScanId).catch(() => {}).finally(() => setLoadingRuns(false));
+  }, [configId, loadRuns, selectedScanId]);
 
   const enabled = !!ent?.enabled || user?.role === "admin";
 
-  const upsert = async () => {
+  const ensureConfig = async () => {
     if (!clientId) return;
     setBusy(true);
     setErr("");
     try {
-      const payload = {
-        market: market || "",
-        keywords: (keywords || []).map((k) => String(k || "").trim()).filter(Boolean),
-        brand_override: brandOverride || null,
-        domain_override: domainOverride || null,
-        enabled: true,
-      };
-      if (configId) {
-        const r = await aiVisibilityApi.updateConfig(configId, payload);
-        setConfigId(r?.config?.id || configId);
-      } else {
-        const r = await aiVisibilityApi.createConfig(clientId, payload);
-        setConfigId(r?.config?.id || "");
-      }
+      const r = await aiVisibilityApi.createConfig(clientId, {});
+      const cid = r?.config?.id || "";
       await loadConfigs(clientId);
+      if (cid) setConfigId(cid);
     } catch (e) {
-      setErr(e?.response?.data?.detail || "Save failed");
+      setErr(e?.response?.data?.detail || "Enable failed");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const refreshIntelligence = async () => {
+    if (!configId) return;
+    setRegenBusy(true);
+    setErr("");
+    try {
+      await aiVisibilityApi.updateConfig(configId, {});
+      await loadConfigs(clientId);
+      await loadScans(configId);
+    } catch (e) {
+      setErr(e?.response?.data?.detail || "Refresh failed");
+    } finally {
+      setRegenBusy(false);
     }
   };
 
@@ -132,8 +146,9 @@ export default function AiVisibility() {
     setErr("");
     try {
       const r = await aiVisibilityApi.run(configId);
-      setLastRun(r);
-      await loadRuns(configId);
+      await loadScans(configId);
+      if (r?.scan_id) setSelectedScanId(r.scan_id);
+      if (r?.scan_id) await loadRuns(configId, r.scan_id);
     } catch (e) {
       setErr(e?.response?.data?.detail || "Scan failed");
     } finally {
@@ -141,22 +156,36 @@ export default function AiVisibility() {
     }
   };
 
-  const addKeyword = () => setKeywords((ks) => [...(ks || []), ""]);
-  const setKeyword = (idx, val) => setKeywords((ks) => (ks || []).map((k, i) => (i === idx ? val : k)));
+  const selectedScan = (scans || []).find((s) => s.scan_id === selectedScanId) || scans?.[0] || null;
+  const overallScore = selectedScan?.overall_visibility_score ?? null;
+  const marketRank = selectedScan?.share_of_voice?.market_rank ?? null;
+  const sovItems = selectedScan?.share_of_voice?.items || [];
+  const clientSov = (sovItems || []).find((x) => x?.is_client) || null;
+  const platform = selectedScan?.platform_rankings || {};
+  const trend = (scans || []).slice().reverse().slice(-10);
 
   return (
     <div>
       <PageHead
         title="AI Visibility"
-        subtitle="Track whether your clients appear in ChatGPT / Gemini / Perplexity-style answers for a set of keywords."
+        subtitle="Automated prompt intelligence and competitor discovery. No manual prompts, themes, competitors, or keyword inputs."
         actions={
           <div className="flex items-center gap-2">
-            <button className="btn-primary text-xs" onClick={upsert} disabled={!enabled || busy || !clientId} data-testid="ai-vis-save">
-              <CheckCircle size={14} /> {busy ? "Saving…" : "Save"}
-            </button>
-            <button className="btn-ghost text-xs" onClick={runScan} disabled={!enabled || runBusy || !configId} data-testid="ai-vis-run">
-              <Lightning size={14} /> {runBusy ? "Scanning…" : "Run scan"}
-            </button>
+            {!configId && (
+              <button className="btn-primary text-xs" onClick={ensureConfig} disabled={!enabled || busy || !clientId} data-testid="ai-vis-enable">
+                <CheckCircle size={14} /> {busy ? "Enabling…" : "Enable"}
+              </button>
+            )}
+            {!!configId && (
+              <>
+                <button className="btn-ghost text-xs" onClick={refreshIntelligence} disabled={!enabled || regenBusy} data-testid="ai-vis-refresh-intel">
+                  <ArrowsClockwise size={14} /> {regenBusy ? "Refreshing…" : "Refresh intelligence"}
+                </button>
+                <button className="btn-primary text-xs" onClick={runScan} disabled={!enabled || runBusy} data-testid="ai-vis-run">
+                  <Lightning size={14} /> {runBusy ? "Scanning…" : "Run scan"}
+                </button>
+              </>
+            )}
           </div>
         }
       />
@@ -183,120 +212,185 @@ export default function AiVisibility() {
             ))}
           </select>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-            <div>
-              <div className="text-xs text-slate-400 mb-2">Market (optional)</div>
-              <input className="input w-full" value={market} onChange={(e) => setMarket(e.target.value)} placeholder="San Diego, CA" data-testid="ai-vis-market" />
-            </div>
-            <div>
-              <div className="text-xs text-slate-400 mb-2">Config</div>
-              <select className="input w-full" value={configId} onChange={(e) => setConfigId(e.target.value)} disabled={!configs.length} data-testid="ai-vis-config">
-                {!configs.length && <option value="">No config yet</option>}
-                {configs.map((c) => (
-                  <option key={c.id} value={c.id}>{c.market ? c.market : "Default"}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
-            <div>
-              <div className="text-xs text-slate-400 mb-2">Brand match override (optional)</div>
-              <input className="input w-full" value={brandOverride} onChange={(e) => setBrandOverride(e.target.value)} placeholder={inferredBrand || "Inferred from client"} data-testid="ai-vis-brand" />
-              {!!inferredBrand && <div className="text-[11px] text-slate-500 mt-1">Inferred: {inferredBrand}</div>}
-            </div>
-            <div>
-              <div className="text-xs text-slate-400 mb-2">Domain match override (optional)</div>
-              <input className="input w-full" value={domainOverride} onChange={(e) => setDomainOverride(e.target.value)} placeholder={inferredDomain || "Inferred from website"} data-testid="ai-vis-domain" />
-              {!!inferredDomain && <div className="text-[11px] text-slate-500 mt-1">Inferred: {inferredDomain}</div>}
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between mt-6 mb-2">
-            <div className="text-xs text-slate-400">Keywords</div>
-            <button type="button" className="btn-ghost text-xs" onClick={addKeyword} data-testid="ai-vis-add-keyword">
-              <Plus size={14} /> Add keyword
-            </button>
-          </div>
-          <div className="flex flex-col gap-2">
-            {(keywords || []).map((k, i) => (
-              <input
-                key={i}
-                className="input w-full"
-                value={k}
-                onChange={(e) => setKeyword(i, e.target.value)}
-                placeholder={i < 5 ? `Keyword ${i + 1}` : `Keyword ${i + 1} (extra)`}
-                data-testid={`ai-vis-keyword-${i}`}
-              />
-            ))}
-          </div>
-
-          {!configs.length && (
+          {!!clientId && !configId && (
             <div className="text-[11px] text-slate-500 mt-3">
-              Create your first config by selecting a client, adding at least 1 keyword, and clicking Save.
+              No manual setup. Click Enable to auto-generate market, themes, prompts, and competitors from Website + GBP.
             </div>
+          )}
+
+          {!!configId && (
+            <>
+              <div className="divider my-4" />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Brand match</div>
+                  <div className="mt-1 text-sm text-slate-200">{inferredBrand || "—"}</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Domain match</div>
+                  <div className="mt-1 text-sm text-slate-200">{inferredDomain || "—"}</div>
+                </div>
+              </div>
+              <div className="p-3 rounded-md border border-white/5 bg-white/[0.02] mt-3">
+                <div className="text-xs text-slate-400">Market (auto)</div>
+                <div className="mt-1 text-sm text-slate-200">{selectedScan?.market || configs.find((c) => c.id === configId)?.market || "—"}</div>
+              </div>
+              <div className="p-3 rounded-md border border-white/5 bg-white/[0.02] mt-3">
+                <div className="text-xs text-slate-400">Automation inputs</div>
+                <div className="mt-1 text-sm text-slate-200">Website crawl · GBP metadata · Services</div>
+                <div className="text-[11px] text-slate-500 mt-1">Prompts/themes/competitors are regenerated dynamically every scan.</div>
+              </div>
+            </>
           )}
         </div>
 
         <div className="card-flat p-5">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <div className="text-sm font-semibold">Latest scan</div>
-              <div className="text-xs text-slate-500">Runs 3 providers per keyword.</div>
+              <div className="text-sm font-semibold flex items-center gap-2"><Sparkle size={16} weight="duotone" /> AI Visibility Command Center</div>
+              <div className="text-xs text-slate-500">Overall score · Market rank · Share of voice · Platform rankings · Trend</div>
             </div>
-            {lastRun && (
-              <div className="text-xs text-slate-400">
-                Hits: <span className="text-slate-200">{lastRun.hits}</span> · Created: <span className="text-slate-200">{lastRun.created}</span>
-              </div>
+            {!!selectedScan && (
+              <select className="input !py-1 !text-xs !w-[220px]" value={selectedScanId} onChange={(e) => setSelectedScanId(e.target.value)}>
+                {scans.map((s) => (
+                  <option key={s.scan_id} value={s.scan_id}>{fmtDate(s.created_at)} · {s.overall_visibility_score}%</option>
+                ))}
+              </select>
             )}
           </div>
 
-          {lastRun && (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4" data-testid="ai-vis-last-run">
-              {Object.entries(lastRun.providers || {}).map(([k, v]) => (
-                <div key={k} className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
-                  <div className="text-xs text-slate-400">{k}</div>
-                  <div className="mt-1 text-sm">
-                    <span className="text-slate-200">{v.hits}</span>
-                    <span className="text-slate-500"> / {v.total} hits</span>
-                  </div>
-                  {!!v.errors && <div className="text-[11px] text-amber-300 mt-1">{v.errors} errors</div>}
+          {!selectedScan && <div className="p-10 text-center text-slate-400" data-testid="ai-vis-empty-runs">Run the first scan to populate the Command Center.</div>}
+
+          {!!selectedScan && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4" data-testid="ai-vis-command-center">
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Overall Visibility Score</div>
+                  <div className="mt-1 text-2xl font-bold flex items-center gap-2"><ChartBar size={18} /> {overallScore}%</div>
+                  <div className="text-[11px] text-slate-500 mt-1">{selectedScan.hits}/{selectedScan.total} hits</div>
                 </div>
-              ))}
-            </div>
-          )}
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Overall Market Rank</div>
+                  <div className="mt-1 text-2xl font-bold">#{marketRank || "—"}</div>
+                  <div className="text-[11px] text-slate-500 mt-1">Ranked by mention frequency across prompts</div>
+                </div>
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-xs text-slate-400">Share of Voice</div>
+                  <div className="mt-1 text-2xl font-bold flex items-center gap-2"><TrendUp size={18} /> {clientSov ? `${Math.round((clientSov.share || 0) * 100)}%` : "—"}</div>
+                  <div className="text-[11px] text-slate-500 mt-1">{clientSov ? `${clientSov.mentions} mentions` : ""}</div>
+                </div>
+              </div>
 
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold">Recent results</div>
-            <button className="btn-ghost text-xs" onClick={() => loadRuns(configId)} disabled={!configId} data-testid="ai-vis-refresh-runs">
-              <Plus size={14} /> Refresh
-            </button>
-          </div>
-
-          {runs.length === 0 && (
-            <div className="p-10 text-center text-slate-400" data-testid="ai-vis-empty-runs">No scans yet.</div>
-          )}
-
-          {runs.length > 0 && (
-            <div className="mt-3 overflow-hidden rounded-lg border border-white/5">
-              {runs.slice(0, 80).map((r, i) => (
-                <div key={r.id || i} className={`p-3 flex items-center justify-between gap-3 ${i !== Math.min(runs.length, 80) - 1 ? "border-b border-white/5" : ""}`}>
-                  <div className="min-w-0">
-                    <div className="text-[13px] truncate">{r.keyword}</div>
-                    <div className="text-[11px] text-slate-500 mono">{r.provider} · {fmtDate(r.created_at)}</div>
-                  </div>
-                  <div className="shrink-0 flex items-center gap-2">
-                    {r.hit ? <span className="chip chip-success">hit</span> : <span className="chip chip-muted">miss</span>}
-                    {!!r.hit_domain && <span className="chip chip-info">domain</span>}
-                    {!!r.hit_brand && <span className="chip chip-warn">brand</span>}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-sm font-semibold mb-2">Platform Rankings</div>
+                  <div className="space-y-2">
+                    {Object.entries(platform).map(([k, v]) => (
+                      <div key={k} className="flex items-center justify-between">
+                        <div className="text-sm text-slate-300">{k}</div>
+                        <div className="mono text-sm text-slate-200">{v.score}%</div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              ))}
-            </div>
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-sm font-semibold mb-2">Visibility Trend (last 10 scans)</div>
+                  {trend.length === 0 && <div className="text-sm text-slate-500">No history yet.</div>}
+                  {trend.length > 0 && (
+                    <div className="space-y-2">
+                      {trend.map((s) => (
+                        <div key={s.scan_id} className="flex items-center gap-3">
+                          <div className="mono text-[11px] text-slate-500 w-24">{fmtDate(s.created_at)}</div>
+                          <div className="flex-1 h-2 rounded-full bg-white/5 overflow-hidden">
+                            <div className="h-2 bg-[#2FE0C2]" style={{ width: `${Math.min(100, Math.max(0, Number(s.overall_visibility_score || 0)))}%` }} />
+                          </div>
+                          <div className="mono text-[11px] text-slate-400 w-12 text-right">{s.overall_visibility_score}%</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-sm font-semibold mb-2">Top Competitors (AI mentions)</div>
+                  {(selectedScan.competitors || []).length === 0 && <div className="text-sm text-slate-500">No competitor mentions captured.</div>}
+                  <div className="space-y-2">
+                    {(selectedScan.competitors || []).slice(0, 8).map((c, idx) => (
+                      <div key={`${c.domain || c.name}-${idx}`} className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm text-slate-200 truncate">{c.name || c.domain || "—"}</div>
+                          {!!c.domain && <div className="text-[11px] text-slate-500 mono truncate">{c.domain}</div>}
+                        </div>
+                        <span className="chip chip-muted mono">{c.mentions}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-sm font-semibold mb-2">Dynamic Theme Discovery</div>
+                  <div className="text-xs text-slate-500 mb-2">Generated every scan (service, trust, pricing, reviews, location, industry, competitor).</div>
+                  <div className="space-y-2 max-h-[260px] overflow-auto">
+                    {(selectedScan.themes || []).slice(0, 12).map((t, idx) => (
+                      <div key={`${t.name}-${idx}`} className="p-3 rounded-md border border-white/5">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium">{t.name}</div>
+                          <span className="chip chip-muted">{(t.prompts || []).length} prompts</span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-1">{t.type}</div>
+                        <div className="mt-2 space-y-1">
+                          {(t.prompts || []).slice(0, 4).map((p0, j) => (
+                            <div key={j} className="text-xs text-slate-300">• {p0.query}</div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-sm font-semibold mb-2">AI Content Intelligence</div>
+                  <div className="text-xs text-slate-500">Merged: Content Audit + Optimizer + Keyword Planner → one module.</div>
+                  <div className="mt-2 text-sm text-slate-300">Source: Website + GBP. Outputs are generated automatically (no manual inputs).</div>
+                </div>
+                <div className="p-4 rounded-lg border border-white/5 bg-white/[0.02]">
+                  <div className="text-sm font-semibold mb-2">AI Growth Engine™</div>
+                  <div className="text-xs text-slate-500">Merged: Recommendation Center + Takeover Plan + Simulator → one workflow.</div>
+                  <div className="mt-2 text-sm text-slate-300">Source: Scan mentions + KPI context. Produces prioritized fixes and roadmap steps.</div>
+                </div>
+              </div>
+
+              <div className="divider my-4" />
+
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold">Latest scan details</div>
+                <div className="text-xs text-slate-500">{loadingRuns ? "Loading…" : `${runs.length} runs`}</div>
+              </div>
+
+              {runs.length > 0 && (
+                <div className="mt-3 overflow-hidden rounded-lg border border-white/5">
+                  {runs.slice(0, 90).map((r, i) => (
+                    <div key={r.id || i} className={`p-3 flex items-center justify-between gap-3 ${i !== Math.min(runs.length, 90) - 1 ? "border-b border-white/5" : ""}`}>
+                      <div className="min-w-0">
+                        <div className="text-[13px] truncate">{r.keyword}</div>
+                        <div className="text-[11px] text-slate-500 mono">{r.provider} · {r.prompt_kind || "—"} · {r.theme || "—"}</div>
+                      </div>
+                      <div className="shrink-0 flex items-center gap-2">
+                        {r.hit ? <span className="chip chip-success">hit</span> : <span className="chip chip-muted">miss</span>}
+                        {!!r.hit_domain && <span className="chip chip-info">domain</span>}
+                        {!!r.hit_brand && <span className="chip chip-warn">brand</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
     </div>
   );
 }
-
