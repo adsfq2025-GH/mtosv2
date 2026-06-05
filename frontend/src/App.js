@@ -12,6 +12,8 @@ import FollowUp from "@/pages/FollowUp";
 import Opportunities from "@/pages/Opportunities";
 import Testimonials from "@/pages/Testimonials";
 import Strategy from "@/pages/Strategy";
+import WinsLibrary from "@/pages/WinsLibrary";
+import IssuesLibrary from "@/pages/IssuesLibrary";
 import WhiteLabel from "@/pages/WhiteLabel";
 import AiVisibility from "@/pages/AiVisibility";
 import { applyDisplayMode, getSavedDisplayMode } from "@/displayMode";
@@ -44,6 +46,8 @@ export default function App() {
           <Route path="/follow-up" element={<Protected><FollowUp /></Protected>} />
           <Route path="/opportunities" element={<Protected><Opportunities /></Protected>} />
           <Route path="/testimonials" element={<Protected><Testimonials /></Protected>} />
+          <Route path="/wins" element={<Protected><WinsLibrary /></Protected>} />
+          <Route path="/issues" element={<Protected><IssuesLibrary /></Protected>} />
           <Route path="/strategy" element={<Protected><Strategy /></Protected>} />
           <Route path="/white-label" element={<Protected><WhiteLabel /></Protected>} />
           <Route path="/ai-visibility" element={<Protected><AiVisibility /></Protected>} />

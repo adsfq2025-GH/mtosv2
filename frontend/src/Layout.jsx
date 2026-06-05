@@ -3,6 +3,7 @@ import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
   House, Users, CalendarCheck, CheckSquare, Megaphone, Plugs, BookOpen, Bell,
   SignOut, Sparkle, CaretRight, Trophy, Lightbulb, MagnifyingGlass,
+  WarningCircle,
 } from "@phosphor-icons/react";
 import { useAuth } from "./auth";
 import { applyDisplayMode, getSavedDisplayMode } from "./displayMode";
@@ -25,6 +26,8 @@ const NAV_BASE = [
   { to: "/", label: "Dashboard", icon: House, end: true, testid: "nav-dashboard" },
   { to: "/clients", label: "Clients", icon: Users, testid: "nav-clients" },
   { to: "/meetings", label: "Meetings", icon: CalendarCheck, testid: "nav-meetings" },
+  { to: "/wins", label: "Wins Library", icon: Trophy, testid: "nav-wins" },
+  { to: "/issues", label: "Issues Library", icon: WarningCircle, testid: "nav-issues" },
   { to: "/actions", label: "Action Items", icon: CheckSquare, testid: "nav-actions" },
   { to: "/follow-up", label: "Follow-Up", icon: Bell, testid: "nav-follow-up" },
   { to: "/opportunities", label: "Opportunities", icon: Megaphone, testid: "nav-opportunities" },
@@ -117,7 +120,7 @@ export default function Layout({ children }) {
                     <button
                       key={o.key}
                       type="button"
-                      className={`w-full text-left px-3 py-2 rounded text-[13px] ${displayMode === o.key ? "bg-[#3FA9F5]/15 text-white" : "text-slate-300 hover:bg-white/[0.04]"}`}
+                      className={`w-full text-left px-3 py-2 rounded text-[13px] ${displayMode === o.key ? "bg-[#3FA9F5]/15 text-[var(--text)]" : "text-[var(--text-muted)] hover:bg-black/5"}`}
                       onClick={() => {
                         const m = applyDisplayMode(o.key);
                         setDisplayMode(m);
@@ -147,7 +150,7 @@ export function PageHead({ title, subtitle, actions, breadcrumbs }) {
           <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-2">
             {breadcrumbs.map((b, i) => (
               <React.Fragment key={i}>
-                {b.to ? <Link className="hover:text-white" to={b.to}>{b.label}</Link> : <span>{b.label}</span>}
+                    {b.to ? <Link className="hover:text-[var(--text)]" to={b.to}>{b.label}</Link> : <span>{b.label}</span>}
                 {i < breadcrumbs.length - 1 && <CaretRight size={12} />}
               </React.Fragment>
             ))}

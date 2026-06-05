@@ -111,6 +111,58 @@ def tenant_scope(tenant_id: str) -> dict:
     return {"tenant_id": tenant_id}
 
 
+def _parse_iso_date(v: str) -> Optional[str]:
+    s = str(v or "").strip()
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s).date().isoformat()
+    except Exception:
+        try:
+            return datetime.fromisoformat(s.split("T", 1)[0]).date().isoformat()
+        except Exception:
+            return None
+
+
+def _default_last_30_days() -> tuple[str, str]:
+    end = utcnow().date().isoformat()
+    start = (utcnow().date() - timedelta(days=30)).isoformat()
+    return start, end
+
+
+def _day_bounds(start_date: str, end_date: str) -> tuple[str, str]:
+    s = _parse_iso_date(start_date) or _default_last_30_days()[0]
+    e = _parse_iso_date(end_date) or _default_last_30_days()[1]
+    return f"{s}T00:00:00", f"{e}T23:59:59.999999"
+
+
+async def _require_client_access(ctx, client_id: str) -> dict:
+    doc = await db.clients.find_one({"_id": str(client_id), **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        raise HTTPException(404, "Client not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
+    return doc
+
+
+async def _require_meeting_access(ctx, meeting_id: str) -> dict:
+    doc = await db.meetings.find_one({"_id": str(meeting_id), **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        raise HTTPException(404, "Meeting not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
+    return doc
+
+
+async def _allowed_client_ids(ctx) -> Optional[List[str]]:
+    if ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin"):
+        return None
+    docs = await db.clients.find({"$and": [tenant_scope(ctx.tenant_id), {"account_manager_id": ctx.user.id}, {"status": "active"}]}).to_list(5000)
+    return [str(d.get("_id")) for d in (docs or []) if str(d.get("_id") or "").strip()]
+
+
 async def _bg_publish_clickup_brief(tenant_id: str, meeting_id: str) -> None:
     try:
         m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
@@ -1146,7 +1198,15 @@ async def get_client_suggestions(client_id: str, ctx=Depends(get_current_context
 
 
 @api.post("/clients/{client_id}/suggestions/generate")
-async def generate_client_suggestions(client_id: str, data: GenerateSuggestionsIn, ctx=Depends(get_current_context)):
+async def generate_client_suggestions(
+    client_id: str,
+    data: GenerateSuggestionsIn,
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    compare_start: str = Query(default=""),
+    compare_end: str = Query(default=""),
+    ctx=Depends(get_current_context),
+):
     c_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
     if not c_doc:
         raise HTTPException(404, "Client not found")
@@ -1156,7 +1216,24 @@ async def generate_client_suggestions(client_id: str, data: GenerateSuggestionsI
     client = Client.from_mongo(c_doc)
     client_d = client.model_dump()
 
-    kpi = await connectors.build_kpi_snapshot(ctx.tenant_id, client_id, client_d.get("company", ""), user_id=ctx.user.id)
+    start_d = _parse_iso_date(start or "") or _default_last_30_days()[0]
+    end_d = _parse_iso_date(end or "") or _default_last_30_days()[1]
+    cs = _parse_iso_date(compare_start or "")
+    ce = _parse_iso_date(compare_end or "")
+    period_start = datetime.fromisoformat(start_d).date()
+    period_end = datetime.fromisoformat(end_d).date()
+    comp_start = datetime.fromisoformat(cs).date() if cs else None
+    comp_end = datetime.fromisoformat(ce).date() if ce else None
+    kpi = await connectors.build_kpi_snapshot(
+        ctx.tenant_id,
+        client_id,
+        client_d.get("company", ""),
+        user_id=ctx.user.id,
+        period_start=period_start,
+        period_end=period_end,
+        compare_start=comp_start,
+        compare_end=comp_end,
+    )
     kpi_for_ai = copy.deepcopy(kpi)
 
     def scrub(o):
@@ -1658,16 +1735,17 @@ async def export_client_communications_pdf(client_id: str, ctx=Depends(get_curre
 async def list_meetings(client_id: Optional[str] = None, ctx=Depends(get_current_context)):
     q = {"$and": [tenant_scope(ctx.tenant_id)]}
     if client_id:
+        await _require_client_access(ctx, client_id)
         q["$and"].append({"client_id": client_id})
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        q["$and"].append({"account_manager_id": ctx.user.id})
     docs = await db.meetings.find(q).sort("created_at", -1).to_list(500)
     return [Meeting.from_mongo(d).model_dump() for d in docs]
 
 
 @api.post("/meetings")
 async def create_meeting(data: MeetingIn, ctx=Depends(get_current_context)):
-    client_doc = await db.clients.find_one({"_id": data.client_id, **tenant_scope(ctx.tenant_id)})
-    if not client_doc:
-        raise HTTPException(404, "Client not found")
+    client_doc = await _require_client_access(ctx, data.client_id)
     client = Client.from_mongo(client_doc)
     m = Meeting(
         tenant_id=ctx.tenant_id,
@@ -1686,9 +1764,7 @@ async def create_meeting(data: MeetingIn, ctx=Depends(get_current_context)):
 
 @api.post("/clients/{client_id}/monthly-touch")
 async def generate_monthly_touch(client_id: str, data: GenerateBriefIn, ctx=Depends(get_current_context)):
-    client_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
-    if not client_doc:
-        raise HTTPException(404, "Client not found")
+    await _require_client_access(ctx, client_id)
     try:
         meeting = await monthly_touch.generate_for_client(
             ctx.tenant_id,
@@ -1721,6 +1797,9 @@ async def get_meeting(meeting_id: str, ctx=Depends(get_current_context)):
     doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
     if not doc:
         raise HTTPException(404, "Meeting not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
     return Meeting.from_mongo(doc).model_dump()
 
 
@@ -1729,6 +1808,9 @@ async def export_meeting_html(meeting_id: str, ctx=Depends(get_current_context))
     doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
     if not doc:
         raise HTTPException(404, "Meeting not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
     m = Meeting.from_mongo(doc)
 
     def esc(s: Any) -> str:
@@ -1791,6 +1873,12 @@ async def export_meeting_html(meeting_id: str, ctx=Depends(get_current_context))
 
 @api.patch("/meetings/{meeting_id}")
 async def update_meeting(meeting_id: str, patch: MeetingPatch, ctx=Depends(get_current_context)):
+    doc0 = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    if not doc0:
+        raise HTTPException(404, "Meeting not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(doc0.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
     update = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
     update["updated_at"] = utcnow().isoformat()
     updated_feedback = False
@@ -1909,6 +1997,7 @@ async def update_meeting(meeting_id: str, patch: MeetingPatch, ctx=Depends(get_c
 
 @api.delete("/meetings/{meeting_id}")
 async def delete_meeting(meeting_id: str, ctx=Depends(get_current_context)):
+    await _require_meeting_access(ctx, meeting_id)
     res = await db.meetings.delete_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
     if res.deleted_count == 0:
         raise HTTPException(404, "Meeting not found")
@@ -1918,15 +2007,43 @@ async def delete_meeting(meeting_id: str, ctx=Depends(get_current_context)):
 
 
 @api.post("/meetings/{meeting_id}/generate-brief")
-async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get_current_context)):
+async def generate_brief(
+    meeting_id: str,
+    data: GenerateBriefIn,
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    compare_start: str = Query(default=""),
+    compare_end: str = Query(default=""),
+    ctx=Depends(get_current_context),
+):
     m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
     if not m_doc:
         raise HTTPException(404, "Meeting not found")
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        if str(m_doc.get("account_manager_id") or "") != str(ctx.user.id):
+            raise HTTPException(403, "Forbidden")
     meeting = Meeting.from_mongo(m_doc)
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
     client_d = client.model_dump() if client else {"name": meeting.client_name}
-    kpi = await connectors.build_kpi_snapshot(ctx.tenant_id, meeting.client_id, client_d.get("company", ""), user_id=ctx.user.id)
+    start_d = _parse_iso_date(start or "") or _default_last_30_days()[0]
+    end_d = _parse_iso_date(end or "") or _default_last_30_days()[1]
+    cs = _parse_iso_date(compare_start or "")
+    ce = _parse_iso_date(compare_end or "")
+    period_start = datetime.fromisoformat(start_d).date()
+    period_end = datetime.fromisoformat(end_d).date()
+    comp_start = datetime.fromisoformat(cs).date() if cs else None
+    comp_end = datetime.fromisoformat(ce).date() if ce else None
+    kpi = await connectors.build_kpi_snapshot(
+        ctx.tenant_id,
+        meeting.client_id,
+        client_d.get("company", ""),
+        user_id=ctx.user.id,
+        period_start=period_start,
+        period_end=period_end,
+        compare_start=comp_start,
+        compare_end=comp_end,
+    )
     kpi_for_ai = copy.deepcopy(kpi)
 
     def scrub(o):
@@ -2003,9 +2120,7 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get
 
 @api.post("/meetings/{meeting_id}/google-meet/sync-transcript")
 async def sync_google_meet_transcript(meeting_id: str, ctx=Depends(get_current_context)):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
     res = await connectors.sync_google_meet_transcript_to_meeting(ctx.tenant_id, ctx.user.id, meeting.model_dump())
     if not res.get("ok"):
@@ -2028,9 +2143,7 @@ async def sync_google_meet_transcript(meeting_id: str, ctx=Depends(get_current_c
 
 @api.post("/meetings/{meeting_id}/analyze-transcript")
 async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Depends(get_current_context)):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
@@ -2136,9 +2249,7 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
 
 @api.post("/meetings/{meeting_id}/generate-recap")
 async def generate_recap(meeting_id: str, data: GenerateRecapIn, ctx=Depends(get_current_context)):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
@@ -2182,6 +2293,7 @@ async def generate_recap(meeting_id: str, data: GenerateRecapIn, ctx=Depends(get
 
 @api.get("/feedback/{client_id}/trend")
 async def feedback_trend(client_id: str, limit: int = 24, ctx=Depends(get_current_context)):
+    await _require_client_access(ctx, client_id)
     limit = max(1, min(int(limit or 24), 60))
     m_docs = await db.meetings.find(
         {"$and": [tenant_scope(ctx.tenant_id), {"client_id": client_id}, {"feedback": {"$exists": True, "$ne": None}}]}
@@ -2209,6 +2321,7 @@ async def feedback_trend(client_id: str, limit: int = 24, ctx=Depends(get_curren
 
 @api.get("/health/{client_id}/trend")
 async def health_trend(client_id: str, limit: int = 24, ctx=Depends(get_current_context)):
+    await _require_client_access(ctx, client_id)
     limit = max(1, min(int(limit or 24), 60))
     m_docs = await db.meetings.find(
         {
@@ -2252,20 +2365,122 @@ async def health_trend(client_id: str, limit: int = 24, ctx=Depends(get_current_
     }
 
 
+@api.get("/wins/library")
+async def wins_library(
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    client_id: str = Query(default=""),
+    account_manager_id: str = Query(default=""),
+    q: str = Query(default=""),
+    limit: int = Query(default=500, ge=1, le=2000),
+    ctx=Depends(get_current_context),
+):
+    d0, d1 = _default_last_30_days()
+    start_ts, end_ts = _day_bounds(start or d0, end or d1)
+    query: dict = {"$and": [tenant_scope(ctx.tenant_id), {"wins_library": {"$exists": True, "$ne": []}}]}
+    query["$and"].append({"brief_generated_at": {"$gte": start_ts, "$lte": end_ts}})
+
+    if client_id:
+        await _require_client_access(ctx, client_id)
+        query["$and"].append({"client_id": client_id})
+
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        query["$and"].append({"account_manager_id": ctx.user.id})
+    elif account_manager_id:
+        query["$and"].append({"account_manager_id": account_manager_id})
+
+    docs = await db.meetings.find(query).sort("brief_generated_at", -1).limit(limit).to_list(limit)
+    needle = _norm_text(q)
+    out = []
+    for d in docs or []:
+        for w in (d.get("wins_library") or []):
+            if not isinstance(w, dict):
+                continue
+            title = str(w.get("title") or "")
+            desc = str(w.get("description") or "")
+            metric = str(w.get("metric") or "")
+            blob = _norm_text(f"{title} {desc} {metric}")
+            if needle and needle not in blob:
+                continue
+            out.append(
+                {
+                    "meeting_id": d.get("_id"),
+                    "meeting_title": d.get("title") or "",
+                    "brief_generated_at": d.get("brief_generated_at") or d.get("updated_at") or d.get("created_at"),
+                    "scheduled_at": d.get("scheduled_at"),
+                    "client_id": d.get("client_id"),
+                    "client_name": d.get("client_name") or "",
+                    "account_manager_id": d.get("account_manager_id"),
+                    "account_manager_name": d.get("account_manager_name"),
+                    "win": w,
+                }
+            )
+    return {"ok": True, "start": start_ts, "end": end_ts, "count": len(out), "items": out}
+
+
+@api.get("/issues/library")
+async def issues_library(
+    start: str = Query(default=""),
+    end: str = Query(default=""),
+    client_id: str = Query(default=""),
+    account_manager_id: str = Query(default=""),
+    q: str = Query(default=""),
+    limit: int = Query(default=500, ge=1, le=2000),
+    ctx=Depends(get_current_context),
+):
+    d0, d1 = _default_last_30_days()
+    start_ts, end_ts = _day_bounds(start or d0, end or d1)
+    query: dict = {"$and": [tenant_scope(ctx.tenant_id), {"issues_library": {"$exists": True, "$ne": []}}]}
+    query["$and"].append({"brief_generated_at": {"$gte": start_ts, "$lte": end_ts}})
+
+    if client_id:
+        await _require_client_access(ctx, client_id)
+        query["$and"].append({"client_id": client_id})
+
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        query["$and"].append({"account_manager_id": ctx.user.id})
+    elif account_manager_id:
+        query["$and"].append({"account_manager_id": account_manager_id})
+
+    docs = await db.meetings.find(query).sort("brief_generated_at", -1).limit(limit).to_list(limit)
+    needle = _norm_text(q)
+    out = []
+    for d in docs or []:
+        for it in (d.get("issues_library") or []):
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or "")
+            desc = str(it.get("description") or "")
+            plan = str(it.get("action_plan") or "")
+            blob = _norm_text(f"{title} {desc} {plan}")
+            if needle and needle not in blob:
+                continue
+            out.append(
+                {
+                    "meeting_id": d.get("_id"),
+                    "meeting_title": d.get("title") or "",
+                    "brief_generated_at": d.get("brief_generated_at") or d.get("updated_at") or d.get("created_at"),
+                    "scheduled_at": d.get("scheduled_at"),
+                    "client_id": d.get("client_id"),
+                    "client_name": d.get("client_name") or "",
+                    "account_manager_id": d.get("account_manager_id"),
+                    "account_manager_name": d.get("account_manager_name"),
+                    "issue": it,
+                }
+            )
+    return {"ok": True, "start": start_ts, "end": end_ts, "count": len(out), "items": out}
+
+
 @api.get("/meetings/{meeting_id}/automation")
 async def get_meeting_automation(meeting_id: str, ctx=Depends(get_current_context)):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
     return {"ok": True, "draft": meeting.automation_draft, "generated_at": meeting.automation_draft_generated_at, "approved_at": meeting.automation_approved_at}
 
 
 @api.post("/meetings/{meeting_id}/automation/generate")
 async def generate_meeting_automation(meeting_id: str, ctx=Depends(get_current_context)):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
     if not (meeting.transcript or "").strip():
         raise HTTPException(400, "Missing transcript")
@@ -2342,6 +2557,7 @@ async def approve_meeting_automation(meeting_id: str, ctx=Depends(get_current_co
 
 @api.get("/meetings/{meeting_id}/qa")
 async def get_meeting_qa(meeting_id: str, ctx=Depends(get_current_context)):
+    await _require_meeting_access(ctx, meeting_id)
     doc = await db.qa_scorecards.find_one({"$and": [{"meeting_id": meeting_id}, tenant_scope(ctx.tenant_id)]}, sort=[("created_at", -1)])
     if not doc:
         return {"ok": True, "scorecard": None}
@@ -2350,9 +2566,7 @@ async def get_meeting_qa(meeting_id: str, ctx=Depends(get_current_context)):
 
 @api.post("/meetings/{meeting_id}/qa/score")
 async def score_meeting(meeting_id: str, ctx=Depends(get_current_context)):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
     if not (meeting.transcript or "").strip():
         raise HTTPException(400, "Missing transcript")
@@ -2398,7 +2612,11 @@ async def list_actions(
     ctx=Depends(get_current_context),
 ):
     q: dict = {"$and": [tenant_scope(ctx.tenant_id)]}
+    allowed = await _allowed_client_ids(ctx)
+    if allowed is not None:
+        q["$and"].append({"client_id": {"$in": allowed}})
     if client_id:
+        await _require_client_access(ctx, client_id)
         q["$and"].append({"client_id": client_id})
     if meeting_id:
         q["$and"].append({"meeting_id": meeting_id})
@@ -2426,7 +2644,11 @@ async def action_follow_up(
     upcoming_end = (utcnow().date() + timedelta(days=upcoming_days)).isoformat()
 
     base: dict = {"$and": [tenant_scope(ctx.tenant_id)]}
+    allowed = await _allowed_client_ids(ctx)
+    if allowed is not None:
+        base["$and"].append({"client_id": {"$in": allowed}})
     if client_id:
+        await _require_client_access(ctx, client_id)
         base["$and"].append({"client_id": client_id})
     if meeting_id:
         base["$and"].append({"meeting_id": meeting_id})
@@ -2498,6 +2720,7 @@ async def action_remind(item_id: str, ctx=Depends(get_current_context)):
     doc = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     if not doc:
         raise HTTPException(404, "Not found")
+    await _require_client_access(ctx, str(doc.get("client_id") or ""))
     item = ActionItem.from_mongo(doc)
     patch = {
         "last_reminded_at": now,
@@ -2969,9 +3192,7 @@ async def discovery_library_delete(template_id: str, ctx=Depends(get_current_con
 
 @api.post("/meetings/{meeting_id}/discovery/generate")
 async def meeting_generate_discovery(meeting_id: str, ctx=Depends(get_current_context)):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
 
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
@@ -3211,6 +3432,7 @@ async def patch_roadmap_item(client_id: str, item_id: str, payload: RoadmapItemP
 
 @api.post("/action-items")
 async def create_action(data: ActionItemIn, ctx=Depends(get_current_context)):
+    await _require_client_access(ctx, data.client_id)
     item = ActionItem(tenant_id=ctx.tenant_id, **data.model_dump())
     await db.action_items.insert_one(item.to_mongo())
     return item.model_dump()
@@ -3218,16 +3440,22 @@ async def create_action(data: ActionItemIn, ctx=Depends(get_current_context)):
 
 @api.patch("/action-items/{item_id}")
 async def update_action(item_id: str, patch: dict, ctx=Depends(get_current_context)):
-    patch["updated_at"] = utcnow().isoformat()
-    res = await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-    if res.matched_count == 0:
+    doc0 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    if not doc0:
         raise HTTPException(404, "Not found")
+    await _require_client_access(ctx, str(doc0.get("client_id") or ""))
+    patch["updated_at"] = utcnow().isoformat()
+    await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     doc = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     return ActionItem.from_mongo(doc).model_dump()
 
 
 @api.delete("/action-items/{item_id}")
 async def delete_action(item_id: str, ctx=Depends(get_current_context)):
+    doc0 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    if not doc0:
+        raise HTTPException(404, "Not found")
+    await _require_client_access(ctx, str(doc0.get("client_id") or ""))
     await db.action_items.delete_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     return {"ok": True}
 
@@ -3236,7 +3464,11 @@ async def delete_action(item_id: str, ctx=Depends(get_current_context)):
 @api.get("/content-captures")
 async def list_content(client_id: Optional[str] = None, ctx=Depends(get_current_context)):
     q = {"$and": [tenant_scope(ctx.tenant_id)]}
+    allowed = await _allowed_client_ids(ctx)
+    if allowed is not None:
+        q["$and"].append({"client_id": {"$in": allowed}})
     if client_id:
+        await _require_client_access(ctx, client_id)
         q["$and"].append({"client_id": client_id})
     docs = await db.content_captures.find(q).sort("created_at", -1).to_list(500)
     return [ContentCapture.from_mongo(d).model_dump() for d in docs]
@@ -3244,6 +3476,7 @@ async def list_content(client_id: Optional[str] = None, ctx=Depends(get_current_
 
 @api.post("/content-captures")
 async def create_content(data: ContentCaptureIn, ctx=Depends(get_current_context)):
+    await _require_client_access(ctx, data.client_id)
     cc = ContentCapture(tenant_id=ctx.tenant_id, **data.model_dump())
     await db.content_captures.insert_one(cc.to_mongo())
     return cc.model_dump()
@@ -3251,16 +3484,22 @@ async def create_content(data: ContentCaptureIn, ctx=Depends(get_current_context
 
 @api.patch("/content-captures/{cap_id}")
 async def update_content(cap_id: str, patch: dict, ctx=Depends(get_current_context)):
-    patch["updated_at"] = utcnow().isoformat()
-    res = await db.content_captures.update_one({"_id": cap_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-    if res.matched_count == 0:
+    doc0 = await db.content_captures.find_one({"_id": cap_id, **tenant_scope(ctx.tenant_id)})
+    if not doc0:
         raise HTTPException(404, "Not found")
+    await _require_client_access(ctx, str(doc0.get("client_id") or ""))
+    patch["updated_at"] = utcnow().isoformat()
+    await db.content_captures.update_one({"_id": cap_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     doc = await db.content_captures.find_one({"_id": cap_id, **tenant_scope(ctx.tenant_id)})
     return ContentCapture.from_mongo(doc).model_dump()
 
 
 @api.delete("/content-captures/{cap_id}")
 async def delete_content(cap_id: str, ctx=Depends(get_current_context)):
+    doc0 = await db.content_captures.find_one({"_id": cap_id, **tenant_scope(ctx.tenant_id)})
+    if not doc0:
+        raise HTTPException(404, "Not found")
+    await _require_client_access(ctx, str(doc0.get("client_id") or ""))
     await db.content_captures.delete_one({"_id": cap_id, **tenant_scope(ctx.tenant_id)})
     return {"ok": True}
 
@@ -3610,8 +3849,8 @@ async def docs_detail(slug: str, ctx=Depends(get_current_context)):
 async def dashboard_overview(ctx=Depends(get_current_context)):
     now = utcnow()
     now_iso = now.isoformat()
-    start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    start_month_iso = start_month.isoformat()
+    d0, d1 = _default_last_30_days()
+    start_30_ts, end_30_ts = _day_bounds(d0, d1)
 
     total_clients = await db.clients.count_documents(tenant_scope(ctx.tenant_id))
     churn_risk_high = await db.clients.count_documents({"$and": [tenant_scope(ctx.tenant_id), {"churn_risk": "high"}]})
@@ -3632,7 +3871,7 @@ async def dashboard_overview(ctx=Depends(get_current_context)):
         avg_health_score = 0
 
     meetings_this_month = await db.meetings.count_documents(
-        {"$and": [tenant_scope(ctx.tenant_id), {"created_at": {"$gte": start_month_iso}}]}
+        {"$and": [tenant_scope(ctx.tenant_id), {"created_at": {"$gte": start_30_ts, "$lte": end_30_ts}}]}
     )
 
     open_action_items = await db.action_items.count_documents(

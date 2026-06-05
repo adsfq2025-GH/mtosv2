@@ -33,6 +33,10 @@ export const auth = {
   me: () => api.get("/auth/me").then((r) => r.data),
 };
 
+export const users = {
+  list: () => api.get("/users").then((r) => r.data),
+};
+
 export const clients = {
   list: () => api.get("/clients").then((r) => r.data),
   create: (data) => api.post("/clients", data).then((r) => r.data),
@@ -117,6 +121,31 @@ export const feedback = {
 export const health = {
   trend: (clientId, limit = 24) =>
     api.get(`/health/${encodeURIComponent(clientId)}/trend?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
+};
+
+export const libraries = {
+  wins: ({ start = "", end = "", clientId = "", accountManagerId = "", q = "", limit = 500 } = {}) => {
+    const params = new URLSearchParams();
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    if (clientId) params.set("client_id", clientId);
+    if (accountManagerId) params.set("account_manager_id", accountManagerId);
+    if (q) params.set("q", q);
+    if (limit) params.set("limit", String(limit));
+    const qs = params.toString();
+    return api.get(`/wins/library${qs ? `?${qs}` : ""}`).then((r) => r.data);
+  },
+  issues: ({ start = "", end = "", clientId = "", accountManagerId = "", q = "", limit = 500 } = {}) => {
+    const params = new URLSearchParams();
+    if (start) params.set("start", start);
+    if (end) params.set("end", end);
+    if (clientId) params.set("client_id", clientId);
+    if (accountManagerId) params.set("account_manager_id", accountManagerId);
+    if (q) params.set("q", q);
+    if (limit) params.set("limit", String(limit));
+    const qs = params.toString();
+    return api.get(`/issues/library${qs ? `?${qs}` : ""}`).then((r) => r.data);
+  },
 };
 
 export const contentCaptures = {

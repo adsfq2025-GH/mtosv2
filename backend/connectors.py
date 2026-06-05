@@ -57,11 +57,17 @@ def _last_30_days_range() -> Tuple[date, date]:
     return start, end
 
 
-def _period_meta() -> Dict[str, Any]:
-    cur_start, cur_end = _last_30_days_range()
+def _period_meta(
+    cur_start: Optional[date] = None,
+    cur_end: Optional[date] = None,
+    prev_start: Optional[date] = None,
+    prev_end: Optional[date] = None,
+) -> Dict[str, Any]:
+    cur_start = cur_start or _last_30_days_range()[0]
+    cur_end = cur_end or _last_30_days_range()[1]
     delta_days = max((cur_end - cur_start).days, 1)
-    prev_end = cur_start - timedelta(days=1)
-    prev_start = prev_end - timedelta(days=delta_days)
+    prev_end = prev_end or (cur_start - timedelta(days=1))
+    prev_start = prev_start or (prev_end - timedelta(days=delta_days))
 
     def month_label(d: date) -> str:
         return d.strftime("%b %Y")
@@ -69,7 +75,7 @@ def _period_meta() -> Dict[str, Any]:
     return {
         "current": {"start": cur_start.isoformat(), "end": cur_end.isoformat(), "label": month_label(cur_end)},
         "comparison": {"start": prev_start.isoformat(), "end": prev_end.isoformat(), "label": month_label(prev_end)},
-        "kind": "last_30_days_vs_prior_30_days",
+        "kind": f"days_{delta_days}_vs_prior_{delta_days}",
     }
 
 
@@ -99,7 +105,7 @@ def _safe_err_detail(resp: httpx.Response) -> str:
         return (resp.text or "")[:300]
 
 
-async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[str, Any]:
+async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict, start_d: Optional[date] = None, end_d: Optional[date] = None) -> Dict[str, Any]:
     token = _strip_bearer((creds or {}).get("api_token", ""))
     team_id = (
         (binding.get("external_ids") or {}).get("team_id")
@@ -120,7 +126,7 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[st
         if not team_id:
             return {"error": "clickup_missing_team_id", "error_detail": "Missing ClickUp workspace/team_id. Set it in Integrations → ClickUp."}
 
-    start_d, _ = _last_30_days_range()
+    start_d = start_d or _last_30_days_range()[0]
     date_updated_gt = str(int(start_d.replace(tzinfo=timezone.utc).timestamp() * 1000))
     url = f"https://api.clickup.com/api/v2/team/{team_id}/task"
     params = [
@@ -180,7 +186,7 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict) -> Dict[st
     }
 
 
-async def fetch_gohighlevel_monthly(tenant_id: str, binding: dict) -> Dict[str, Any]:
+async def fetch_gohighlevel_monthly(tenant_id: str, binding: dict, start_d: Optional[date] = None, end_d: Optional[date] = None) -> Dict[str, Any]:
     location_id = (
         (binding.get("external_ids") or {}).get("location_id")
         or (binding.get("config") or {}).get("location_id")
@@ -189,7 +195,8 @@ async def fetch_gohighlevel_monthly(tenant_id: str, binding: dict) -> Dict[str, 
     if not api_key or not location_id:
         return {}
 
-    start_d, end_d = _last_30_days_range()
+    if not start_d or not end_d:
+        start_d, end_d = _last_30_days_range()
     url = "https://services.leadconnectorhq.com/opportunities/search"
     headers = _ghl_headers(api_key, location_id=str(location_id))
 
@@ -275,7 +282,7 @@ def _normalize_customer_id(v: Any) -> str:
     return s.replace("-", "").replace(" ", "")
 
 
-async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict) -> Dict[str, Any]:
+async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict, start_d: Optional[date] = None, end_d: Optional[date] = None) -> Dict[str, Any]:
     developer_token = (creds or {}).get("developer_token")
     if not developer_token:
         return {}
@@ -289,7 +296,8 @@ async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict) -> Dict
         return {"error": "google_ads_missing_customer_id", "error_detail": "Missing Google Ads customer_id for this client."}
 
     access_token = await _google_ads_access_token(creds)
-    start_d, end_d = _last_30_days_range()
+    if not start_d or not end_d:
+        start_d, end_d = _last_30_days_range()
     q = (
         "SELECT metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions "
         f"FROM customer WHERE segments.date BETWEEN '{start_d.isoformat()}' AND '{end_d.isoformat()}'"
@@ -351,9 +359,20 @@ async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict) -> Dict
     }
 
 
-async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = "", user_id: Optional[str] = None) -> Dict[str, Any]:
+async def build_kpi_snapshot(
+    tenant_id: str,
+    client_id: str,
+    client_name: str = "",
+    user_id: Optional[str] = None,
+    period_start: Optional[date] = None,
+    period_end: Optional[date] = None,
+    compare_start: Optional[date] = None,
+    compare_end: Optional[date] = None,
+) -> Dict[str, Any]:
     snapshot = demo_kpi_snapshot(client_name)
-    snapshot["_period"] = _period_meta()
+    if not period_start or not period_end:
+        period_start, period_end = _last_30_days_range()
+    snapshot["_period"] = _period_meta(cur_start=period_start, cur_end=period_end, prev_start=compare_start, prev_end=compare_end)
 
     clickup_creds = await get_credentials(tenant_id, "clickup")
     clickup_binding = await get_client_binding(tenant_id, client_id, "clickup")
@@ -361,7 +380,7 @@ async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = 
         folder_id = ((clickup_binding or {}).get("external_ids") or {}).get("folder_id") or ((clickup_binding or {}).get("config") or {}).get("folder_id")
         if clickup_binding and folder_id:
             try:
-                clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding)
+                clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding, start_d=period_start, end_d=period_end)
                 if clickup_data:
                     snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
             except Exception as exc:
@@ -373,7 +392,7 @@ async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = 
     ghl_api_key = await _gohighlevel_base_api_key(tenant_id)
     if ghl_api_key:
         try:
-            ghl_data = await fetch_gohighlevel_monthly(tenant_id, ghl_binding or {"external_ids": {}, "config": {}})
+            ghl_data = await fetch_gohighlevel_monthly(tenant_id, ghl_binding or {"external_ids": {}, "config": {}}, start_d=period_start, end_d=period_end)
             if ghl_data:
                 snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
             else:
@@ -395,7 +414,7 @@ async def build_kpi_snapshot(tenant_id: str, client_id: str, client_name: str = 
             else:
                 merged = {**gads_creds, "refresh_token": rt}
                 try:
-                    gads_data = await fetch_google_ads_monthly(merged, gads_binding or {"external_ids": {}, "config": {}})
+                    gads_data = await fetch_google_ads_monthly(merged, gads_binding or {"external_ids": {}, "config": {}}, start_d=period_start, end_d=period_end)
                     if gads_data:
                         snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), **gads_data}
                 except Exception as exc:
