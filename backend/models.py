@@ -219,6 +219,8 @@ class ActionItem(BaseDocument):
     pushed_to: Optional[str] = None  # "clickup" | "ghl"
     external_id: Optional[str] = None
     external_url: Optional[str] = None
+    last_reminded_at: Optional[str] = None
+    reminder_count: int = 0
 
 
 class ActionItemIn(BaseModel):

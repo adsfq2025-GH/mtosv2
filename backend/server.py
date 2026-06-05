@@ -1951,6 +1951,9 @@ async def list_actions(
     client_id: Optional[str] = None,
     meeting_id: Optional[str] = None,
     status: Optional[str] = None,
+    owner_type: Optional[str] = None,
+    due_before: Optional[str] = None,
+    due_after: Optional[str] = None,
     ctx=Depends(get_current_context),
 ):
     q: dict = {"$and": [tenant_scope(ctx.tenant_id)]}
@@ -1960,9 +1963,109 @@ async def list_actions(
         q["$and"].append({"meeting_id": meeting_id})
     if status:
         q["$and"].append({"status": status})
+    if owner_type:
+        q["$and"].append({"owner_type": owner_type})
+    if due_before:
+        q["$and"].append({"due_date": {"$lte": due_before}})
+    if due_after:
+        q["$and"].append({"due_date": {"$gte": due_after}})
     docs = await db.action_items.find(q).sort("created_at", -1).to_list(1000)
     return [ActionItem.from_mongo(d).model_dump() for d in docs]
 
+
+@api.get("/action-items/follow-up")
+async def action_follow_up(
+    client_id: Optional[str] = None,
+    meeting_id: Optional[str] = None,
+    upcoming_days: int = 7,
+    ctx=Depends(get_current_context),
+):
+    today = utcnow().date().isoformat()
+    upcoming_days = max(1, min(int(upcoming_days or 7), 60))
+    upcoming_end = (utcnow().date() + timedelta(days=upcoming_days)).isoformat()
+
+    base: dict = {"$and": [tenant_scope(ctx.tenant_id)]}
+    if client_id:
+        base["$and"].append({"client_id": client_id})
+    if meeting_id:
+        base["$and"].append({"meeting_id": meeting_id})
+
+    active_statuses = ["open", "in_progress", "blocked"]
+    q_open = {"$and": base["$and"] + [{"status": {"$in": active_statuses}}]}
+    docs = await db.action_items.find(q_open).sort("due_date", 1).sort("created_at", -1).to_list(2000)
+    items = [ActionItem.from_mongo(d).model_dump() for d in docs]
+
+    client_ids = {it.get("client_id") for it in items if it.get("client_id")}
+    meeting_ids = {it.get("meeting_id") for it in items if it.get("meeting_id")}
+
+    clients_docs = await db.clients.find({"$and": [{"_id": {"$in": list(client_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if client_ids else []
+    meetings_docs = await db.meetings.find({"$and": [{"_id": {"$in": list(meeting_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if meeting_ids else []
+
+    client_name_by_id = {c.get("_id"): c.get("name") or c.get("company") or "Client" for c in clients_docs}
+    meeting_title_by_id = {m.get("_id"): m.get("title") or "Meeting" for m in meetings_docs}
+
+    def reminder_due(it: dict) -> bool:
+        due = it.get("due_date")
+        if not due:
+            return False
+        if due > upcoming_end:
+            return False
+        last = it.get("last_reminded_at") or ""
+        if last:
+            try:
+                last_date = str(last).split("T")[0]
+                if last_date >= today:
+                    return False
+            except Exception:
+                return False
+        return True
+
+    for it in items:
+        it["client_name"] = client_name_by_id.get(it.get("client_id")) or "Client"
+        it["meeting_title"] = meeting_title_by_id.get(it.get("meeting_id")) if it.get("meeting_id") else None
+        it["is_overdue"] = bool(it.get("due_date") and it.get("due_date") < today)
+        it["is_upcoming"] = bool(it.get("due_date") and today <= it.get("due_date") <= upcoming_end)
+        it["reminder_due"] = reminder_due(it)
+
+    client_pending = [it for it in items if it.get("owner_type") == "client" and it.get("status") != "completed"]
+    internal_pending = [it for it in items if it.get("owner_type") == "agency" and it.get("status") != "completed"]
+    overdue = [it for it in items if it.get("is_overdue")]
+    upcoming = [it for it in items if it.get("is_upcoming")]
+    reminders_due = [it for it in items if it.get("reminder_due")]
+
+    return {
+        "today": today,
+        "upcoming_end": upcoming_end,
+        "client_pending": client_pending,
+        "internal_pending": internal_pending,
+        "overdue": overdue,
+        "upcoming": upcoming,
+        "reminders_due": reminders_due,
+        "counts": {
+            "client_pending": len(client_pending),
+            "internal_pending": len(internal_pending),
+            "overdue": len(overdue),
+            "upcoming": len(upcoming),
+            "reminders_due": len(reminders_due),
+        },
+    }
+
+
+@api.post("/action-items/{item_id}/remind")
+async def action_remind(item_id: str, ctx=Depends(get_current_context)):
+    now = utcnow().isoformat()
+    doc = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        raise HTTPException(404, "Not found")
+    item = ActionItem.from_mongo(doc)
+    patch = {
+        "last_reminded_at": now,
+        "reminder_count": int((item.reminder_count or 0) + 1),
+        "updated_at": now,
+    }
+    await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+    doc2 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    return ActionItem.from_mongo(doc2).model_dump()
 
 @api.post("/action-items")
 async def create_action(data: ActionItemIn, ctx=Depends(get_current_context)):

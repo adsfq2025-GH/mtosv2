@@ -78,6 +78,11 @@ export const actionItems = {
   create: (data) => api.post("/action-items", data).then((r) => r.data),
   update: (id, patch) => api.patch(`/action-items/${id}`, patch).then((r) => r.data),
   remove: (id) => api.delete(`/action-items/${id}`).then((r) => r.data),
+  followUp: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return api.get(`/action-items/follow-up${q ? `?${q}` : ""}`).then((r) => r.data);
+  },
+  remind: (id) => api.post(`/action-items/${id}/remind`).then((r) => r.data),
 };
 
 export const contentCaptures = {

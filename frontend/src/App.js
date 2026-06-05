@@ -8,6 +8,7 @@ import Dashboard from "@/pages/Dashboard";
 import { ClientsList, ClientDetail } from "@/pages/Clients";
 import MeetingDetail from "@/pages/MeetingDetail";
 import { MeetingsList, Actions, Integrations, DocsHub } from "@/pages/Others";
+import FollowUp from "@/pages/FollowUp";
 import Opportunities from "@/pages/Opportunities";
 import Testimonials from "@/pages/Testimonials";
 import Strategy from "@/pages/Strategy";
@@ -40,6 +41,7 @@ export default function App() {
           <Route path="/meetings" element={<Protected><MeetingsList /></Protected>} />
           <Route path="/meetings/:id" element={<Protected><MeetingDetail /></Protected>} />
           <Route path="/actions" element={<Protected><Actions /></Protected>} />
+          <Route path="/follow-up" element={<Protected><FollowUp /></Protected>} />
           <Route path="/opportunities" element={<Protected><Opportunities /></Protected>} />
           <Route path="/testimonials" element={<Protected><Testimonials /></Protected>} />
           <Route path="/strategy" element={<Protected><Strategy /></Protected>} />

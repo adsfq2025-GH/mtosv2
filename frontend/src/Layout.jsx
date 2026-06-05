@@ -1,7 +1,7 @@
 import React from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import {
-  House, Users, CalendarCheck, CheckSquare, Megaphone, Plugs, BookOpen,
+  House, Users, CalendarCheck, CheckSquare, Megaphone, Plugs, BookOpen, Bell,
   SignOut, Sparkle, CaretRight, Trophy, Lightbulb, MagnifyingGlass,
 } from "@phosphor-icons/react";
 import { useAuth } from "./auth";
@@ -26,6 +26,7 @@ const NAV_BASE = [
   { to: "/clients", label: "Clients", icon: Users, testid: "nav-clients" },
   { to: "/meetings", label: "Meetings", icon: CalendarCheck, testid: "nav-meetings" },
   { to: "/actions", label: "Action Items", icon: CheckSquare, testid: "nav-actions" },
+  { to: "/follow-up", label: "Follow-Up", icon: Bell, testid: "nav-follow-up" },
   { to: "/opportunities", label: "Opportunities", icon: Megaphone, testid: "nav-opportunities" },
   { to: "/testimonials", label: "Testimonials", icon: Trophy, testid: "nav-testimonials" },
   { to: "/strategy", label: "Strategy", icon: Lightbulb, testid: "nav-strategy" },
@@ -40,7 +41,9 @@ export default function Layout({ children }) {
   const nav = React.useMemo(() => {
     const base = [...NAV_BASE];
     if (user?.role === "admin") {
-      base.splice(7, 0, { to: "/ai-visibility", label: "AI Visibility", icon: MagnifyingGlass, testid: "nav-ai-visibility" });
+      const idx = base.findIndex((x) => x.to === "/integrations");
+      const insertAt = idx === -1 ? base.length : idx;
+      base.splice(insertAt, 0, { to: "/ai-visibility", label: "AI Visibility", icon: MagnifyingGlass, testid: "nav-ai-visibility" });
     }
     return base;
   }, [user?.role]);

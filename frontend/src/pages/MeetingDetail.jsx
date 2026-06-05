@@ -865,7 +865,10 @@ export default function MeetingDetail() {
               })()}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                 <div className="card-flat p-5">
-                  <h3 className="font-semibold mb-3">Action Items ({actions.length})</h3>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-semibold">Action Items ({actions.length})</h3>
+                    <Link to={`/follow-up?meeting_id=${encodeURIComponent(id)}`} className="text-xs text-[#3FA9F5] hover:underline">Open follow-up</Link>
+                  </div>
                   {actions.length === 0 && <EmptyHint />}
                   <div className="space-y-2">
                     {actions.map((a) => (
