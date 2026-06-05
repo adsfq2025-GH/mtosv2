@@ -68,6 +68,7 @@ from models import (  # noqa: E402
     PromptTemplate,
     PromptTemplateIn,
     QAScorecard,
+    CampaignRecommendation,
     RegisterIn,
     TenantMembership,
     TenantSettings,
@@ -1533,9 +1534,9 @@ async def export_meeting_html(meeting_id: str, ctx=Depends(get_current_context))
   <p class="meta">{esc(m.client_name)} · {esc(m.scheduled_at or "Unscheduled")} · {esc(m.duration_minutes)} min</p>
 
   <div class="box">
-    <h2>3 Wins</h2>
+    <h2>Wins</h2>
     <ul>{wins or "<li>—</li>"}</ul>
-    <h2>2 Issues</h2>
+    <h2>Issues</h2>
     <ul>{issues or "<li>—</li>"}</ul>
   </div>
 
@@ -1625,6 +1626,7 @@ async def generate_brief(meeting_id: str, data: GenerateBriefIn, ctx=Depends(get
         "ace_up_the_sleeve": brief.get("ace_up_the_sleeve") or [],
         "testimonial_opportunity": brief["testimonial_opportunity"],
         "strategic_recommendations": brief["strategic_recommendations"],
+        "campaign_recommendations": brief.get("campaign_recommendations") or [],
         "health_signal": brief["health_signal"],
         "kpi_snapshot": kpi,
         "brief_generated_at": utcnow().isoformat(),

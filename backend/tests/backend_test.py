@@ -204,7 +204,7 @@ def test_generate_brief_default_model():
     r = requests.post(
         f"{API}/meetings/{state['meeting_id']}/generate-brief",
         headers=auth_headers(),
-        json={"model": "claude-sonnet-4-6", "extra_context": "Client has been with us 8 months. Strong NPS."},
+        json={"model": "gemini-direct", "extra_context": "Client has been with us 8 months. Strong NPS."},
         timeout=AI_TIMEOUT,
     )
     assert r.status_code == 200, r.text
@@ -214,13 +214,15 @@ def test_generate_brief_default_model():
     assert isinstance(data.get("issues"), list)
     assert len(data["wins"]) >= 1, f"expected at least 1 win, got {len(data['wins'])}: {data['wins']}"
     assert len(data["issues"]) >= 0
+    assert all(isinstance(x.get("solutions", []), list) for x in (data.get("issues") or []) if isinstance(x, dict))
+    assert isinstance(data.get("campaign_recommendations", []), list)
     assert isinstance(data.get("talking_points"), list) and len(data["talking_points"]) > 0
     assert isinstance(data.get("suggested_questions"), list) and len(data["suggested_questions"]) > 0
     assert isinstance(data.get("strategic_recommendations"), list)
     assert data.get("testimonial_opportunity")
     assert data.get("health_signal")
     assert data.get("kpi_snapshot") and "google_business_profile" in data["kpi_snapshot"]
-    assert data.get("brief_model") == "claude-sonnet-4-6"
+    assert data.get("brief_model") == "gemini-direct"
     assert data.get("status") == "prep"
 
 
@@ -248,7 +250,7 @@ def test_analyze_transcript():
     r = requests.post(
         f"{API}/meetings/{state['meeting_id']}/analyze-transcript",
         headers=auth_headers(),
-        json={"transcript": TRANSCRIPT, "model": "claude-sonnet-4-6"},
+        json={"transcript": TRANSCRIPT, "model": "gemini-direct"},
         timeout=AI_TIMEOUT,
     )
     assert r.status_code == 200, r.text
@@ -345,7 +347,7 @@ def test_generate_recap():
     r = requests.post(
         f"{API}/meetings/{state['meeting_id']}/generate-recap",
         headers=auth_headers(),
-        json={"model": "claude-sonnet-4-6"},
+        json={"model": "gemini-direct"},
         timeout=AI_TIMEOUT,
     )
     assert r.status_code == 200, r.text
@@ -453,9 +455,8 @@ def test_ai_models():
     r = requests.get(f"{API}/ai/models", headers=auth_headers(), timeout=DEFAULT_TIMEOUT)
     assert r.status_code == 200
     arr = r.json()
-    assert len(arr) == 3
     keys = {m["key"] for m in arr}
-    assert keys == {"claude-sonnet-4-6", "gpt-5.2", "gemini-3.1-pro-preview"}
+    assert {"gemini-direct", "llama-fast", "deepseek-fast", "gpt-premium"}.issubset(keys)
 
 
 # ========== CLEANUP ==========

@@ -93,6 +93,7 @@ function ModelSelect({ value, onChange }) {
 }
 
 const sevChip = (s) => s === "high" ? "chip-danger" : s === "low" ? "chip-success" : "chip-warn";
+const prioChip = (p) => p === "high" ? "chip-danger" : p === "low" ? "chip-success" : "chip-warn";
 
 export default function MeetingDetail() {
   const { id } = useParams();
@@ -341,6 +342,16 @@ export default function MeetingDetail() {
                     </div>
                     <div className="text-xs text-slate-300 mt-1.5">{iss.description}</div>
                     {iss.action_plan && <div className="text-xs text-slate-300 mt-2 p-2 rounded bg-[#3FA9F5]/10 border border-[#3FA9F5]/15"><strong className="text-[#3FA9F5]">Action plan:</strong> {iss.action_plan}</div>}
+                    {(iss.solutions || []).length > 0 && (
+                      <div className="mt-2 p-2 rounded bg-[#2FE0C2]/5 border border-[#2FE0C2]/15">
+                        <div className="text-[11px] mono text-[#2FE0C2] uppercase tracking-wider">Solutions</div>
+                        <ul className="mt-2 space-y-1 list-disc pl-5">
+                          {(iss.solutions || []).map((s, idx) => (
+                            <li key={idx} className="text-xs text-slate-300">{s}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -418,6 +429,32 @@ export default function MeetingDetail() {
               </div>
               <ul className="space-y-2 list-disc pl-5">{(m.strategic_recommendations || []).map((r, i) => <li key={i} className="text-sm text-slate-300">{r}</li>)}</ul>
               {(m.strategic_recommendations || []).length === 0 && <EmptyHint />}
+            </section>
+            <section className="card-flat p-5">
+              <div className="flex items-center gap-2 mb-3"><Robot size={18} weight="duotone" color="#F59E0B" /><h3 className="font-semibold">Campaign Recommendations</h3></div>
+              {(m.campaign_recommendations || []).length === 0 && <EmptyHint label="Generate the brief to get campaign-specific recommendations tied to performance." />}
+              <div className="space-y-3">
+                {(m.campaign_recommendations || []).map((rec, i) => (
+                  <div key={i} className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[10px] mono text-slate-400 uppercase tracking-wider">
+                          {(rec.platform || "other").replaceAll("_", " ")}{rec.campaign ? ` · ${rec.campaign}` : ""}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <ExplainDialog title={(rec.campaign || rec.platform || "Campaign recommendations")} explain={rec.explain} />
+                        <span className={`chip ${prioChip(rec.priority)}`}>{rec.priority || "medium"}</span>
+                      </div>
+                    </div>
+                    <ul className="mt-2 space-y-1 list-disc pl-5">
+                      {(rec.recommendations || []).map((r, idx) => (
+                        <li key={idx} className="text-sm text-slate-300">{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
             </section>
             <section className="card-flat p-5">
               <div className="label mb-2">Health Signal</div>

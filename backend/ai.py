@@ -354,7 +354,9 @@ Return a JSON object with EXACTLY this shape:
   ],
   "issues": [
     {{ "title": "...", "description": "what's happening, transparent but not alarming",
-       "action_plan": "what we're already doing + next step", "severity": "low|medium|high",
+       "action_plan": "what we're already doing + next step",
+       "solutions": ["solution 1", "solution 2"],
+       "severity": "low|medium|high",
        "explain": {{
          "source_used": "GBP Calls",
          "data_sources_analyzed": ["google_business_profile", "google_ads", "gohighlevel", "clickup"],
@@ -368,6 +370,22 @@ Return a JSON object with EXACTLY this shape:
   "issues_library": [
     {{ "title": "...", "description": "what's happening, transparent but not alarming",
        "action_plan": "what we're already doing + next step", "severity": "low|medium|high" }}
+  ],
+  "campaign_recommendations": [
+    {{
+      "platform": "seo|google_ads|meta_ads|google_business_profile|other",
+      "campaign": "campaign name or null",
+      "priority": "high|medium|low",
+      "recommendations": ["recommendation 1", "recommendation 2"],
+      "explain": {{
+        "source_used": "Google Ads CPL",
+        "data_sources_analyzed": ["google_ads", "google_business_profile", "gohighlevel", "clickup"],
+        "time_period": {{ "current": "May 2026", "comparison": "Apr 2026" }},
+        "logic_used": "Mapped KPI deltas to highest-leverage fixes",
+        "calculation": "CPL rose from $68 to $92 while conversions stayed flat; prioritize landing page + keyword pruning",
+        "confidence": 0
+      }}
+    }}
   ],
   "talking_points": [
     {{ "topic": "...", "angle": "how to frame it strategically in 1 sentence" }}
@@ -395,6 +413,9 @@ Return a JSON object with EXACTLY this shape:
 }}
 
 wins: as many as strongly supported by the KPI snapshot (typically 3-12) · issues: all important issues (typically 1-8) · talking_points: 4-10 items
+wins and issues must be ordered highest-impact first (lead volume / revenue / retention risk).
+issues: every issue MUST include a non-empty solutions array (1-3 items).
+campaign_recommendations: recommendations per campaign/deliverable, tied to KPI snapshot (typically 2-8 items). No generic fluff.
 wins_library: 8-15 items · issues_library: 6-12 items · talking_points_library: 10-18 items
 suggested_questions: 4-6 items (mix experience / emotional / outcome / future)
 strategic_recommendations: 3-5 items
@@ -417,10 +438,30 @@ async def generate_meeting_brief(
     )
     raw = await run_chat(BRIEF_SYSTEM, user_text, model_key, session_id)
     data = await _extract_or_repair_json(raw, model_key, session_id)
+
+    issues = data.get("issues") or []
+    if isinstance(issues, list):
+        for iss in issues:
+            if not isinstance(iss, dict):
+                continue
+            sols = iss.get("solutions")
+            if sols is None:
+                iss["solutions"] = []
+            elif isinstance(sols, str):
+                iss["solutions"] = [sols]
+            elif not isinstance(sols, list):
+                iss["solutions"] = []
+
+    campaign_recommendations = data.get("campaign_recommendations") or []
+    if isinstance(campaign_recommendations, dict):
+        campaign_recommendations = [campaign_recommendations]
+    if not isinstance(campaign_recommendations, list):
+        campaign_recommendations = []
+
     return {
         "wins":                      data.get("wins") or [],
         "wins_library":              data.get("wins_library") or (data.get("wins") or []),
-        "issues":                    data.get("issues") or [],
+        "issues":                    issues,
         "issues_library":            data.get("issues_library") or (data.get("issues") or []),
         "talking_points":            data.get("talking_points") or [],
         "talking_points_library":    data.get("talking_points_library") or [],
@@ -429,6 +470,7 @@ async def generate_meeting_brief(
         "ace_up_the_sleeve":         data.get("ace_up_the_sleeve") or [],
         "testimonial_opportunity":   data.get("testimonial_opportunity") or "",
         "strategic_recommendations": data.get("strategic_recommendations") or [],
+        "campaign_recommendations":  campaign_recommendations,
         "health_signal":             data.get("health_signal") or "",
         "_raw":                      raw if not data else None,
     }

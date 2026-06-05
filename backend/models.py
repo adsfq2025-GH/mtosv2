@@ -187,7 +187,16 @@ class Issue(BaseModel):
     title: str
     description: str
     action_plan: Optional[str] = None
+    solutions: List[str] = Field(default_factory=list)
     severity: Literal["low", "medium", "high"] = "medium"
+    explain: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CampaignRecommendation(BaseModel):
+    platform: Literal["seo", "google_ads", "meta_ads", "google_business_profile", "other"] = "other"
+    campaign: Optional[str] = None
+    priority: Literal["high", "medium", "low"] = "medium"
+    recommendations: List[str] = Field(default_factory=list)
     explain: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -273,6 +282,7 @@ class Meeting(BaseDocument):
     ace_up_the_sleeve: List[Dict[str, Any]] = Field(default_factory=list)
     testimonial_opportunity: Optional[str] = None
     strategic_recommendations: List[str] = Field(default_factory=list)
+    campaign_recommendations: List[CampaignRecommendation] = Field(default_factory=list)
     health_signal: Optional[str] = None
 
     automation_draft: Dict[str, Any] = Field(default_factory=dict)
