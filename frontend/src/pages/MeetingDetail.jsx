@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { meetings, aiModels, actionItems, contentCaptures } from "../api";
+import { meetings, aiModels, actionItems, contentCaptures, clients } from "../api";
 import { PageHead } from "../Layout";
 import {
   Sparkle, FileText, ChatCircle, Trophy, Warning, Lightbulb, Question, Megaphone,
@@ -95,9 +95,42 @@ function ModelSelect({ value, onChange }) {
 const sevChip = (s) => s === "high" ? "chip-danger" : s === "low" ? "chip-success" : "chip-warn";
 const prioChip = (p) => p === "high" ? "chip-danger" : p === "low" ? "chip-success" : "chip-warn";
 
+const _num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const _str = (v) => (v === null || v === undefined ? "" : String(v));
+const _fmtDeltaPct = (v) => {
+  const n = _num(v);
+  if (n === null) return "";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n}%`;
+};
+
+function MetricLine({ label, cur, prev, delta }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-1.5">
+      <div className="text-sm text-slate-200">{label}</div>
+      <div className="flex items-center gap-3 text-xs text-slate-300">
+        <span className="chip !bg-white/5 !border-white/10">{_str(cur || "—")}</span>
+        <span className="text-slate-500">vs</span>
+        <span className="chip !bg-white/5 !border-white/10">{_str(prev || "—")}</span>
+        {!!delta && <span className="chip !bg-[#3FA9F5]/10 !border-[#3FA9F5]/20 !text-[#9CCBFF]">{delta}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ReviewSection({ title, children }) {
+  return (
+    <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+      <div className="font-semibold text-sm">{title}</div>
+      <div className="mt-3 space-y-2">{children}</div>
+    </div>
+  );
+}
+
 export default function MeetingDetail() {
   const { id } = useParams();
   const [m, setM] = useState(null);
+  const [client, setClient] = useState(null);
   const [model, setModel] = useState("gemini-direct");
   const [tab, setTab] = useState("brief");
   const [transcript, setTranscript] = useState("");
@@ -109,6 +142,7 @@ export default function MeetingDetail() {
   const [checklist, setChecklist] = useState({});
   const [automation, setAutomation] = useState(null);
   const [qaScorecard, setQaScorecard] = useState(null);
+  const [reviewsDraft, setReviewsDraft] = useState({});
 
   const reload = useCallback(
     () => Promise.all([
@@ -125,6 +159,8 @@ export default function MeetingDetail() {
       if (meeting.recap_html) setRecap({ html: meeting.recap_html, plain: meeting.recap_email });
       setAutomation(autoRes);
       setQaScorecard(qaRes?.scorecard || null);
+      setReviewsDraft(meeting.deliverable_reviews || {});
+      clients.get(meeting.client_id).then(setClient).catch(() => setClient(null));
     }),
     [id],
   );
@@ -241,6 +277,31 @@ export default function MeetingDetail() {
     setChecklist(nl); await meetings.update(id, { checklist: nl });
   };
 
+  const setReviewNote = (deliverableKey, sectionKey, value) => {
+    setReviewsDraft((prev) => {
+      const next = { ...(prev || {}) };
+      const d = { ...(next[deliverableKey] || {}) };
+      const sections = { ...(d.sections || {}) };
+      sections[sectionKey] = value;
+      d.sections = sections;
+      next[deliverableKey] = d;
+      return next;
+    });
+  };
+
+  const saveReviews = async () => {
+    setBusy("save_reviews");
+    try {
+      const updated = await meetings.update(id, { deliverable_reviews: reviewsDraft });
+      setM(updated);
+      setReviewsDraft(updated.deliverable_reviews || {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save deliverable reviews");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const CHECKLIST_ITEMS = [
     ["wins", "Wins delivered"],
     ["issues", "Issues with action plan"],
@@ -281,6 +342,7 @@ export default function MeetingDetail() {
       <div className="flex items-center gap-1 mb-5 overflow-x-auto">
         {[
           { k: "brief", label: "Brief", icon: FileText },
+          { k: "reviews", label: "Reviews", icon: Megaphone },
           { k: "live", label: "Live Mode", icon: ListChecks },
           { k: "transcript", label: "Transcript & Analysis", icon: ChatCircle },
           { k: "analysis", label: "AI Findings", icon: Robot },
@@ -291,6 +353,195 @@ export default function MeetingDetail() {
           </button>
         ))}
       </div>
+
+      {/* REVIEWS TAB */}
+      {tab === "reviews" && (
+        <div className="space-y-5">
+          <div className="card-flat p-5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold">Deliverable Reviews</div>
+                <div className="text-xs text-slate-400 mt-1">
+                  Structured review sections per deliverable. Save notes so the meeting review is repeatable and consistent.
+                </div>
+              </div>
+              <button className="btn-primary" onClick={saveReviews} disabled={busy === "save_reviews"} type="button">
+                {busy === "save_reviews" ? "Saving…" : "Save Review Notes"}
+              </button>
+            </div>
+          </div>
+
+          {(() => {
+            const services = (client?.services || []).map((s) => String(s || "").toLowerCase());
+            const showSeo = !client || services.some((s) => s.includes("seo"));
+            const showGbp = !client || services.some((s) => s.includes("gbp") || s.includes("google business"));
+            const showGads = !client || services.some((s) => s.includes("google ads") || s.includes("ppc"));
+            const showMeta = !client || services.some((s) => s.includes("meta") || s.includes("facebook") || s.includes("instagram"));
+
+            const kpi = m?.kpi_snapshot || {};
+            const gbp = kpi.google_business_profile || {};
+            const map = kpi.map_checkins || {};
+            const gsc = kpi.google_search_console || {};
+            const ga = kpi.google_analytics || {};
+            const ahrefs = kpi.ahrefs || {};
+            const gads = kpi.google_ads || {};
+            const meta = kpi.meta_ads || {};
+            const clickup = kpi.clickup || {};
+
+            return (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                {showSeo && (
+                  <section className="card-flat p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2"><Lightbulb size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">SEO Review</h3></div>
+                      <span className="chip">SEO</span>
+                    </div>
+                    <div className="space-y-3">
+                      <ReviewSection title="SEO Structure">
+                        <div className="text-xs text-slate-400">{_str(ahrefs.competitor_gap || "—")}</div>
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.seo?.sections?.seo_structure || ""} onChange={(e) => setReviewNote("seo", "seo_structure", e.target.value)} placeholder="Notes: site architecture, service pages, city pages, schema, internal linking, technical blockers…" />
+                      </ReviewSection>
+                      <ReviewSection title="Rankings">
+                        <MetricLine label="Avg Grid Rank" cur={map?.avg_grid_rank?.value} prev={map?.avg_grid_rank?.previous} delta={_str(map?.avg_grid_rank?.delta)} />
+                        <MetricLine label="Top 3 %" cur={_str(map?.top_3_pct?.value)} prev={_str(map?.top_3_pct?.previous)} delta={_fmtDeltaPct(map?.top_3_pct?.delta_pct)} />
+                        <MetricLine label="Keywords Improved" cur={map?.keywords_improved} prev="" delta="" />
+                        <MetricLine label="Keywords Dropped" cur={map?.keywords_dropped} prev="" delta="" />
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.seo?.sections?.rankings || ""} onChange={(e) => setReviewNote("seo", "rankings", e.target.value)} placeholder="Notes: keyword clusters, grid wins/losses, competitor movement, next ranking push…" />
+                      </ReviewSection>
+                      <ReviewSection title="Traffic">
+                        <MetricLine label="GSC Impressions" cur={gsc?.impressions?.value} prev="" delta={_fmtDeltaPct(gsc?.impressions?.delta_pct)} />
+                        <MetricLine label="GSC Clicks" cur={gsc?.clicks?.value} prev="" delta={_fmtDeltaPct(gsc?.clicks?.delta_pct)} />
+                        <MetricLine label="GA Sessions" cur={ga?.sessions?.value} prev="" delta={_fmtDeltaPct(ga?.sessions?.delta_pct)} />
+                        <MetricLine label="GA Conversions" cur={ga?.conversions?.value} prev="" delta={_fmtDeltaPct(ga?.conversions?.delta_pct)} />
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.seo?.sections?.traffic || ""} onChange={(e) => setReviewNote("seo", "traffic", e.target.value)} placeholder="Notes: traffic quality, conversion drivers, landing pages, CTA issues, form/call tracking…" />
+                      </ReviewSection>
+                      <ReviewSection title="Check-ins">
+                        <MetricLine label="Field Check-ins" cur={map?.field_checkins} prev="" delta="" />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.seo?.sections?.checkins || ""} onChange={(e) => setReviewNote("seo", "checkins", e.target.value)} placeholder="Notes: check-in cadence, grid coverage, location factors…" />
+                      </ReviewSection>
+                      <ReviewSection title="Reviews">
+                        <MetricLine label="New Reviews" cur={gbp?.new_reviews?.value} prev="" delta="" />
+                        <MetricLine label="Avg Rating" cur={gbp?.new_reviews?.avg_rating} prev="" delta="" />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.seo?.sections?.reviews || ""} onChange={(e) => setReviewNote("seo", "reviews", e.target.value)} placeholder="Notes: review velocity, response %, ask process, QR/follow-up plan…" />
+                      </ReviewSection>
+                      <ReviewSection title="Roadmap Progress">
+                        <div className="text-xs text-slate-400">ClickUp completed (30d): {_str(clickup?.tasks_completed_last_30d || "—")} · Overdue: {_str(clickup?.overdue || "—")} · Blocked: {_str(clickup?.blocked || "—")}</div>
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.seo?.sections?.roadmap_progress || ""} onChange={(e) => setReviewNote("seo", "roadmap_progress", e.target.value)} placeholder="Notes: 12-week roadmap progress, what shipped, what’s blocked, what’s next…" />
+                      </ReviewSection>
+                      <ReviewSection title="Tasks">
+                        <div className="text-xs text-slate-400">Open action items in this meeting: {_str((actions || []).filter((x) => x.status !== "completed").length)}</div>
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.seo?.sections?.tasks || ""} onChange={(e) => setReviewNote("seo", "tasks", e.target.value)} placeholder="Notes: key tasks, owners, due dates, approvals needed…" />
+                      </ReviewSection>
+                    </div>
+                  </section>
+                )}
+
+                {showGads && (
+                  <section className="card-flat p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2"><Megaphone size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Google Ads Review</h3></div>
+                      <span className="chip">Google Ads</span>
+                    </div>
+                    <div className="space-y-3">
+                      <ReviewSection title="Campaign Structure">
+                        <div className="text-xs text-slate-400">{_str(gads?.issue || "—")}</div>
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.google_ads?.sections?.campaign_structure || ""} onChange={(e) => setReviewNote("google_ads", "campaign_structure", e.target.value)} placeholder="Notes: campaign/ad group structure, keyword match types, negatives, geo, schedule, tracking…" />
+                      </ReviewSection>
+                      <ReviewSection title="Spend">
+                        <MetricLine label="Spend" cur={gads?.spend?.value} prev="" delta={_fmtDeltaPct(gads?.spend?.delta_pct)} />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.google_ads?.sections?.spend || ""} onChange={(e) => setReviewNote("google_ads", "spend", e.target.value)} placeholder="Notes: pacing, budget shifts, wasted spend, opportunities…" />
+                      </ReviewSection>
+                      <ReviewSection title="Leads">
+                        <MetricLine label="Leads" cur={gads?.leads?.value} prev="" delta={_fmtDeltaPct(gads?.leads?.delta_pct)} />
+                        <MetricLine label="Qualified Leads" cur={gads?.qualified_leads} prev="" delta="" />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.google_ads?.sections?.leads || ""} onChange={(e) => setReviewNote("google_ads", "leads", e.target.value)} placeholder="Notes: lead mix, quality, attribution gaps, follow-up workflow…" />
+                      </ReviewSection>
+                      <ReviewSection title="Cost Per Lead">
+                        <MetricLine label="CPL" cur={gads?.cpl?.value} prev={gads?.cpl?.previous} delta={_str(gads?.cpl?.trend || "")} />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.google_ads?.sections?.cpl || ""} onChange={(e) => setReviewNote("google_ads", "cpl", e.target.value)} placeholder="Notes: CPL drivers, keyword pruning, landing page fixes, offer alignment…" />
+                      </ReviewSection>
+                      <ReviewSection title="Conversion Rate">
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.google_ads?.sections?.conversion_rate || ""} onChange={(e) => setReviewNote("google_ads", "conversion_rate", e.target.value)} placeholder="Notes: conversion rate, tracking integrity, landing page performance…" />
+                      </ReviewSection>
+                      <ReviewSection title="Call Quality">
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.google_ads?.sections?.call_quality || ""} onChange={(e) => setReviewNote("google_ads", "call_quality", e.target.value)} placeholder="Notes: call recordings findings, missed calls, lead handling, sales bottlenecks…" />
+                      </ReviewSection>
+                      <ReviewSection title="Offer Performance">
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.google_ads?.sections?.offer_performance || ""} onChange={(e) => setReviewNote("google_ads", "offer_performance", e.target.value)} placeholder="Notes: which offer/angle is winning, ad copy tests, extensions, promos…" />
+                      </ReviewSection>
+                      <ReviewSection title="Missing Offers">
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.google_ads?.sections?.missing_offers || ""} onChange={(e) => setReviewNote("google_ads", "missing_offers", e.target.value)} placeholder="Notes: missing offers, seasonal promos, upsells, service bundles to test…" />
+                      </ReviewSection>
+                    </div>
+                  </section>
+                )}
+
+                {showMeta && (
+                  <section className="card-flat p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2"><Robot size={18} weight="duotone" color="#818CF8" /><h3 className="font-semibold">Meta Ads Review</h3></div>
+                      <span className="chip">Meta</span>
+                    </div>
+                    <div className="space-y-3">
+                      <ReviewSection title="Reach">
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.meta_ads?.sections?.reach || ""} onChange={(e) => setReviewNote("meta_ads", "reach", e.target.value)} placeholder="Notes: reach, frequency, audience saturation, expansion opportunities…" />
+                      </ReviewSection>
+                      <ReviewSection title="Leads">
+                        <MetricLine label="Leads" cur={meta?.leads?.value} prev="" delta={_fmtDeltaPct(meta?.leads?.delta_pct)} />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.meta_ads?.sections?.leads || ""} onChange={(e) => setReviewNote("meta_ads", "leads", e.target.value)} placeholder="Notes: lead quality, lead form vs landing page, follow-up speed…" />
+                      </ReviewSection>
+                      <ReviewSection title="Cost Per Lead">
+                        <MetricLine label="CPL" cur={meta?.cpl?.value} prev={meta?.cpl?.previous} delta="" />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.meta_ads?.sections?.cpl || ""} onChange={(e) => setReviewNote("meta_ads", "cpl", e.target.value)} placeholder="Notes: CPL drivers, creative fatigue, audience refinement…" />
+                      </ReviewSection>
+                      <ReviewSection title="Creative Performance">
+                        <div className="text-xs text-slate-400">{_str(meta?.top_creative || "—")}</div>
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.meta_ads?.sections?.creative_performance || ""} onChange={(e) => setReviewNote("meta_ads", "creative_performance", e.target.value)} placeholder="Notes: top creatives, hooks, UGC needs, next tests…" />
+                      </ReviewSection>
+                      <ReviewSection title="Offer Performance">
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.meta_ads?.sections?.offer_performance || ""} onChange={(e) => setReviewNote("meta_ads", "offer_performance", e.target.value)} placeholder="Notes: best performing offers, promo ideas, message-market fit…" />
+                      </ReviewSection>
+                    </div>
+                  </section>
+                )}
+
+                {showGbp && (
+                  <section className="card-flat p-5">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="flex items-center gap-2"><Trophy size={18} weight="duotone" color="#F59E0B" /><h3 className="font-semibold">GBP Review</h3></div>
+                      <span className="chip">GBP</span>
+                    </div>
+                    <div className="space-y-3">
+                      <ReviewSection title="Calls">
+                        <MetricLine label="Calls" cur={gbp?.calls?.value} prev="" delta={_fmtDeltaPct(gbp?.calls?.delta_pct)} />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.gbp?.sections?.calls || ""} onChange={(e) => setReviewNote("gbp", "calls", e.target.value)} placeholder="Notes: call volume drivers, missed calls, tracking, next levers…" />
+                      </ReviewSection>
+                      <ReviewSection title="Direction Requests">
+                        <MetricLine label="Directions" cur={gbp?.direction_requests?.value} prev="" delta={_fmtDeltaPct(gbp?.direction_requests?.delta_pct)} />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.gbp?.sections?.direction_requests || ""} onChange={(e) => setReviewNote("gbp", "direction_requests", e.target.value)} placeholder="Notes: service area alignment, proximity signals, location relevance…" />
+                      </ReviewSection>
+                      <ReviewSection title="Views">
+                        <MetricLine label="Photo Views" cur={gbp?.photo_views?.value} prev="" delta={_fmtDeltaPct(gbp?.photo_views?.delta_pct)} />
+                        <MetricLine label="Website Clicks" cur={gbp?.website_clicks?.value} prev="" delta={_fmtDeltaPct(gbp?.website_clicks?.delta_pct)} />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.gbp?.sections?.views || ""} onChange={(e) => setReviewNote("gbp", "views", e.target.value)} placeholder="Notes: photo/post cadence, CTR, profile completeness, next actions…" />
+                      </ReviewSection>
+                      <ReviewSection title="Check-ins">
+                        <MetricLine label="Field Check-ins" cur={map?.field_checkins} prev="" delta="" />
+                        <textarea className="input !min-h-[70px]" value={reviewsDraft?.gbp?.sections?.checkins || ""} onChange={(e) => setReviewNote("gbp", "checkins", e.target.value)} placeholder="Notes: check-in strategy and coverage…" />
+                      </ReviewSection>
+                      <ReviewSection title="Reviews">
+                        <MetricLine label="New Reviews" cur={gbp?.new_reviews?.value} prev="" delta="" />
+                        <MetricLine label="Avg Rating" cur={gbp?.new_reviews?.avg_rating} prev="" delta="" />
+                        <textarea className="input !min-h-[90px]" value={reviewsDraft?.gbp?.sections?.reviews || ""} onChange={(e) => setReviewNote("gbp", "reviews", e.target.value)} placeholder="Notes: review requests, review response quality, velocity plan…" />
+                      </ReviewSection>
+                    </div>
+                  </section>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* BRIEF TAB */}
       {tab === "brief" && (

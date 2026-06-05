@@ -309,6 +309,7 @@ class Meeting(BaseDocument):
     # Scorecard
     meeting_score: Optional[int] = None
     checklist: Dict[str, bool] = Field(default_factory=dict)
+    deliverable_reviews: Dict[str, Any] = Field(default_factory=dict)
 
 
 class MeetingIn(BaseModel):
@@ -329,6 +330,7 @@ class MeetingPatch(BaseModel):
     transcript: Optional[str] = None
     checklist: Optional[Dict[str, bool]] = None
     meeting_score: Optional[int] = None
+    deliverable_reviews: Optional[Dict[str, Any]] = None
 
 
 # ===== INTEGRATIONS =====
