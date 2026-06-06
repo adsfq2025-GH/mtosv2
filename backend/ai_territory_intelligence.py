@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import ai_visibility
+import connectors
 from db import db, new_id, utcnow
 from models import ActionItem
 
@@ -38,35 +39,58 @@ def _extract_territory_from_query(q: str) -> Optional[str]:
     return t
 
 
-def _select_prompts(themes: List[dict], max_total: int) -> List[dict]:
-    buckets: Dict[str, List[dict]] = {"commercial": [], "local": [], "service": [], "location": [], "informational": [], "comparison": [], "recommendation": []}
-    for t in themes or []:
-        if not isinstance(t, dict):
-            continue
-        tname = str(t.get("name") or "").strip() or None
-        for p0 in (t.get("prompts") or []):
-            if not isinstance(p0, dict):
-                continue
-            q0 = str(p0.get("query") or "").strip()
-            if not q0:
-                continue
-            pk0 = str(p0.get("kind") or "").strip().lower() or "commercial"
-            if pk0 not in buckets:
-                pk0 = "commercial"
-            buckets[pk0].append({"query": q0, "prompt_kind": pk0, "theme": tname})
+def _address_to_market(addr: dict) -> str:
+    if not isinstance(addr, dict):
+        return ""
+    loc = str(addr.get("locality") or "").strip()
+    adm = str(addr.get("administrativeArea") or "").strip()
+    if loc and adm:
+        return f"{loc}, {adm}"
+    return loc or adm or ""
 
-    order = ["commercial", "service", "location", "local", "comparison", "recommendation", "informational"]
+
+def _build_verified_prompts(
+    *,
+    business_name: str,
+    domain: str,
+    services: List[str],
+    categories: List[str],
+    territories: List[str],
+    max_total: int,
+) -> List[dict]:
+    terr = [str(x or "").strip() for x in (territories or []) if str(x or "").strip()]
+    terr = list(dict.fromkeys(terr))[:25]
+    svcs = [str(x or "").strip() for x in (services or []) if str(x or "").strip()]
+    svcs = list(dict.fromkeys(svcs))[:15]
+    cats = [str(x or "").strip() for x in (categories or []) if str(x or "").strip()]
+    cats = list(dict.fromkeys(cats))[:6]
+    if not svcs and cats:
+        svcs = cats[:6]
+
+    if not terr:
+        return []
+
+    def add(bucket: List[dict], territory: str, q: str, kind: str):
+        if len(bucket) >= max_total:
+            return
+        bucket.append({"query": q, "prompt_kind": kind, "theme": "verified", "territory": territory})
+
     picked: List[dict] = []
-    i = 0
-    while len(picked) < max_total:
-        kind = order[i % len(order)]
-        i += 1
-        if not buckets.get(kind):
-            if all(len(v) == 0 for v in buckets.values()):
+    for t in terr:
+        for s in svcs[:8]:
+            add(picked, t, f"best {s} in {t}", "commercial")
+            add(picked, t, f"{s} near {t}", "local")
+            add(picked, t, f"top rated {s} in {t}", "local")
+            add(picked, t, f"who should I hire for {s} in {t}", "recommendation")
+            add(picked, t, f"how much does {s} cost in {t}", "informational")
+            if len(picked) >= max_total:
                 break
-            continue
-        picked.append(buckets[kind].pop(0))
-    return picked
+        if len(picked) >= max_total:
+            break
+    if not picked and business_name:
+        for t in terr[:10]:
+            add(picked, t, f"{business_name} in {t}", "brand")
+    return picked[:max_total]
 
 
 def _group_territories(prompts: List[dict], runs: List[dict]) -> Dict[str, Any]:
@@ -80,10 +104,8 @@ def _group_territories(prompts: List[dict], runs: List[dict]) -> Dict[str, Any]:
     terr: Dict[str, Dict[str, Any]] = {}
     for p in prompts or []:
         q = str(p.get("query") or "").strip()
-        if not q:
-            continue
-        territory = _extract_territory_from_query(q)
-        if not territory:
+        territory = str(p.get("territory") or "").strip() or _extract_territory_from_query(q) or ""
+        if not q or not territory:
             continue
         row = terr.get(territory) or {"territory": territory, "total": 0, "hits": 0, "visibility_score": 0.0, "sample_queries": []}
         row["total"] = int(row["total"]) + 1
@@ -149,10 +171,35 @@ def _scan_change(prev: Optional[dict], cur: dict) -> Dict[str, Any]:
     return {"has_prev": True, "changes": changes, "delta": {"visibility_score": dv, "market_rank_delta": dr}}
 
 
+def _confidence_from_sources(availability: Dict[str, Any]) -> Dict[str, Any]:
+    gbp_ok = bool((availability.get("google_business_profile") or {}).get("ok"))
+    website_ok = bool((availability.get("website") or {}).get("ok"))
+    sc_ok = bool((availability.get("search_console") or {}).get("ok"))
+    weights = {"google_business_profile": 0.6, "website": 0.25, "search_console": 0.15}
+    score = 0.0
+    score += weights["google_business_profile"] if gbp_ok else 0.0
+    score += weights["website"] if website_ok else 0.0
+    score += weights["search_console"] if sc_ok else 0.0
+    pct = int(round(score * 100))
+    level = "high" if pct >= 85 else "medium" if pct >= 60 else "low"
+    return {"percent": pct, "level": level, "availability": availability}
+
+
+async def _pick_google_business_profile_user_id(tenant_id: str, preferred_user_id: str) -> Optional[str]:
+    if preferred_user_id:
+        tok = await db.user_oauth_tokens.find_one({"tenant_id": tenant_id, "user_id": str(preferred_user_id), "platform": "google_business_profile"})
+        if tok:
+            return str(preferred_user_id)
+    tok = await db.user_oauth_tokens.find_one({"tenant_id": tenant_id, "platform": "google_business_profile"})
+    if tok:
+        return str(tok.get("user_id") or "")
+    return None
+
 async def run_ai_territory_scan_for_client(
     *,
     tenant_id: str,
     client_doc: dict,
+    user_id: Optional[str] = None,
     max_prompts: int,
     min_hours_between_scans: int = 24,
     force: bool = False,
@@ -160,12 +207,12 @@ async def run_ai_territory_scan_for_client(
 ) -> Dict[str, Any]:
     cfg_doc = await db.ai_visibility_configs.find_one({"$and": [{"client_id": str(client_doc.get("_id"))}, {"tenant_id": tenant_id}]})
     if not cfg_doc:
-        intel0 = await ai_visibility.generate_prompt_intelligence(client_doc)
+        intel0 = {}
         cfg = {
             "_id": new_id(),
             "tenant_id": tenant_id,
             "client_id": str(client_doc.get("_id")),
-            "market": str(intel0.get("market") or "").strip(),
+            "market": "",
             "keywords": [],
             "brand_override": None,
             "domain_override": None,
@@ -194,13 +241,61 @@ async def run_ai_territory_scan_for_client(
     if not bool(cfg_doc.get("enabled", True)):
         return {"ok": False, "error": "disabled", "error_detail": "AI visibility config is disabled"}
 
-    brand, domain = ai_visibility.infer_brand_and_domain(client_doc, cfg_doc.get("brand_override"), cfg_doc.get("domain_override"))
-    intel = await ai_visibility.generate_prompt_intelligence(client_doc)
-    market = str(intel.get("market") or cfg_doc.get("market") or "").strip()
-    themes = intel.get("themes") or []
-    prompts = _select_prompts(themes, max_total=max(5, min(int(max_prompts or 60), 200)))
+    client_id = str(client_doc.get("_id"))
+    picked_user_id = await _pick_google_business_profile_user_id(tenant_id, str(user_id or client_doc.get("account_manager_id") or ""))
+    gbp_profile = None
+    gbp_err = None
+    if picked_user_id:
+        gbp_res = await connectors.fetch_gbp_profile_for_client(tenant_id, user_id=picked_user_id, client_id=client_id)
+        if gbp_res.get("ok"):
+            gbp_profile = gbp_res
+        else:
+            gbp_err = gbp_res.get("error") or "gbp_error"
+
+    website_raw = str(client_doc.get("website") or "").strip()
+    website_ok = bool(website_raw)
+
+    availability = {
+        "google_business_profile": {"ok": bool(gbp_profile), "error": gbp_err, "binding": bool(await db.client_bindings.find_one({"$and": [{"tenant_id": tenant_id}, {"client_id": client_id}, {"platform": "google_business_profile"}, {"enabled": True}]}))},
+        "website": {"ok": website_ok},
+        "search_console": {"ok": False},
+        "citations": {"ok": False},
+        "competitors": {"ok": False},
+    }
+    conf = _confidence_from_sources(availability)
+
+    business_name = str((gbp_profile or {}).get("business_name") or client_doc.get("company") or client_doc.get("name") or "").strip()
+    brand = str(business_name or "").strip()
+    domain = ai_visibility.infer_brand_and_domain(client_doc, cfg_doc.get("brand_override"), cfg_doc.get("domain_override"))[1]
+
+    categories = (gbp_profile or {}).get("categories") or []
+    services = client_doc.get("services") or []
+    territories = (gbp_profile or {}).get("service_areas") or []
+    if not territories and gbp_profile and isinstance((gbp_profile or {}).get("storefront_address"), dict):
+        mkt = _address_to_market((gbp_profile or {}).get("storefront_address") or {})
+        if mkt:
+            territories = [mkt]
+    if not territories and isinstance(client_doc.get("gbp_data"), dict):
+        addr = (client_doc.get("gbp_data") or {}).get("storefrontAddress") or {}
+        mkt = _address_to_market(addr if isinstance(addr, dict) else {})
+        if mkt:
+            territories = [mkt]
+
+    prompts = _build_verified_prompts(
+        business_name=business_name,
+        domain=domain,
+        services=services if isinstance(services, list) else [],
+        categories=categories if isinstance(categories, list) else [],
+        territories=territories if isinstance(territories, list) else [],
+        max_total=max(10, min(int(max_prompts or 60), 200)),
+    )
     if not prompts:
-        return {"ok": False, "error": "no_prompts", "error_detail": "Prompt generation failed (no prompts)"}
+        return {
+            "ok": False,
+            "error": "data_not_available",
+            "error_detail": "Data Not Available: missing verified service areas (GBP Service Areas or verified address city/state). Connect GBP or add verified service areas.",
+            "data_confidence": conf,
+        }
 
     providers = _available_providers()
     if not providers:
@@ -216,14 +311,14 @@ async def run_ai_territory_scan_for_client(
         for p in providers:
             per_provider[p]["total"] += 1
             try:
-                r = await ai_visibility.scan_keyword(provider=p, keyword=it["query"], market=market, brand=brand, domain=domain)
+                r = await ai_visibility.scan_keyword(provider=p, keyword=it["query"], market="", brand=brand, domain=domain)
                 run_doc = {
                     "_id": new_id(),
                     "tenant_id": tenant_id,
                     "config_id": config_id,
                     "client_id": client_id,
                     "scan_id": scan_id,
-                    "market": market,
+                    "market": "",
                     "keyword": it["query"],
                     "theme": it.get("theme"),
                     "prompt_kind": it.get("prompt_kind"),
@@ -263,7 +358,7 @@ async def run_ai_territory_scan_for_client(
         "config_id": config_id,
         "client_id": client_id,
         "scan_id": scan_id,
-        "market": market,
+        "market": "",
         "brand": brand,
         "domain": domain,
         "providers": per_provider,
@@ -272,12 +367,13 @@ async def run_ai_territory_scan_for_client(
         "overall_visibility_score": round(score, 2),
         "share_of_voice": {"items": comp.get("share_of_voice") or [], "market_rank": comp.get("market_rank")},
         "platform_rankings": platform_rankings,
-        "themes": themes,
+        "themes": [],
         "prompts_total": len(prompts),
         "competitors": comp.get("competitors") or [],
         "content_intelligence": {"status": "generated", "source": "website+gbp"},
         "growth_engine": {"status": "generated", "source": "scan_mentions"},
         "territory_intelligence": territory,
+        "data_confidence": conf,
         "created_at": utcnow().isoformat(),
         "updated_at": utcnow().isoformat(),
     }
@@ -290,7 +386,7 @@ async def run_ai_territory_scan_for_client(
     scan_doc["growth_engine"] = {**(scan_doc.get("growth_engine") or {}), "delta": change.get("delta"), "changes": change.get("changes"), "reason": reason}
 
     await db.ai_visibility_scans.insert_one(scan_doc)
-    await db.ai_visibility_configs.update_one({"_id": config_id, "tenant_id": tenant_id}, {"$set": {"market": market, "updated_at": utcnow().isoformat()}})
+    await db.ai_visibility_configs.update_one({"_id": config_id, "tenant_id": tenant_id}, {"$set": {"market": "", "updated_at": utcnow().isoformat()}})
 
     delta = (change.get("delta") or {}) if isinstance(change, dict) else {}
     opps0 = (territory.get("expansion_opportunities") or []) if isinstance(territory, dict) else []
@@ -317,7 +413,9 @@ async def run_ai_territory_scan_for_client(
             "territory": territory,
             "opportunities": (territory.get("expansion_opportunities") or [])[:10],
             "meeting_talking_points": tp,
-            "data_sources_used": ["website_crawl", "gbp_data", "ai_visibility_scan"],
+            "data_sources_used": [k for k, v in (availability or {}).items() if isinstance(v, dict) and v.get("ok")],
+            "source_availability": availability,
+            "confidence": conf,
             "calculation_logic": "Visibility scores are computed as hit_rate = brand_or_domain_mentioned / total_prompts across configured AI providers. Territory scores are computed from location-intent prompts grouped by territory.",
         },
         "updated_at": utcnow().isoformat(),

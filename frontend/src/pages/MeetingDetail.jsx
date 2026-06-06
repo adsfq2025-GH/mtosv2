@@ -225,6 +225,8 @@ export default function MeetingDetail() {
   const [client, setClient] = useState(null);
   const [intelScan, setIntelScan] = useState(null);
   const [intelEvents, setIntelEvents] = useState([]);
+  const [intelShowSources, setIntelShowSources] = useState(false);
+  const [intelErr, setIntelErr] = useState("");
   const [roadmapData, setRoadmapData] = useState(null);
   const [roadmapWeek, setRoadmapWeek] = useState(1);
   const [model, setModel] = useState("gemini-direct");
@@ -278,9 +280,11 @@ export default function MeetingDetail() {
       aiTerritory.latest(meeting.client_id).then((r) => {
         setIntelScan(r?.scan || null);
         setIntelEvents(r?.events || []);
+        setIntelErr("");
       }).catch(() => {
         setIntelScan(null);
         setIntelEvents([]);
+        setIntelErr("AI & Territory Intelligence data not available.");
       });
       roadmap.get(meeting.client_id).then((r) => {
         setRoadmapData(r);
@@ -315,17 +319,30 @@ export default function MeetingDetail() {
   const runIntelNow = async () => {
     if (!m?.client_id) return;
     setBusy("intel");
+    setIntelErr("");
     try {
       await aiTerritory.runNow(m.client_id);
       const r = await aiTerritory.latest(m.client_id);
       setIntelScan(r?.scan || null);
       setIntelEvents(r?.events || []);
     } catch (e) {
-      alert(e?.response?.data?.detail || "AI & Territory Intelligence scan failed");
+      const raw = e?.response?.data;
+      const detail = typeof raw === "string" ? raw : raw?.detail;
+      const msg = String(detail || "AI & Territory Intelligence scan failed");
+      setIntelErr(msg);
     } finally {
       setBusy("");
     }
   };
+
+  const intelConf = intelScan?.data_confidence && typeof intelScan.data_confidence === "object" ? intelScan.data_confidence : null;
+  const intelConfPct = typeof intelConf?.percent === "number" ? intelConf.percent : null;
+  const intelConfLevel = typeof intelConf?.level === "string" ? intelConf.level : "";
+  const intelAvail = intelConf?.availability && typeof intelConf.availability === "object" ? intelConf.availability : {};
+  const intelHasData = !!intelScan && (Number(intelScan?.total || 0) > 0 || Number(intelScan?.prompts_total || 0) > 0);
+  const intelSovItems = Array.isArray(intelScan?.share_of_voice?.items) ? intelScan.share_of_voice.items : [];
+  const intelClientSov = intelSovItems.find((x) => x?.is_client) || null;
+  const intelTerritoryCovered = Array.isArray(intelScan?.territory_intelligence?.covered_markets) ? intelScan.territory_intelligence.covered_markets : [];
   const exportHtml = async () => {
     setBusy("export");
     try {
@@ -932,12 +949,95 @@ export default function MeetingDetail() {
                 <div className="flex items-center gap-3">
                   <div className="text-xs text-slate-400">
                     {intelScan?.created_at ? `Last scan: ${new Date(intelScan.created_at).toLocaleString()}` : "No scans yet"}
+                    {intelConfPct !== null ? ` · Confidence: ${intelConfLevel ? `${intelConfLevel} ` : ""}(${intelConfPct}%)` : ""}
                   </div>
+                  <button
+                    className="chip !px-2 !py-1 !bg-white/5 !border-white/10 hover:!bg-white/10"
+                    type="button"
+                    onClick={() => setIntelShowSources((v) => !v)}
+                    aria-label="AI intelligence sources"
+                  >
+                    <Info size={14} weight="duotone" />
+                  </button>
                   <button className="btn-ghost" type="button" onClick={runIntelNow} disabled={busy === "intel"}>
                     {busy === "intel" ? "Scanning…" : "Run now"}
                   </button>
                 </div>
               </div>
+              {!!intelErr && (
+                <div className="mb-3 p-3 rounded-md border border-[#F59E0B]/25 bg-[#F59E0B]/10 text-xs text-slate-200 flex items-start gap-2">
+                  <Warning size={16} weight="duotone" color="#F59E0B" />
+                  <div className="min-w-0">
+                    <div className="font-semibold">Data Not Available</div>
+                    <div className="text-slate-200/80 mt-1">{intelErr}</div>
+                  </div>
+                </div>
+              )}
+              {!!intelShowSources && (
+                <div className="mb-4 p-4 rounded-md border border-white/10 bg-white/[0.02]">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-slate-400">Source Transparency</div>
+                      <div className="text-sm text-slate-200 mt-1">
+                        {intelConfPct !== null ? `Confidence: ${intelConfLevel || "—"} (${intelConfPct}%)` : "Confidence: Data Not Available"}
+                      </div>
+                    </div>
+                    <button className="btn-ghost !py-1 !px-2 !text-xs" type="button" onClick={() => setIntelShowSources(false)}>Close</button>
+                  </div>
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+                      <div className="text-xs text-slate-400 mb-2">Sources Used</div>
+                      <div className="space-y-1 text-sm">
+                        {[
+                          { k: "google_business_profile", label: "Google Business Profile" },
+                          { k: "website", label: "Website" },
+                          { k: "search_console", label: "Search Console" },
+                          { k: "competitors", label: "Competitor Analysis" },
+                          { k: "citations", label: "Citation Data" },
+                        ].map((row) => {
+                          const obj = intelAvail?.[row.k] || {};
+                          const ok = !!obj.ok;
+                          const extra =
+                            row.k === "google_business_profile"
+                              ? (!obj.binding ? "Not connected (missing GBP binding)" : obj.error ? `Not connected (${String(obj.error)})` : ok ? "Connected" : "Not connected")
+                              : ok ? "Connected" : "Not connected";
+                          return (
+                            <div key={row.k} className="flex items-start justify-between gap-3">
+                              <div className="min-w-0 text-slate-200">{ok ? "✓" : "✕"} {row.label}</div>
+                              <div className="text-xs text-slate-400 text-right">{extra}</div>
+                            </div>
+                          );
+                        })}
+                        {!intelScan && <div className="text-xs text-slate-400 mt-2">Run a scan to validate source availability and compute confidence.</div>}
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
+                      <div className="text-xs text-slate-400 mb-2">Validation</div>
+                      <div className="text-sm text-slate-200">
+                        {intelHasData ? "Verified prompts were generated from connected client data (GBP → Website → Search Console)." : "Data Not Available: no verified prompt set was available for this client."}
+                      </div>
+                      <div className="text-xs text-slate-400 mt-2">
+                        Visibility score = hit_rate (brand/domain mentioned) across provider responses. Territory score = location-intent hit_rate grouped by verified territories.
+                      </div>
+                      {!!intelScan && typeof intelScan?.providers === "object" && (
+                        <div className="mt-3">
+                          <div className="text-xs text-slate-400 mb-2">Providers</div>
+                          <div className="space-y-1 text-xs text-slate-200">
+                            {Object.entries(intelScan.providers || {}).map(([p, v]) => (
+                              <div key={p} className="flex items-center justify-between gap-3">
+                                <div className="mono">{p}</div>
+                                <div className="mono text-slate-400">
+                                  {Number(v?.hits || 0)}/{Number(v?.total || 0)} hits{Number(v?.errors || 0) ? ` · ${Number(v.errors)} errors` : ""}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
               {!intelScan && (
                 <EmptyHint label="Daily scans track AI visibility and territory coverage. Run now to generate the latest intelligence for this client." />
               )}
@@ -946,7 +1046,7 @@ export default function MeetingDetail() {
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
                       <div className="text-xs text-slate-400">AI Visibility Score</div>
-                      <div className="text-2xl font-bold mt-1">{Number(intelScan.overall_visibility_score || 0).toFixed(1)}%</div>
+                      <div className="text-2xl font-bold mt-1">{intelHasData ? `${Number(intelScan.overall_visibility_score || 0).toFixed(1)}%` : "Data Not Available"}</div>
                       {!!intelScan?.growth_engine?.delta?.visibility_score && (
                         <div className="text-xs text-slate-400 mt-1">Change: {Number(intelScan.growth_engine.delta.visibility_score).toFixed(1)} pts</div>
                       )}
@@ -954,13 +1054,13 @@ export default function MeetingDetail() {
                     <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
                       <div className="text-xs text-slate-400">AI Share of Voice</div>
                       <div className="text-2xl font-bold mt-1">
-                        {Math.round(((intelScan?.share_of_voice?.items || []).find((x) => x?.is_client)?.share || 0) * 100)}%
+                        {intelHasData && intelClientSov ? `${Math.round(Number(intelClientSov?.share || 0) * 100)}%` : "Data Not Available"}
                       </div>
                       <div className="text-xs text-slate-400 mt-1">Market rank: {intelScan?.share_of_voice?.market_rank || "—"}</div>
                     </div>
                     <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
                       <div className="text-xs text-slate-400">Territory Expansion Score</div>
-                      <div className="text-2xl font-bold mt-1">{Number(intelScan?.territory_intelligence?.territory_expansion_score || 0).toFixed(1)}%</div>
+                      <div className="text-2xl font-bold mt-1">{intelHasData && intelTerritoryCovered.length ? `${Number(intelScan?.territory_intelligence?.territory_expansion_score || 0).toFixed(1)}%` : "Data Not Available"}</div>
                       <div className="text-xs text-slate-400 mt-1">
                         Strong: {(intelScan?.territory_intelligence?.strong_markets || []).length} · Emerging: {(intelScan?.territory_intelligence?.emerging_markets || []).length} · Weak: {(intelScan?.territory_intelligence?.weak_markets || []).length}
                       </div>
@@ -977,7 +1077,9 @@ export default function MeetingDetail() {
                             <div className="text-xs text-slate-400 mono">{c?.mentions || 0}</div>
                           </div>
                         ))}
-                        {(intelScan?.competitors || []).length === 0 && <div className="text-xs text-slate-400">No competitor mentions detected.</div>}
+                        {(intelScan?.competitors || []).length === 0 && (
+                          <div className="text-xs text-slate-400">{intelHasData ? "No competitor mentions detected." : "Data Not Available"}</div>
+                        )}
                       </div>
                     </div>
                     <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
@@ -993,7 +1095,9 @@ export default function MeetingDetail() {
                             {!!o?.why && <div className="text-xs text-slate-400 mt-1">Why: {String(o.why)}</div>}
                           </div>
                         ))}
-                        {(intelScan?.territory_intelligence?.expansion_opportunities || []).length === 0 && <div className="text-xs text-slate-400">No expansion opportunities detected.</div>}
+                        {(intelScan?.territory_intelligence?.expansion_opportunities || []).length === 0 && (
+                          <div className="text-xs text-slate-400">{intelHasData ? "No expansion opportunities detected." : "Data Not Available"}</div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1009,7 +1113,9 @@ export default function MeetingDetail() {
                         {!!e?.description && <div className="text-xs text-slate-300 mt-1.5">{e.description}</div>}
                       </div>
                     ))}
-                    {(intelEvents || []).length === 0 && <div className="text-xs text-slate-400">No recent changes detected.</div>}
+                    {(intelEvents || []).length === 0 && (
+                      <div className="text-xs text-slate-400">{intelHasData ? "No recent changes detected." : "Data Not Available"}</div>
+                    )}
                   </div>
                 </div>
               )}

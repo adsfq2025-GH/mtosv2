@@ -24,9 +24,11 @@ async def main() -> None:
         clients = await db.clients.find({"$and": [{"tenant_id": tenant_id}, {"status": "active"}]}).to_list(5000)
         for c in clients or []:
             try:
+                uid = str((c or {}).get("account_manager_id") or "").strip()
                 await ai_territory_intelligence.run_ai_territory_scan_for_client(
                     tenant_id=tenant_id,
                     client_doc=c,
+                    user_id=uid or None,
                     max_prompts=max_prompts,
                     min_hours_between_scans=freq,
                     force=False,
@@ -38,4 +40,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

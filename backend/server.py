@@ -1064,6 +1064,7 @@ async def ai_territory_run_now(client_id: str, ctx=Depends(get_current_context))
     res = await ai_territory_intelligence.run_ai_territory_scan_for_client(
         tenant_id=ctx.tenant_id,
         client_doc=c_doc,
+        user_id=ctx.user.id,
         max_prompts=int(cfg.get("max_prompts") or 60),
         force=True,
         reason="manual",

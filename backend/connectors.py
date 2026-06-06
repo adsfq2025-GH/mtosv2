@@ -1252,6 +1252,136 @@ async def _gbp_list_locations(access_token: str, account_name: str) -> Dict[str,
     return {"ok": True, "locations": (resp.json() or {}).get("locations") or []}
 
 
+async def _gbp_get_location(access_token: str, location_name: str) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    url = f"https://mybusinessbusinessinformation.googleapis.com/v1/{str(location_name).strip()}"
+    read_mask = ",".join(
+        [
+            "name",
+            "title",
+            "websiteUri",
+            "phoneNumbers",
+            "storefrontAddress",
+            "serviceArea",
+            "primaryCategory",
+            "additionalCategories",
+            "regularHours",
+            "specialHours",
+            "profileDescription",
+        ]
+    )
+    params = {"readMask": read_mask}
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gbp_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    return {"ok": True, "location": resp.json() or {}}
+
+
+async def _gbp_list_reviews(access_token: str, location_name: str, page_size: int = 50) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    url = f"https://mybusinessreviews.googleapis.com/v1/{str(location_name).strip()}/reviews"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(url, headers=headers, params={"pageSize": max(1, min(int(page_size or 50), 200))})
+    if resp.status_code != 200:
+        return {"ok": False, "error": f"gbp_reviews_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+    data = resp.json() or {}
+    return {"ok": True, "reviews": data.get("reviews") or []}
+
+
+def _gbp_extract_service_areas(location: dict) -> List[str]:
+    sa = location.get("serviceArea") if isinstance(location, dict) else None
+    if not isinstance(sa, dict):
+        return []
+    places = sa.get("places")
+    out = []
+    if isinstance(places, dict):
+        regs = places.get("placeInfos") or []
+        if isinstance(regs, list):
+            for p in regs:
+                if not isinstance(p, dict):
+                    continue
+                nm = str(p.get("placeName") or "").strip()
+                if nm:
+                    out.append(nm)
+    return sorted({x for x in out if x})
+
+
+def _gbp_extract_categories(location: dict) -> List[str]:
+    out = []
+    if not isinstance(location, dict):
+        return []
+    pc = location.get("primaryCategory")
+    if isinstance(pc, dict):
+        n = str(pc.get("displayName") or "").strip()
+        if n:
+            out.append(n)
+    ac = location.get("additionalCategories") or []
+    if isinstance(ac, list):
+        for c in ac:
+            if not isinstance(c, dict):
+                continue
+            n = str(c.get("displayName") or "").strip()
+            if n:
+                out.append(n)
+    return sorted({x for x in out if x})
+
+
+async def fetch_gbp_profile_for_client(tenant_id: str, user_id: str, client_id: str) -> Dict[str, Any]:
+    binding = await db.client_bindings.find_one({"$and": [{"tenant_id": tenant_id}, {"client_id": str(client_id)}, {"platform": "google_business_profile"}, {"enabled": True}]})
+    if not binding:
+        return {"ok": False, "error": "gbp_not_connected"}
+    ext = binding.get("external_ids") or {}
+    account_name = str(ext.get("account_name") or "").strip()
+    location_name = str(ext.get("location_name") or "").strip()
+    if not account_name or not location_name:
+        return {"ok": False, "error": "gbp_missing_binding"}
+
+    rt = await get_google_refresh_token(tenant_id, user_id, "google_business_profile")
+    if not rt:
+        return {"ok": False, "error": "gbp_missing_oauth"}
+    try:
+        access_token = await _google_ads_access_token({"refresh_token": rt})
+    except Exception as exc:
+        return {"ok": False, "error": "gbp_oauth_error", "error_detail": str(exc)[:300]}
+
+    loc_res = await _gbp_get_location(access_token, location_name=location_name)
+    if not loc_res.get("ok"):
+        return loc_res
+    location = loc_res.get("location") or {}
+
+    rev_res = await _gbp_list_reviews(access_token, location_name=location_name, page_size=50)
+    reviews = rev_res.get("reviews") if rev_res.get("ok") else []
+    rating_vals = []
+    for r in reviews or []:
+        if not isinstance(r, dict):
+            continue
+        rv = r.get("starRating")
+        if isinstance(rv, str):
+            m = re.search(r"(\d)", rv)
+            if m:
+                rating_vals.append(int(m.group(1)))
+        elif isinstance(rv, int):
+            rating_vals.append(int(rv))
+
+    avg_rating = round(sum(rating_vals) / float(len(rating_vals)), 2) if rating_vals else None
+
+    return {
+        "ok": True,
+        "account_name": account_name,
+        "location_name": location_name,
+        "business_name": str(location.get("title") or "").strip(),
+        "website": str(location.get("websiteUri") or "").strip(),
+        "storefront_address": location.get("storefrontAddress") or {},
+        "service_areas": _gbp_extract_service_areas(location),
+        "categories": _gbp_extract_categories(location),
+        "reviews_count": len(reviews or []) if isinstance(reviews, list) else 0,
+        "avg_rating": avg_rating,
+        "raw_location": location,
+        "raw_reviews": reviews or [],
+    }
+
+
 async def find_best_gbp_location_for_client(tenant_id: str, user_id: str, company: str, website: str, phone: str) -> Dict[str, Any]:
     rt = await get_google_refresh_token(tenant_id, user_id, "google_business_profile")
     if not rt:
