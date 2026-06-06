@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs, prompts } from "../api";
+import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs, prompts, aiTerritory } from "../api";
 import { PageHead } from "../Layout";
 import { useAuth } from "../auth";
 import {
@@ -113,12 +113,22 @@ export function Integrations() {
   const [oauthBusy, setOauthBusy] = useState(false);
   const [promptBusy, setPromptBusy] = useState(false);
   const [mtPrompt, setMtPrompt] = useState("");
+  const [tiSettings, setTiSettings] = useState(null);
+  const [tiForm, setTiForm] = useState({ scanFrequencyHours: 24, maxPrompts: 60 });
+  const [tiBusy, setTiBusy] = useState(false);
   const [ghlLocs, setGhlLocs] = useState([]);
   const [ghlTokenLocId, setGhlTokenLocId] = useState("");
   const [ghlTokenValue, setGhlTokenValue] = useState("");
   const [ghlTokenSavedIds, setGhlTokenSavedIds] = useState([]);
   const load = () => integrations.status().then(setList);
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    aiTerritory.getSettings().then((r) => {
+      setTiSettings(r);
+      setTiForm({ scanFrequencyHours: Number(r?.scan_frequency_hours || r?.scanFrequencyHours || 24) || 24, maxPrompts: Number(r?.max_prompts || r?.maxPrompts || 60) || 60 });
+    }).catch(() => {});
+  }, [user?.role]);
   useEffect(() => {
     if (user?.role !== "admin") return;
     prompts.get("monthly_touch_analysis").then((r) => setMtPrompt(String(r?.text || ""))).catch(() => {});
@@ -261,6 +271,53 @@ export function Integrations() {
           </div>
         ))}
       </div>
+
+      {user?.role === "admin" && (
+        <div className="card-flat p-5 mt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="font-semibold">AI &amp; Territory Intelligence</div>
+              <div className="text-xs text-slate-400 mt-0.5">Daily client intelligence scans that generate visibility and territory expansion insights.</div>
+            </div>
+            <button
+              className="btn-primary text-xs"
+              disabled={tiBusy}
+              onClick={async () => {
+                setTiBusy(true);
+                try {
+                  await aiTerritory.putSettings({ scanFrequencyHours: tiForm.scanFrequencyHours, maxPrompts: tiForm.maxPrompts });
+                  const r = await aiTerritory.getSettings();
+                  setTiSettings(r);
+                  alert("Saved.");
+                } catch (e) {
+                  alert(e?.response?.data?.detail || e?.message || "Failed to save settings");
+                } finally {
+                  setTiBusy(false);
+                }
+              }}
+            >
+              {tiBusy ? "Saving…" : "Save"}
+            </button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+            <div>
+              <label className="label">Scan frequency (hours)</label>
+              <input className="input mt-1.5" type="number" min={1} max={168} value={tiForm.scanFrequencyHours} onChange={(e) => setTiForm((p) => ({ ...p, scanFrequencyHours: Number(e.target.value || 24) }))} />
+              <div className="text-xs text-slate-500 mt-1">Default is 24. Lower values increase cost and runtime.</div>
+            </div>
+            <div>
+              <label className="label">Max prompts per scan</label>
+              <input className="input mt-1.5" type="number" min={10} max={200} value={tiForm.maxPrompts} onChange={(e) => setTiForm((p) => ({ ...p, maxPrompts: Number(e.target.value || 60) }))} />
+              <div className="text-xs text-slate-500 mt-1">Controls scan size across services and territories.</div>
+            </div>
+          </div>
+          {!!tiSettings && (
+            <div className="text-[10px] mono text-slate-500 mt-3">
+              Active: every {tiSettings.scan_frequency_hours || 24}h · max {tiSettings.max_prompts || 60} prompts
+            </div>
+          )}
+        </div>
+      )}
 
       {user?.role === "admin" && (
         <div className="card-flat p-5 mt-5">

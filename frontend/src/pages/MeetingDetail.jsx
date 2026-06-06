@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { meetings, aiModels, actionItems, contentCaptures, clients, roadmap } from "../api";
+import { meetings, aiModels, actionItems, contentCaptures, clients, roadmap, aiTerritory } from "../api";
 import { PageHead } from "../Layout";
 import {
   Sparkle, FileText, ChatCircle, Trophy, Warning, Lightbulb, Question, Megaphone,
@@ -20,6 +20,9 @@ function ExplainDialog({ title, explain }) {
   const timePeriod = explain.time_period || explain.timePeriod || {};
   const kpiPaths = explain.kpi_paths || explain.kpiPaths || [];
   const observed = explain.observed_values || explain.observedValues || {};
+  const confVal = typeof explain.confidence === "number"
+    ? (explain.confidence <= 1 ? Math.round(explain.confidence * 100) : Math.round(explain.confidence))
+    : null;
   return (
     <Dialog>
       <DialogTrigger asChild>
@@ -39,7 +42,7 @@ function ExplainDialog({ title, explain }) {
             </div>
             <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
               <div className="text-xs text-white/60">Confidence</div>
-              <div className="mt-1">{typeof explain.confidence === "number" ? `${explain.confidence}%` : String(explain.confidence || "—")}</div>
+              <div className="mt-1">{confVal !== null ? `${confVal}%` : String(explain.confidence || "—")}</div>
             </div>
           </div>
           <div className="p-3 rounded-md border border-white/10 bg-white/[0.02]">
@@ -220,6 +223,8 @@ export default function MeetingDetail() {
   const { id } = useParams();
   const [m, setM] = useState(null);
   const [client, setClient] = useState(null);
+  const [intelScan, setIntelScan] = useState(null);
+  const [intelEvents, setIntelEvents] = useState([]);
   const [roadmapData, setRoadmapData] = useState(null);
   const [roadmapWeek, setRoadmapWeek] = useState(1);
   const [model, setModel] = useState("gemini-direct");
@@ -270,6 +275,13 @@ export default function MeetingDetail() {
         });
       }
       clients.get(meeting.client_id).then(setClient).catch(() => setClient(null));
+      aiTerritory.latest(meeting.client_id).then((r) => {
+        setIntelScan(r?.scan || null);
+        setIntelEvents(r?.events || []);
+      }).catch(() => {
+        setIntelScan(null);
+        setIntelEvents([]);
+      });
       roadmap.get(meeting.client_id).then((r) => {
         setRoadmapData(r);
         const cw = Number(r?.current_week || 1) || 1;
@@ -295,6 +307,21 @@ export default function MeetingDetail() {
       if (detail) setAiErr(String(detail));
       else if (status) setAiErr(`Brief generation failed (HTTP ${status})`);
       else setAiErr(`Brief generation failed (${e?.message || "Network error"})`);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const runIntelNow = async () => {
+    if (!m?.client_id) return;
+    setBusy("intel");
+    try {
+      await aiTerritory.runNow(m.client_id);
+      const r = await aiTerritory.latest(m.client_id);
+      setIntelScan(r?.scan || null);
+      setIntelEvents(r?.events || []);
+    } catch (e) {
+      alert(e?.response?.data?.detail || "AI & Territory Intelligence scan failed");
     } finally {
       setBusy("");
     }
@@ -896,6 +923,95 @@ export default function MeetingDetail() {
                     ))}
                   </div>
                 </details>
+              )}
+            </section>
+
+            <section className="card-flat p-5">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2"><Robot size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">AI &amp; Territory Intelligence</h3></div>
+                <div className="flex items-center gap-3">
+                  <div className="text-xs text-slate-400">
+                    {intelScan?.created_at ? `Last scan: ${new Date(intelScan.created_at).toLocaleString()}` : "No scans yet"}
+                  </div>
+                  <button className="btn-ghost" type="button" onClick={runIntelNow} disabled={busy === "intel"}>
+                    {busy === "intel" ? "Scanning…" : "Run now"}
+                  </button>
+                </div>
+              </div>
+              {!intelScan && (
+                <EmptyHint label="Daily scans track AI visibility and territory coverage. Run now to generate the latest intelligence for this client." />
+              )}
+              {!!intelScan && (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+                      <div className="text-xs text-slate-400">AI Visibility Score</div>
+                      <div className="text-2xl font-bold mt-1">{Number(intelScan.overall_visibility_score || 0).toFixed(1)}%</div>
+                      {!!intelScan?.growth_engine?.delta?.visibility_score && (
+                        <div className="text-xs text-slate-400 mt-1">Change: {Number(intelScan.growth_engine.delta.visibility_score).toFixed(1)} pts</div>
+                      )}
+                    </div>
+                    <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+                      <div className="text-xs text-slate-400">AI Share of Voice</div>
+                      <div className="text-2xl font-bold mt-1">
+                        {Math.round(((intelScan?.share_of_voice?.items || []).find((x) => x?.is_client)?.share || 0) * 100)}%
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1">Market rank: {intelScan?.share_of_voice?.market_rank || "—"}</div>
+                    </div>
+                    <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+                      <div className="text-xs text-slate-400">Territory Expansion Score</div>
+                      <div className="text-2xl font-bold mt-1">{Number(intelScan?.territory_intelligence?.territory_expansion_score || 0).toFixed(1)}%</div>
+                      <div className="text-xs text-slate-400 mt-1">
+                        Strong: {(intelScan?.territory_intelligence?.strong_markets || []).length} · Emerging: {(intelScan?.territory_intelligence?.emerging_markets || []).length} · Weak: {(intelScan?.territory_intelligence?.weak_markets || []).length}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+                      <div className="text-xs text-slate-400 mb-2">Top Competitors (AI mentions)</div>
+                      <div className="space-y-2">
+                        {(intelScan?.competitors || []).slice(0, 6).map((c, idx) => (
+                          <div key={idx} className="flex items-center justify-between gap-3">
+                            <div className="text-sm text-slate-200 truncate">{c?.name || c?.domain || "—"}</div>
+                            <div className="text-xs text-slate-400 mono">{c?.mentions || 0}</div>
+                          </div>
+                        ))}
+                        {(intelScan?.competitors || []).length === 0 && <div className="text-xs text-slate-400">No competitor mentions detected.</div>}
+                      </div>
+                    </div>
+                    <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+                      <div className="text-xs text-slate-400 mb-2">Expansion Opportunities</div>
+                      <div className="space-y-2">
+                        {(intelScan?.territory_intelligence?.expansion_opportunities || []).slice(0, 6).map((o, idx) => (
+                          <div key={idx} className="p-3 rounded border border-white/5 bg-white/[0.02]">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-sm font-medium text-slate-200">{o?.territory || "—"}</div>
+                              <span className="chip chip-warn">{Number(o?.current_visibility_score || 0).toFixed(0)}%</span>
+                            </div>
+                            <div className="text-xs text-slate-400 mt-1">Estimated gain: +{Number(o?.estimated_visibility_gain || 0).toFixed(0)} pts</div>
+                            {!!o?.why && <div className="text-xs text-slate-400 mt-1">Why: {String(o.why)}</div>}
+                          </div>
+                        ))}
+                        {(intelScan?.territory_intelligence?.expansion_opportunities || []).length === 0 && <div className="text-xs text-slate-400">No expansion opportunities detected.</div>}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
+                    <div className="text-xs text-slate-400 mb-2">What changed (latest)</div>
+                    {(intelEvents || []).slice(0, 6).map((e, idx) => (
+                      <div key={idx} className={`p-3 rounded border border-white/5 bg-white/[0.02] ${idx ? "mt-2" : ""}`}>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-200">{e?.title || "Update"}</div>
+                          <span className={`chip ${e?.kind === "issue" ? "chip-danger" : e?.kind === "win" ? "chip-success" : e?.kind === "opportunity" ? "chip-info" : "chip-warn"}`}>{e?.kind || "alert"}</span>
+                        </div>
+                        {!!e?.description && <div className="text-xs text-slate-300 mt-1.5">{e.description}</div>}
+                      </div>
+                    ))}
+                    {(intelEvents || []).length === 0 && <div className="text-xs text-slate-400">No recent changes detected.</div>}
+                  </div>
+                </div>
               )}
             </section>
 

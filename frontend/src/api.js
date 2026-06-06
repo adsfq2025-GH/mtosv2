@@ -123,6 +123,16 @@ export const health = {
     api.get(`/health/${encodeURIComponent(clientId)}/trend?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
 };
 
+export const aiTerritory = {
+  latest: (clientId) => api.get(`/ai-territory/${encodeURIComponent(clientId)}/latest`).then((r) => r.data),
+  history: (clientId, limit = 30) =>
+    api.get(`/ai-territory/${encodeURIComponent(clientId)}/history?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
+  runNow: (clientId) => api.post(`/ai-territory/${encodeURIComponent(clientId)}/run`).then((r) => r.data),
+  getSettings: () => api.get("/ai-territory/settings").then((r) => r.data),
+  putSettings: ({ scanFrequencyHours = 24, maxPrompts = 60 } = {}) =>
+    api.put(`/ai-territory/settings?scan_frequency_hours=${encodeURIComponent(scanFrequencyHours)}&max_prompts=${encodeURIComponent(maxPrompts)}`).then((r) => r.data),
+};
+
 export const libraries = {
   wins: ({ start = "", end = "", clientId = "", accountManagerId = "", q = "", limit = 500 } = {}) => {
     const params = new URLSearchParams();

@@ -213,6 +213,7 @@ class AiVisibilityScan(BaseDocument):
     competitors: List[Dict[str, Any]] = Field(default_factory=list)
     content_intelligence: Dict[str, Any] = Field(default_factory=dict)
     growth_engine: Dict[str, Any] = Field(default_factory=dict)
+    territory_intelligence: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ===== MEETINGS =====

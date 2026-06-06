@@ -95,6 +95,7 @@ from integrations_meta import INTEGRATIONS, list_integrations, demo_kpi_snapshot
 from docs_content import DOCS, get_categories, get_doc, get_docs_summary
 import ai
 import ai_visibility
+import ai_territory_intelligence
 import connectors
 import monthly_touch
 import clickup_client_sync
@@ -630,7 +631,7 @@ async def get_settings(ctx=Depends(get_current_context)):
             branding={"product_name": "Monthly Touch OS"},
             terminology={"monthly_touch": "Monthly Touch", "client_singular": "Client", "client_plural": "Clients"},
             workflows={"meeting_types": [{"key": "monthly_touch", "label": "Monthly Touch", "wins_count": 3, "issues_count": 2}]},
-            analysis={"ai_default_model": ai.DEFAULT_MODEL},
+            analysis={"ai_default_model": ai.DEFAULT_MODEL, "ai_territory_scan_frequency_hours": 24, "ai_territory_max_prompts": 60},
         )
         await db.tenant_settings.insert_one(settings.to_mongo())
         return settings.model_dump()
@@ -892,7 +893,15 @@ async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibil
     if not prompts:
         raise HTTPException(400, "Prompt generation failed (no prompts)")
 
-    providers = ["openai", "gemini", "perplexity"]
+    providers = []
+    if os.environ.get("OPENAI_API_KEY", "").strip():
+        providers.append("openai")
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        providers.append("gemini")
+    if os.environ.get("PERPLEXITY_API_KEY", "").strip():
+        providers.append("perplexity")
+    if not providers:
+        raise HTTPException(400, "No AI providers configured. Set GEMINI_API_KEY and/or OPENAI_API_KEY and/or PERPLEXITY_API_KEY.")
     created = 0
     hit_count = 0
     per_provider = {p: {"hits": 0, "total": 0, "errors": 0} for p in providers}
@@ -976,6 +985,93 @@ async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibil
         "domain": domain,
         "market": market,
     }
+
+
+def _ai_territory_settings(settings: TenantSettings) -> Dict[str, Any]:
+    analysis = settings.analysis or {}
+    if not isinstance(analysis, dict):
+        analysis = {}
+    freq = int(analysis.get("ai_territory_scan_frequency_hours") or 24)
+    max_prompts = int(analysis.get("ai_territory_max_prompts") or 60)
+    freq = max(1, min(freq, 168))
+    max_prompts = max(10, min(max_prompts, 200))
+    return {"scan_frequency_hours": freq, "max_prompts": max_prompts}
+
+
+@api.get("/ai-territory/settings")
+async def get_ai_territory_settings(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    return {"ok": True, **_ai_territory_settings(settings)}
+
+
+@api.put("/ai-territory/settings")
+async def put_ai_territory_settings(
+    scan_frequency_hours: int = Query(24, ge=1, le=168),
+    max_prompts: int = Query(60, ge=10, le=200),
+    ctx=Depends(get_current_context),
+):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    analysis = dict(settings.analysis or {}) if isinstance(settings.analysis, dict) else {}
+    analysis["ai_territory_scan_frequency_hours"] = int(scan_frequency_hours)
+    analysis["ai_territory_max_prompts"] = int(max_prompts)
+    await db.tenant_settings.update_one(
+        {"tenant_id": ctx.tenant_id},
+        {"$set": {"analysis": analysis, "updated_at": utcnow().isoformat()}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@api.get("/ai-territory/{client_id}/latest")
+async def ai_territory_latest(client_id: str, ctx=Depends(get_current_context)):
+    await _require_client_access(ctx, client_id)
+    cfg = await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]})
+    if not cfg:
+        return {"ok": True, "scan": None, "events": []}
+    scan = await db.ai_visibility_scans.find_one(
+        {"$and": [{"config_id": str(cfg.get("_id"))}, {"client_id": client_id}, tenant_scope(ctx.tenant_id)]},
+        sort=[("created_at", -1)],
+    )
+    events = await db.ai_territory_events.find({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(50)
+    return {"ok": True, "scan": AiVisibilityScan.from_mongo(scan).model_dump() if scan else None, "events": events}
+
+
+@api.get("/ai-territory/{client_id}/history")
+async def ai_territory_history(client_id: str, limit: int = 30, ctx=Depends(get_current_context)):
+    await _require_client_access(ctx, client_id)
+    limit = max(1, min(int(limit or 30), 200))
+    cfg = await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]})
+    if not cfg:
+        return {"ok": True, "scans": []}
+    docs = await db.ai_visibility_scans.find(
+        {"$and": [{"config_id": str(cfg.get("_id"))}, {"client_id": client_id}, tenant_scope(ctx.tenant_id)]}
+    ).sort("created_at", -1).to_list(limit)
+    return {"ok": True, "scans": [AiVisibilityScan.from_mongo(d).model_dump() for d in (docs or [])]}
+
+
+@api.post("/ai-territory/{client_id}/run")
+async def ai_territory_run_now(client_id: str, ctx=Depends(get_current_context)):
+    c_doc = await _require_client_access(ctx, client_id)
+    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    cfg = _ai_territory_settings(settings)
+    res = await ai_territory_intelligence.run_ai_territory_scan_for_client(
+        tenant_id=ctx.tenant_id,
+        client_doc=c_doc,
+        max_prompts=int(cfg.get("max_prompts") or 60),
+        force=True,
+        reason="manual",
+    )
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "Scan failed")
+    scan = res.get("scan")
+    return {"ok": True, "scan_id": res.get("scan_id"), "scan": AiVisibilityScan.from_mongo(scan).model_dump() if isinstance(scan, dict) else scan}
 
 
 @api.get("/white-label/domains")
