@@ -91,7 +91,7 @@ from models import (  # noqa: E402
     Ticket,
     User,
 )
-from integrations_meta import INTEGRATIONS, list_integrations, demo_kpi_snapshot
+from integrations_meta import INTEGRATIONS, list_integrations
 from docs_content import DOCS, get_categories, get_doc, get_docs_summary
 import ai
 import ai_visibility
@@ -1897,7 +1897,16 @@ async def get_meeting(meeting_id: str, ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
             raise HTTPException(403, "Forbidden")
-    return Meeting.from_mongo(doc).model_dump()
+    m = Meeting.from_mongo(doc)
+    try:
+        demo_enabled = str(os.environ.get("ENABLE_DEMO_KPI_SNAPSHOT", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        demo_enabled = False
+    if not demo_enabled and isinstance(m.kpi_snapshot, dict):
+        ks = m.kpi_snapshot
+        if "_availability" not in ks and ks.get("period") == "Last 30 days":
+            m.kpi_snapshot = {}
+    return m.model_dump()
 
 
 @api.get("/meetings/{meeting_id}/export/html")

@@ -11,7 +11,10 @@ import httpx
 from fastapi import HTTPException
 
 from db import db, decrypt_secret
-from integrations_meta import demo_kpi_snapshot
+
+
+def _demo_kpi_enabled() -> bool:
+    return str(os.environ.get("ENABLE_DEMO_KPI_SNAPSHOT", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _tenant_scope(tenant_id: str) -> dict:
@@ -369,10 +372,15 @@ async def build_kpi_snapshot(
     compare_start: Optional[date] = None,
     compare_end: Optional[date] = None,
 ) -> Dict[str, Any]:
-    snapshot = demo_kpi_snapshot(client_name)
+    snapshot: Dict[str, Any] = {}
+    if _demo_kpi_enabled():
+        from integrations_meta import demo_kpi_snapshot
+
+        snapshot = demo_kpi_snapshot(client_name)
     if not period_start or not period_end:
         period_start, period_end = _last_30_days_range()
     snapshot["_period"] = _period_meta(cur_start=period_start, cur_end=period_end, prev_start=compare_start, prev_end=compare_end)
+    snapshot["_availability"] = {}
 
     clickup_creds = await get_credentials(tenant_id, "clickup")
     clickup_binding = await get_client_binding(tenant_id, client_id, "clickup")
@@ -383,10 +391,13 @@ async def build_kpi_snapshot(
                 clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding, start_d=period_start, end_d=period_end)
                 if clickup_data:
                     snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
+                snapshot["_availability"]["clickup"] = {"ok": True}
             except Exception as exc:
-                snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_error", "error_detail": str(exc)[:300]}
+                snapshot["_availability"]["clickup"] = {"ok": False, "error": "clickup_error", "error_detail": str(exc)[:300]}
         else:
-            snapshot["clickup"] = {**(snapshot.get("clickup") or {}), "error": "clickup_missing_client_mapping", "error_detail": "Missing ClickUp Folder ID mapping for this client."}
+            snapshot["_availability"]["clickup"] = {"ok": False, "error": "clickup_missing_client_mapping", "error_detail": "Missing ClickUp Folder ID mapping for this client."}
+    else:
+        snapshot["_availability"]["clickup"] = {"ok": False, "error": "not_connected"}
 
     ghl_binding = await get_client_binding(tenant_id, client_id, "gohighlevel")
     ghl_api_key = await _gohighlevel_base_api_key(tenant_id)
@@ -395,30 +406,36 @@ async def build_kpi_snapshot(
             ghl_data = await fetch_gohighlevel_monthly(tenant_id, ghl_binding or {"external_ids": {}, "config": {}}, start_d=period_start, end_d=period_end)
             if ghl_data:
                 snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
+                snapshot["_availability"]["gohighlevel"] = {"ok": True}
             else:
-                snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), "error": "gohighlevel_missing_location_id", "error_detail": "Missing GoHighLevel location_id (set it in the client mapping or integration settings)."}
+                snapshot["_availability"]["gohighlevel"] = {"ok": False, "error": "gohighlevel_missing_location_id", "error_detail": "Missing GoHighLevel location_id (set it in the client mapping or integration settings)."}
         except Exception as exc:
-            snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), "error": "gohighlevel_error", "error_detail": str(exc)[:300]}
+            snapshot["_availability"]["gohighlevel"] = {"ok": False, "error": "gohighlevel_error", "error_detail": str(exc)[:300]}
+    else:
+        snapshot["_availability"]["gohighlevel"] = {"ok": False, "error": "not_connected"}
 
     gads_creds = await get_credentials(tenant_id, "google_ads")
     gads_binding = await get_client_binding(tenant_id, client_id, "google_ads")
     if any(str(v or "").strip() for v in (gads_creds or {}).values()) or user_id:
         if not str((gads_creds or {}).get("developer_token") or "").strip():
-            snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_incomplete_setup", "error_detail": "Missing Google Ads developer_token in Integrations → Google Ads."}
+            snapshot["_availability"]["google_ads"] = {"ok": False, "error": "google_ads_incomplete_setup", "error_detail": "Missing Google Ads developer_token in Integrations → Google Ads."}
         elif not user_id:
-            snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_missing_user", "error_detail": "Missing user context to run Google Ads sync."}
+            snapshot["_availability"]["google_ads"] = {"ok": False, "error": "google_ads_missing_user", "error_detail": "Missing user context to run Google Ads sync."}
         else:
             rt = await get_google_refresh_token(tenant_id, user_id, "google_ads")
             if not rt:
-                snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_missing_google_connection", "error_detail": "Connect Google for Google Ads first."}
+                snapshot["_availability"]["google_ads"] = {"ok": False, "error": "google_ads_missing_google_connection", "error_detail": "Connect Google for Google Ads first."}
             else:
                 merged = {**gads_creds, "refresh_token": rt}
                 try:
                     gads_data = await fetch_google_ads_monthly(merged, gads_binding or {"external_ids": {}, "config": {}}, start_d=period_start, end_d=period_end)
                     if gads_data:
                         snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), **gads_data}
+                        snapshot["_availability"]["google_ads"] = {"ok": True}
                 except Exception as exc:
-                    snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), "error": "google_ads_error", "error_detail": str(exc)[:300]}
+                    snapshot["_availability"]["google_ads"] = {"ok": False, "error": "google_ads_error", "error_detail": str(exc)[:300]}
+    else:
+        snapshot["_availability"]["google_ads"] = {"ok": False, "error": "not_connected"}
 
     return snapshot
 
