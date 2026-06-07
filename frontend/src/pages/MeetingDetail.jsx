@@ -118,6 +118,10 @@ const statusChip = (s) => s === "completed" ? "chip-success" : s === "blocked" ?
 
 const _num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const _str = (v) => (v === null || v === undefined ? "" : String(v));
+const _cleanMultiline = (v) => {
+  const s = _str(v).replace(/\r\n/g, "\n");
+  return s.split("\n").map((l) => l.trim()).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+};
 const _fmtDeltaPct = (v) => {
   const n = _num(v);
   if (n === null) return "";
@@ -1124,12 +1128,32 @@ export default function MeetingDetail() {
             <section className="card-flat p-5">
               <div className="flex items-center gap-2 mb-3"><Lightbulb size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Talking Points</h3></div>
               {(m.talking_points || []).length === 0 && <EmptyHint />}
-              <ul className="space-y-2">{(m.talking_points || []).map((t, i) => <li key={i} className="text-sm"><strong className="text-white">{t.topic}:</strong> <span className="text-slate-300">{t.angle}</span></li>)}</ul>
+              <ul className="space-y-2 list-none pl-0 m-0">
+                {(m.talking_points || []).map((t, i) => {
+                  const topic = _str(t?.topic).trim();
+                  const angle = _cleanMultiline(t?.angle);
+                  return (
+                    <li key={i} className="text-sm">
+                      {!!topic && <strong className="text-white">{topic}:</strong>}{topic ? " " : ""}
+                      <span className="text-slate-300 whitespace-pre-line break-words">{angle}</span>
+                    </li>
+                  );
+                })}
+              </ul>
               {(m.talking_points_library || []).length > (m.talking_points || []).length && (
                 <details className="mt-4">
                   <summary className="cursor-pointer text-xs text-[#3FA9F5]">View full talking points library</summary>
-                  <ul className="mt-3 space-y-2">
-                    {(m.talking_points_library || []).map((t, i) => <li key={i} className="text-sm"><strong className="text-white">{t.topic}:</strong> <span className="text-slate-300">{t.angle}</span></li>)}
+                  <ul className="mt-3 space-y-2 list-none pl-0 m-0">
+                    {(m.talking_points_library || []).map((t, i) => {
+                      const topic = _str(t?.topic).trim();
+                      const angle = _cleanMultiline(t?.angle);
+                      return (
+                        <li key={i} className="text-sm">
+                          {!!topic && <strong className="text-white">{topic}:</strong>}{topic ? " " : ""}
+                          <span className="text-slate-300 whitespace-pre-line break-words">{angle}</span>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </details>
               )}
