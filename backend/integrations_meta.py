@@ -3,6 +3,17 @@ from typing import Dict, List, Any
 
 # Each integration: {platform: {label, category, fields:[{key,label,secret,help}], doc_url}}
 INTEGRATIONS: Dict[str, Dict[str, Any]] = {
+    "google_oauth": {
+        "label": "Google OAuth",
+        "category": "Core",
+        "icon": "GoogleLogo",
+        "description": "OAuth client used for Connect Google (Ads, GBP, GSC, GA4, Meet, Drive, Gmail). Configure only if backend env vars are not set or need override.",
+        "fields": [
+            {"key": "client_id", "label": "OAuth Client ID", "secret": False},
+            {"key": "client_secret", "label": "OAuth Client Secret", "secret": True},
+            {"key": "redirect_uri", "label": "Redirect URI", "secret": False},
+        ],
+    },
     "clickup": {
         "label": "ClickUp",
         "category": "Project Management",

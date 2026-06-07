@@ -196,6 +196,11 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
     state_key = {"tenant_id": tenant_id, "user_id": user_id}
 
     try:
+        await db.clickup_client_sync_state.update_one(
+            state_key,
+            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": True, "started_at": started_at, "last_run_id": run_id, "updated_at": started_at}},
+            upsert=True,
+        )
         creds = await connectors.get_credentials(tenant_id, "clickup")
         token = connectors._strip_bearer(str((creds or {}).get("api_token") or ""))
         team_id = str((creds or {}).get("team_id") or "").strip()
@@ -349,7 +354,7 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
         await db.clickup_client_sync_logs.insert_one({"_id": run_id, "tenant_id": tenant_id, "user_id": user_id, **out})
         await db.clickup_client_sync_state.update_one(
             state_key,
-            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "last_success_at": finished_at, "last_error": None, "last_run_id": run_id, "updated_at": finished_at}},
+            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": False, "started_at": started_at, "finished_at": finished_at, "last_success_at": finished_at, "last_error": None, "last_run_id": run_id, "updated_at": finished_at}},
             upsert=True,
         )
         return out
@@ -360,7 +365,7 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
         await db.clickup_client_sync_logs.insert_one({"_id": run_id, "tenant_id": tenant_id, "user_id": user_id, **out})
         await db.clickup_client_sync_state.update_one(
             state_key,
-            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "last_error": err, "last_run_id": run_id, "updated_at": finished_at}},
+            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": False, "started_at": started_at, "finished_at": finished_at, "last_error": err, "last_run_id": run_id, "updated_at": finished_at}},
             upsert=True,
         )
         return out

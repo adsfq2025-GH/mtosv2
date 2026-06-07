@@ -59,6 +59,24 @@ def _dbg_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict] 
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+
+
+async def _google_oauth_config(tenant_id: str) -> Dict[str, str]:
+    out = {"client_id": GOOGLE_OAUTH_CLIENT_ID, "client_secret": GOOGLE_OAUTH_CLIENT_SECRET, "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI}
+    try:
+        doc = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "google_oauth"})
+        if doc:
+            meta = doc.get("metadata") or {}
+            enc = doc.get("credentials_encrypted") or {}
+            if str(meta.get("client_id") or "").strip():
+                out["client_id"] = str(meta.get("client_id") or "").strip()
+            if str(meta.get("redirect_uri") or "").strip():
+                out["redirect_uri"] = str(meta.get("redirect_uri") or "").strip()
+            if str(enc.get("client_secret") or "").strip():
+                out["client_secret"] = str(decrypt_secret(enc.get("client_secret")) or "").strip()
+    except Exception:
+        return out
+    return out
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "").strip()
 
 from db import db, decrypt_secret, encrypt_secret, new_id, utcnow  # noqa: E402
@@ -547,8 +565,9 @@ async def list_users(_: User = Depends(require_admin)):
 async def oauth_google_start(platform: str = Query(...), ctx=Depends(get_current_context)):
     if platform not in GOOGLE_OAUTH_PLATFORMS:
         raise HTTPException(400, "Unsupported platform")
-    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET or not GOOGLE_OAUTH_REDIRECT_URI:
-        raise HTTPException(500, "Google OAuth is not configured on the backend")
+    cfg = await _google_oauth_config(ctx.tenant_id)
+    if not cfg.get("client_id") or not cfg.get("client_secret") or not cfg.get("redirect_uri"):
+        raise HTTPException(500, "Google OAuth is not configured. Set GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET/GOOGLE_OAUTH_REDIRECT_URI on the backend or configure Integrations → Google OAuth.")
     scopes = google_scopes_for_platform(platform)
     if not scopes:
         raise HTTPException(400, "Missing scopes for platform")
@@ -565,8 +584,8 @@ async def oauth_google_start(platform: str = Query(...), ctx=Depends(get_current
         }
     )
     params = {
-        "client_id": GOOGLE_OAUTH_CLIENT_ID,
-        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+        "client_id": cfg.get("client_id"),
+        "redirect_uri": cfg.get("redirect_uri"),
         "response_type": "code",
         "access_type": "offline",
         "prompt": "consent",
@@ -603,21 +622,29 @@ async def oauth_google_callback(code: str = Query(...), state: str = Query(...))
     user_id = st.get("user_id")
     platform = st.get("platform")
     scopes = st.get("scopes") or []
-    if not GOOGLE_OAUTH_CLIENT_ID or not GOOGLE_OAUTH_CLIENT_SECRET or not GOOGLE_OAUTH_REDIRECT_URI:
-        raise HTTPException(500, "Google OAuth is not configured on the backend")
+    cfg = await _google_oauth_config(str(tenant_id))
+    if not cfg.get("client_id") or not cfg.get("client_secret") or not cfg.get("redirect_uri"):
+        raise HTTPException(500, "Google OAuth is not configured. Set GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET/GOOGLE_OAUTH_REDIRECT_URI on the backend or configure Integrations → Google OAuth.")
 
     payload = {
-        "client_id": GOOGLE_OAUTH_CLIENT_ID,
-        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "client_id": cfg.get("client_id"),
+        "client_secret": cfg.get("client_secret"),
         "code": code,
-        "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI,
+        "redirect_uri": cfg.get("redirect_uri"),
         "grant_type": "authorization_code",
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post("https://oauth2.googleapis.com/token", data=payload)
     if resp.status_code != 200:
         await db.oauth_states.delete_one({"_id": state})
-        raise HTTPException(400, f"oauth_http_{resp.status_code}: {resp.text[:300]}")
+        detail = resp.text[:300]
+        try:
+            j = resp.json() or {}
+            if isinstance(j, dict) and (j.get("error") or j.get("error_description")):
+                detail = f"{j.get('error') or 'oauth_error'}: {j.get('error_description') or ''}".strip()
+        except Exception:
+            pass
+        raise HTTPException(400, f"oauth_http_{resp.status_code}: {detail}")
     data = resp.json() or {}
     refresh_token = data.get("refresh_token") or ""
     if not str(refresh_token).strip():
@@ -1636,25 +1663,29 @@ async def clickup_client_sync_status(user_id: str = Query(default=""), ctx=Depen
 
 @api.post("/import/clickup/clients/sync")
 async def clickup_client_sync_now(ctx=Depends(get_current_context)):
-    res = await clickup_client_sync.sync_assigned_clients_for_user(
-        tenant_id=ctx.tenant_id,
-        user_id=ctx.user.id,
-        user_name=ctx.user.name,
-        user_email=ctx.user.email,
-    )
-    if res.get("ok"):
-        await db.integrations.update_one(
-            {"tenant_id": ctx.tenant_id, "platform": "clickup"},
-            {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_synced_at": utcnow().isoformat(), "last_error": None, "status": "connected", "updated_at": utcnow().isoformat()}},
-            upsert=True,
+    async def _run():
+        res = await clickup_client_sync.sync_assigned_clients_for_user(
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user.id,
+            user_name=ctx.user.name,
+            user_email=ctx.user.email,
         )
-    else:
-        await db.integrations.update_one(
-            {"tenant_id": ctx.tenant_id, "platform": "clickup"},
-            {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_error": res.get("error"), "updated_at": utcnow().isoformat()}},
-            upsert=True,
-        )
-    return res
+        if res.get("ok"):
+            await db.integrations.update_one(
+                {"tenant_id": ctx.tenant_id, "platform": "clickup"},
+                {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_synced_at": utcnow().isoformat(), "last_error": None, "status": "connected", "updated_at": utcnow().isoformat()}},
+                upsert=True,
+            )
+        else:
+            await db.integrations.update_one(
+                {"tenant_id": ctx.tenant_id, "platform": "clickup"},
+                {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_error": res.get("error"), "updated_at": utcnow().isoformat()}},
+                upsert=True,
+            )
+        return res
+
+    asyncio.create_task(_run())
+    return {"ok": True, "queued": True}
 
 
 @api.post("/import/clickup/clients/sync/all")

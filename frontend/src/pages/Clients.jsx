@@ -171,6 +171,9 @@ export function ClientsList() {
               <div className="card-flat p-4">
                 <div className="text-xs text-slate-400">Last successful sync</div>
                 <div className="text-sm mt-1 mono">{syncStatus?.last_success_at ? new Date(syncStatus.last_success_at).toLocaleString() : "—"}</div>
+                {!!syncStatus?.running && (
+                  <div className="text-xs text-slate-300 mt-2">Sync in progress…</div>
+                )}
                 {!!syncStatus?.last_error && (
                   <div className="text-xs text-rose-200 mt-2">
                     Last error: {syncStatus.last_error}
@@ -183,7 +186,11 @@ export function ClientsList() {
                     <div className="text-sm font-semibold">Latest sync result</div>
                     <span className={`chip ${syncResult.ok ? "chip-success" : "chip-danger"}`}>{syncResult.ok ? "ok" : "error"}</span>
                   </div>
-                  {syncResult.ok ? (
+                  {syncResult.ok && syncResult.queued ? (
+                    <div className="text-sm text-slate-300 mt-3">
+                      Sync started. Click Refresh Status in a few seconds to see progress and results.
+                    </div>
+                  ) : syncResult.ok ? (
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3 text-sm">
                       <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
                         <div className="text-xs text-slate-400">Assigned found</div>
