@@ -162,6 +162,7 @@ class AiVisibilityConfig(BaseDocument):
     tenant_id: Optional[str] = None
     client_id: str
     market: str = ""
+    market_override: Optional[str] = None
     keywords: List[str] = Field(default_factory=list)
     brand_override: Optional[str] = None
     domain_override: Optional[str] = None
@@ -170,6 +171,7 @@ class AiVisibilityConfig(BaseDocument):
 
 class AiVisibilityConfigIn(BaseModel):
     market: str = ""
+    market_override: Optional[str] = None
     keywords: List[str] = Field(default_factory=list)
     brand_override: Optional[str] = None
     domain_override: Optional[str] = None

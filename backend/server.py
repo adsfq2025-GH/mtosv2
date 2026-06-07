@@ -7,14 +7,14 @@ import os
 import uvicorn
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 import zipfile
 from urllib.parse import urlencode
 from html import escape
 
 from dotenv import load_dotenv
 import httpx
-from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from starlette.middleware.cors import CORSMiddleware
 
@@ -802,6 +802,7 @@ async def create_ai_visibility_config(
         tenant_id=ctx.tenant_id,
         client_id=client_id,
         market=str(intel.get("market") or "").strip(),
+        market_override=None,
         keywords=[],
         brand_override=None,
         domain_override=None,
@@ -814,7 +815,7 @@ async def create_ai_visibility_config(
 @api.patch("/ai-visibility/configs/{config_id}")
 async def update_ai_visibility_config(
     config_id: str,
-    data: AiVisibilityConfigIn,
+    data: Dict[str, Any] = Body(default_factory=dict),
     ctx=Depends(_require_ai_visibility),
 ):
     cfg_doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
@@ -822,18 +823,38 @@ async def update_ai_visibility_config(
         raise HTTPException(404, "Config not found")
     cfg = AiVisibilityConfig.from_mongo(cfg_doc)
     client_doc = await db.clients.find_one({"_id": cfg.client_id, **tenant_scope(ctx.tenant_id)})
-    intel = await ai_visibility.generate_prompt_intelligence(client_doc or {})
-    patch = {
-        "market": str(intel.get("market") or "").strip(),
-        "keywords": [],
-        "brand_override": None,
-        "domain_override": None,
-        "enabled": True,
-        "updated_at": utcnow().isoformat(),
-    }
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Invalid payload")
+
+    patch: Dict[str, Any] = {"updated_at": utcnow().isoformat()}
+
+    if not data:
+        intel = await ai_visibility.generate_prompt_intelligence(client_doc or {})
+        patch["market"] = str(intel.get("market") or "").strip()
+        await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+        doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+        return {
+            "ok": True,
+            "config": AiVisibilityConfig.from_mongo(doc).model_dump(),
+            "prompt_intelligence": {"themes": intel.get("themes") or [], "prompts_total": intel.get("prompts_total") or 0},
+        }
+
+    if "enabled" in data:
+        patch["enabled"] = bool(data.get("enabled"))
+
+    if "brand_override" in data:
+        v = str(data.get("brand_override") or "").strip()
+        patch["brand_override"] = v if v else None
+    if "domain_override" in data:
+        v = str(data.get("domain_override") or "").strip()
+        patch["domain_override"] = v if v else None
+    if "market_override" in data:
+        v = str(data.get("market_override") or "").strip()
+        patch["market_override"] = v if v else None
+
     await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
-    return {"ok": True, "config": AiVisibilityConfig.from_mongo(doc).model_dump(), "prompt_intelligence": {"themes": intel.get("themes") or [], "prompts_total": intel.get("prompts_total") or 0}}
+    return {"ok": True, "config": AiVisibilityConfig.from_mongo(doc).model_dump()}
 
 
 @api.get("/ai-visibility/configs/{config_id}/runs")
@@ -875,7 +896,7 @@ async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibil
 
     brand, domain = ai_visibility.infer_brand_and_domain(client_doc, cfg.brand_override, cfg.domain_override)
     intel = await ai_visibility.generate_prompt_intelligence(client_doc)
-    market = str(intel.get("market") or cfg.market or "").strip()
+    market = str(cfg.market_override or intel.get("market") or cfg.market or "").strip()
     themes = intel.get("themes") or []
     prompts = []
     for t in themes:

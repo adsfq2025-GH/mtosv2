@@ -23,11 +23,18 @@ export default function AiVisibility() {
   const [configId, setConfigId] = React.useState("");
   const [inferredBrand, setInferredBrand] = React.useState("");
   const [inferredDomain, setInferredDomain] = React.useState("");
+  const [brandOverrideEnabled, setBrandOverrideEnabled] = React.useState(false);
+  const [brandOverride, setBrandOverride] = React.useState("");
+  const [domainOverrideEnabled, setDomainOverrideEnabled] = React.useState(false);
+  const [domainOverride, setDomainOverride] = React.useState("");
+  const [marketOverrideEnabled, setMarketOverrideEnabled] = React.useState(false);
+  const [marketOverride, setMarketOverride] = React.useState("");
   const [scans, setScans] = React.useState([]);
   const [selectedScanId, setSelectedScanId] = React.useState("");
   const [runs, setRuns] = React.useState([]);
   const [busy, setBusy] = React.useState(false);
   const [regenBusy, setRegenBusy] = React.useState(false);
+  const [saveBusy, setSaveBusy] = React.useState(false);
   const [runBusy, setRunBusy] = React.useState(false);
   const [loadingRuns, setLoadingRuns] = React.useState(false);
   const [err, setErr] = React.useState("");
@@ -91,6 +98,12 @@ export default function AiVisibility() {
     if (!cfg) {
       setInferredBrand("");
       setInferredDomain("");
+      setBrandOverrideEnabled(false);
+      setBrandOverride("");
+      setDomainOverrideEnabled(false);
+      setDomainOverride("");
+      setMarketOverrideEnabled(false);
+      setMarketOverride("");
       setScans([]);
       setSelectedScanId("");
       setRuns([]);
@@ -98,6 +111,15 @@ export default function AiVisibility() {
     }
     setInferredBrand(cfg.inferred_brand || "");
     setInferredDomain(cfg.inferred_domain || "");
+    const bo = String(cfg.brand_override || "").trim();
+    setBrandOverrideEnabled(!!bo);
+    setBrandOverride(bo || String(cfg.inferred_brand || ""));
+    const dno = String(cfg.domain_override || "").trim();
+    setDomainOverrideEnabled(!!dno);
+    setDomainOverride(dno || String(cfg.inferred_domain || ""));
+    const mo = String(cfg.market_override || "").trim();
+    setMarketOverrideEnabled(!!mo);
+    setMarketOverride(mo || String(cfg.market || ""));
     loadScans(cfg.id).catch(() => {});
   }, [configId, configs, loadScans]);
 
@@ -140,6 +162,25 @@ export default function AiVisibility() {
     }
   };
 
+  const saveOverrides = async () => {
+    if (!configId) return;
+    setSaveBusy(true);
+    setErr("");
+    try {
+      await aiVisibilityApi.updateConfig(configId, {
+        brand_override: brandOverrideEnabled ? String(brandOverride || "").trim() : null,
+        domain_override: domainOverrideEnabled ? String(domainOverride || "").trim() : null,
+        market_override: marketOverrideEnabled ? String(marketOverride || "").trim() : null,
+      });
+      await loadConfigs(clientId);
+      await loadScans(configId);
+    } catch (e) {
+      setErr(e?.response?.data?.detail || "Save failed");
+    } finally {
+      setSaveBusy(false);
+    }
+  };
+
   const runScan = async () => {
     if (!configId) return;
     setRunBusy(true);
@@ -163,6 +204,8 @@ export default function AiVisibility() {
   const clientSov = (sovItems || []).find((x) => x?.is_client) || null;
   const platform = selectedScan?.platform_rankings || {};
   const trend = (scans || []).slice().reverse().slice(-10);
+  const cfg = configs.find((c) => c.id === configId) || null;
+  const autoMarket = selectedScan?.market || cfg?.market || "";
 
   return (
     <div>
@@ -224,21 +267,94 @@ export default function AiVisibility() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
                   <div className="text-xs text-slate-400">Brand match</div>
-                  <div className="mt-1 text-sm text-slate-200">{inferredBrand || "—"}</div>
+                  <input
+                    className="input mt-2"
+                    value={brandOverrideEnabled ? brandOverride : inferredBrand}
+                    onFocus={() => {
+                      if (!brandOverrideEnabled) {
+                        setBrandOverrideEnabled(true);
+                        setBrandOverride(inferredBrand || "");
+                      }
+                    }}
+                    onChange={(e) => setBrandOverride(e.target.value)}
+                    placeholder={inferredBrand || "Brand"}
+                  />
+                  {brandOverrideEnabled && (
+                    <button
+                      className="btn-ghost text-xs mt-2"
+                      onClick={() => {
+                        setBrandOverrideEnabled(false);
+                        setBrandOverride("");
+                      }}
+                      type="button"
+                    >
+                      Use auto
+                    </button>
+                  )}
                 </div>
                 <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
                   <div className="text-xs text-slate-400">Domain match</div>
-                  <div className="mt-1 text-sm text-slate-200">{inferredDomain || "—"}</div>
+                  <input
+                    className="input mt-2"
+                    value={domainOverrideEnabled ? domainOverride : inferredDomain}
+                    onFocus={() => {
+                      if (!domainOverrideEnabled) {
+                        setDomainOverrideEnabled(true);
+                        setDomainOverride(inferredDomain || "");
+                      }
+                    }}
+                    onChange={(e) => setDomainOverride(e.target.value)}
+                    placeholder={inferredDomain || "Domain"}
+                  />
+                  {domainOverrideEnabled && (
+                    <button
+                      className="btn-ghost text-xs mt-2"
+                      onClick={() => {
+                        setDomainOverrideEnabled(false);
+                        setDomainOverride("");
+                      }}
+                      type="button"
+                    >
+                      Use auto
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="p-3 rounded-md border border-white/5 bg-white/[0.02] mt-3">
                 <div className="text-xs text-slate-400">Market (auto)</div>
-                <div className="mt-1 text-sm text-slate-200">{selectedScan?.market || configs.find((c) => c.id === configId)?.market || "—"}</div>
+                <div className="mt-1 text-sm text-slate-200">{autoMarket || "—"}</div>
+                <div className="text-xs text-slate-400 mt-3">Market override</div>
+                <input
+                  className="input mt-2"
+                  value={marketOverrideEnabled ? marketOverride : ""}
+                  onChange={(e) => {
+                    if (!marketOverrideEnabled) setMarketOverrideEnabled(true);
+                    setMarketOverride(e.target.value);
+                  }}
+                  placeholder="Optional override (leave blank to use auto)"
+                />
+                {marketOverrideEnabled && (
+                  <button
+                    className="btn-ghost text-xs mt-2"
+                    onClick={() => {
+                      setMarketOverrideEnabled(false);
+                      setMarketOverride("");
+                    }}
+                    type="button"
+                  >
+                    Clear override
+                  </button>
+                )}
               </div>
               <div className="p-3 rounded-md border border-white/5 bg-white/[0.02] mt-3">
                 <div className="text-xs text-slate-400">Automation inputs</div>
                 <div className="mt-1 text-sm text-slate-200">Website crawl · GBP metadata · Services</div>
                 <div className="text-[11px] text-slate-500 mt-1">Prompts/themes/competitors are regenerated dynamically every scan.</div>
+              </div>
+              <div className="flex items-center justify-end mt-3">
+                <button className="btn-primary text-xs" onClick={saveOverrides} disabled={!enabled || saveBusy}>
+                  {saveBusy ? "Saving…" : "Save"}
+                </button>
               </div>
             </>
           )}
