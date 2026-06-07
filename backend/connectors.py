@@ -1133,53 +1133,82 @@ async def list_gohighlevel_contacts(tenant_id: str, location_id: str, query: str
         return {"ok": False, "error": "missing_location_id"}
     headers = _ghl_headers(api_key, location_id=location_id)
 
-    page_limit = int(limit or 100)
-    if page_limit < 1:
-        page_limit = 1
-    if page_limit > 100:
-        page_limit = 100
-    body = {"locationId": str(location_id), "page": 1, "pageLimit": page_limit}
-    if query:
-        body["searchTerm"] = str(query)
+    wanted = int(limit or 100)
+    if wanted < 1:
+        wanted = 1
+    if wanted > 5000:
+        wanted = 5000
+
+    page_limit = 100
+    out: List[Dict[str, Any]] = []
+
+    async def _add_contacts(raw_contacts: Any) -> None:
+        nonlocal out
+        if isinstance(raw_contacts, dict):
+            raw_contacts = [raw_contacts]
+        for c in raw_contacts or []:
+            if len(out) >= wanted:
+                return
+            cid = c.get("id") or c.get("_id")
+            if not cid:
+                continue
+            name = c.get("name") or " ".join([str(c.get("firstName") or "").strip(), str(c.get("lastName") or "").strip()]).strip()
+            company = c.get("companyName") or c.get("company") or ""
+            out.append(
+                {
+                    "id": str(cid),
+                    "name": str(name or "").strip(),
+                    "company": str(company or "").strip(),
+                    "email": str(c.get("email") or "").strip(),
+                    "phone": str(c.get("phone") or "").strip(),
+                }
+            )
+
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post("https://services.leadconnectorhq.com/contacts/search", headers=headers, json=body)
+        used_fallback = False
+        for page in range(1, 101):
+            body = {"locationId": str(location_id), "page": page, "pageLimit": page_limit}
+            if query:
+                body["searchTerm"] = str(query)
+            resp = await client.post("https://services.leadconnectorhq.com/contacts/search", headers=headers, json=body)
+            if resp.status_code in (400, 404, 422) or "property limit should not exist" in (resp.text or "").lower():
+                used_fallback = True
+                break
+            if resp.status_code != 200:
+                if resp.status_code in (401, 403) and not await get_gohighlevel_location_token(tenant_id, location_id):
+                    return {"ok": False, "error": "missing_location_token", "error_detail": "This location requires a GoHighLevel Location Private Integration Token. Ask your tenant admin to add it in Integrations → GoHighLevel."}
+                return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+            data = resp.json() or {}
+            raw = data.get("contacts") or data.get("results") or data.get("contact") or []
+            await _add_contacts(raw)
+            if len(out) >= wanted:
+                break
+            if not raw or (isinstance(raw, list) and len(raw) < page_limit):
+                break
 
-    if resp.status_code in (400, 404, 422) or "property limit should not exist" in (resp.text or "").lower():
-        params = {"locationId": str(location_id), "limit": int(page_limit), "skip": 0}
-        if query:
-            params["query"] = str(query)
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get("https://services.leadconnectorhq.com/contacts/", headers=headers, params=params)
+        if used_fallback and len(out) < wanted:
+            for skip in range(0, wanted, page_limit):
+                params: Dict[str, Any] = {"locationId": str(location_id), "limit": int(page_limit), "skip": int(skip)}
+                if query:
+                    params["query"] = str(query)
+                resp = await client.get("https://services.leadconnectorhq.com/contacts/", headers=headers, params=params)
+                if resp.status_code != 200:
+                    if resp.status_code in (401, 403) and not await get_gohighlevel_location_token(tenant_id, location_id):
+                        return {"ok": False, "error": "missing_location_token", "error_detail": "This location requires a GoHighLevel Location Private Integration Token. Ask your tenant admin to add it in Integrations → GoHighLevel."}
+                    return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
+                data = resp.json() or {}
+                raw = data.get("contacts") or data.get("results") or data.get("contact") or []
+                await _add_contacts(raw)
+                if len(out) >= wanted:
+                    break
+                if not raw or (isinstance(raw, list) and len(raw) < page_limit):
+                    break
 
-    if resp.status_code != 200:
-        if resp.status_code in (401, 403) and not await get_gohighlevel_location_token(tenant_id, location_id):
-            return {"ok": False, "error": "missing_location_token", "error_detail": "This location requires a GoHighLevel Location Private Integration Token. Ask your tenant admin to add it in Integrations → GoHighLevel."}
-        return {"ok": False, "error": f"gohighlevel_http_{resp.status_code}", "error_detail": _safe_err_detail(resp)}
-
-    data = resp.json() or {}
-    raw = data.get("contacts") or data.get("results") or data.get("contact") or []
-    if isinstance(raw, dict):
-        raw = [raw]
-    out = []
-    for c in raw or []:
-        cid = c.get("id") or c.get("_id")
-        if not cid:
-            continue
-        name = c.get("name") or " ".join([str(c.get("firstName") or "").strip(), str(c.get("lastName") or "").strip()]).strip()
-        company = c.get("companyName") or c.get("company") or ""
-        out.append(
-            {
-                "id": str(cid),
-                "name": str(name or "").strip(),
-                "company": str(company or "").strip(),
-                "email": str(c.get("email") or "").strip(),
-                "phone": str(c.get("phone") or "").strip(),
-            }
-        )
     if query:
         q = query.strip().lower()
         out = [x for x in out if q in (x.get("name") or "").lower() or q in (x.get("company") or "").lower() or q in (x.get("email") or "").lower()]
-    return {"ok": True, "contacts": out[: int(limit or 100)]}
+
+    return {"ok": True, "contacts": out[:wanted]}
 
 
 async def fetch_gohighlevel_contact_detail(tenant_id: str, location_id: str, contact_id: str) -> Dict[str, Any]:

@@ -18,10 +18,28 @@ export function ClientsList() {
   const navigate = useNavigate();
   const load = useCallback(() => clients.list().then(setList), []);
   useEffect(() => { load(); }, [load]);
+  const _loadClickupStatus = useCallback(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const isNetworkError = (e) => !e?.response && String(e?.message || "").toLowerCase().includes("network error");
+    let lastErr = null;
+    for (const ms of [0, 600, 1600, 3000]) {
+      if (ms) await sleep(ms);
+      try {
+        const r = await clients.clickupSyncStatus();
+        setSyncStatus(r?.state || null);
+        setImportErr("");
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (!isNetworkError(e)) break;
+      }
+    }
+    setImportErr(lastErr?.response?.data?.detail || lastErr?.message || "Failed to load sync status");
+  }, []);
   useEffect(() => {
     if (!showImport) return;
-    clients.clickupSyncStatus().then((r) => setSyncStatus(r?.state || null)).catch(() => {});
-  }, [showImport]);
+    _loadClickupStatus().catch(() => {});
+  }, [showImport, _loadClickupStatus]);
 
   const create = async (e) => {
     e.preventDefault();
@@ -101,13 +119,9 @@ export function ClientsList() {
                 className="btn-secondary"
                 disabled={importBusy}
                 onClick={async () => {
-                  setImportErr("");
                   setImportBusy(true);
                   try {
-                    const r = await clients.clickupSyncStatus();
-                    setSyncStatus(r?.state || null);
-                  } catch (e2) {
-                    setImportErr(e2?.response?.data?.detail || e2?.message || "Failed to load sync status");
+                    await _loadClickupStatus();
                   } finally {
                     setImportBusy(false);
                   }
@@ -119,14 +133,12 @@ export function ClientsList() {
                 className="btn-primary"
                 disabled={importBusy}
                 onClick={async () => {
-                  setImportErr("");
                   setImportBusy(true);
                   try {
                     const r = await clients.clickupSyncNow();
                     setSyncResult(r);
+                    setImportErr("");
                     await load();
-                    const s = await clients.clickupSyncStatus();
-                    setSyncStatus(s?.state || null);
                   } catch (e2) {
                     setImportErr(e2?.response?.data?.detail || e2?.message || "Import failed");
                   } finally {
@@ -141,14 +153,12 @@ export function ClientsList() {
                   className="btn-ghost"
                   disabled={importBusy}
                   onClick={async () => {
-                    setImportErr("");
                     setImportBusy(true);
                     try {
                       const r = await clients.clickupSyncAll();
                       await load();
                       setSyncResult(r);
-                      const s = await clients.clickupSyncStatus();
-                      setSyncStatus(s?.state || null);
+                      setImportErr("");
                     } catch (e2) {
                       setImportErr(e2?.response?.data?.detail || e2?.message || "Sync all failed");
                     } finally {
