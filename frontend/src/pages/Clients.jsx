@@ -219,6 +219,15 @@ export function ClientDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  // #region debug-point H1:init-debug-client
+  const dbgEmit = useCallback((hypothesisId, location, msg, data = {}) => {
+    fetch("http://127.0.0.1:7778/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "monthly-touch-integrations", runId: "pre-fix", hypothesisId, location, msg: `[DEBUG] ${msg}`, data, ts: Date.now() }),
+    }).catch(() => {});
+  }, []);
+  // #endregion
   const [client, setClient] = useState(null);
   const [meets, setMeets] = useState([]);
   const [actions, setActions] = useState([]);
@@ -258,6 +267,7 @@ export function ClientDetail() {
   const [generatingSuggestions, setGeneratingSuggestions] = useState(false);
   const [feedbackTrend, setFeedbackTrend] = useState(null);
   const [healthTrend, setHealthTrend] = useState(null);
+  const [genMtBusy, setGenMtBusy] = useState(false);
 
   const reload = useCallback(
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
@@ -304,8 +314,25 @@ export function ClientDetail() {
   };
 
   const generateMonthlyTouch = async () => {
-    const m = await clients.generateMonthlyTouch(id, {});
-    navigate(`/meetings/${m.id}`);
+    // #region debug-point H1:generate-monthly-touch-click
+    dbgEmit("H1", "Clients.jsx:generateMonthlyTouch", "clicked", { client_id: id, user_id: user?.id, role: user?.role });
+    // #endregion
+    if (genMtBusy) return;
+    setGenMtBusy(true);
+    try {
+      const m = await clients.generateMonthlyTouch(id, {});
+      // #region debug-point H1:generate-monthly-touch-success
+      dbgEmit("H1", "Clients.jsx:generateMonthlyTouch", "success", { client_id: id, meeting_id: m?.id });
+      // #endregion
+      navigate(`/meetings/${m.id}`);
+    } catch (e) {
+      // #region debug-point H1:generate-monthly-touch-error
+      dbgEmit("H1", "Clients.jsx:generateMonthlyTouch", "error", { client_id: id, status: e?.response?.status, detail: e?.response?.data?.detail, message: e?.message });
+      // #endregion
+      alert(e?.response?.data?.detail || e?.message || "Generate Monthly Touch failed");
+    } finally {
+      setGenMtBusy(false);
+    }
   };
 
   const saveReviewGoal = async () => {
@@ -400,6 +427,9 @@ export function ClientDetail() {
     setShowClickupPicker(true);
     setClickupQ("");
     setLoadingClickup(true);
+    // #region debug-point H4:clickup-picker-entry
+    dbgEmit("H4", "Clients.jsx:openClickupPicker", "entry", { client_id: id, user_id: user?.id, role: user?.role });
+    // #endregion
     try {
       const ws = await integrations.clickupWorkspaces();
       const list = ws?.workspaces || [];
@@ -413,6 +443,9 @@ export function ClientDetail() {
         setClickupFolders([]);
       }
     } catch (e) {
+      // #region debug-point H4:clickup-picker-error
+      dbgEmit("H4", "Clients.jsx:openClickupPicker", "error", { status: e?.response?.status, detail: e?.response?.data?.detail, message: e?.message });
+      // #endregion
       alert(e?.response?.data?.detail || "Failed to load ClickUp data");
       setClickupWorkspaces([]); setClickupFolders([]); setClickupTeamId("");
     } finally {
@@ -453,10 +486,16 @@ export function ClientDetail() {
     setShowGadsPicker(true);
     setGadsQ("");
     setLoadingGads(true);
+    // #region debug-point H4:gads-picker-entry
+    dbgEmit("H4", "Clients.jsx:openGadsPicker", "entry", { client_id: id, user_id: user?.id, role: user?.role });
+    // #endregion
     try {
       const res = await integrations.googleAdsCustomers();
       setGadsCustomers(res?.customers || []);
     } catch (e) {
+      // #region debug-point H4:gads-picker-error
+      dbgEmit("H4", "Clients.jsx:openGadsPicker", "error", { status: e?.response?.status, detail: e?.response?.data?.detail, message: e?.message });
+      // #endregion
       alert(e?.response?.data?.detail || "Failed to load Google Ads customers");
       setGadsCustomers([]);
     } finally {
@@ -518,7 +557,7 @@ export function ClientDetail() {
               </>
             )}
             <button className="btn-ghost flex items-center gap-1" onClick={remove} data-testid="delete-client-btn"><Trash size={14} /> Delete</button>
-            <button className="btn-ghost flex items-center gap-2" onClick={generateMonthlyTouch} data-testid="generate-monthly-touch-btn"><Sparkle size={14} weight="duotone" /> Generate Monthly Touch</button>
+            <button className="btn-ghost flex items-center gap-2" onClick={generateMonthlyTouch} disabled={genMtBusy} data-testid="generate-monthly-touch-btn"><Sparkle size={14} weight="duotone" /> {genMtBusy ? "Generating…" : "Generate Monthly Touch"}</button>
             <button className="btn-primary flex items-center gap-2" onClick={() => setShowMeet(true)} data-testid="new-meeting-btn"><Plus size={14} weight="bold" /> New Meeting</button>
           </>
         }

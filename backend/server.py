@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 import zipfile
 from urllib.parse import urlencode
 from html import escape
+import json
+import urllib.request
 
 from dotenv import load_dotenv
 import httpx
@@ -21,6 +23,38 @@ from starlette.middleware.cors import CORSMiddleware
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
 STORAGE_DIR = ROOT / "storage"
+
+# #region debug-point D:init-debug-emitter
+def _dbg_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None) -> None:
+    try:
+        u = "http://127.0.0.1:7777/event"
+        s = "monthly-touch-integrations"
+        p = str(Path(".dbg") / f"{s}.env")
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                c = f.read()
+            for line in c.splitlines():
+                if line.startswith("DEBUG_SERVER_URL="):
+                    u = line.split("=", 1)[1].strip() or u
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    s = line.split("=", 1)[1].strip() or s
+        except Exception:
+            pass
+        payload = {
+            "sessionId": s,
+            "runId": "pre-fix",
+            "hypothesisId": str(hypothesis_id),
+            "location": str(location),
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+        }
+        urllib.request.urlopen(
+            urllib.request.Request(u, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}),
+            timeout=1.5,
+        ).read()
+    except Exception:
+        return
+# #endregion
 
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
@@ -1883,6 +1917,9 @@ async def create_meeting(data: MeetingIn, ctx=Depends(get_current_context)):
 @api.post("/clients/{client_id}/monthly-touch")
 async def generate_monthly_touch(client_id: str, data: GenerateBriefIn, ctx=Depends(get_current_context)):
     await _require_client_access(ctx, client_id)
+    # #region debug-point H1:monthly-touch-entry
+    _dbg_emit("H1", "server.py:/clients/{client_id}/monthly-touch", "monthly_touch_clicked", {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "role": ctx.user.role, "client_id": client_id, "model": data.model})
+    # #endregion
     try:
         meeting = await monthly_touch.generate_for_client(
             ctx.tenant_id,
@@ -1893,9 +1930,23 @@ async def generate_monthly_touch(client_id: str, data: GenerateBriefIn, ctx=Depe
             push_clickup_actions=True,
         )
     except ValueError as e:
+        # #region debug-point H1:monthly-touch-valueerror
+        _dbg_emit("H1", "server.py:/clients/{client_id}/monthly-touch", "monthly_touch_value_error", {"client_id": client_id, "error": str(e)})
+        # #endregion
         raise HTTPException(404, str(e))
     except ai.AIProviderError as e:
+        # #region debug-point H1:monthly-touch-aierror
+        _dbg_emit("H1", "server.py:/clients/{client_id}/monthly-touch", "monthly_touch_ai_provider_error", {"client_id": client_id, "error": str(e)})
+        # #endregion
         raise HTTPException(400, str(e))
+    except Exception as e:
+        # #region debug-point H1:monthly-touch-unknown
+        _dbg_emit("H1", "server.py:/clients/{client_id}/monthly-touch", "monthly_touch_unknown_error", {"client_id": client_id, "error": str(e)[:300]})
+        # #endregion
+        raise
+    # #region debug-point H1:monthly-touch-success
+    _dbg_emit("H1", "server.py:/clients/{client_id}/monthly-touch", "monthly_touch_success", {"client_id": client_id, "meeting_id": getattr(meeting, "id", None)})
+    # #endregion
     return meeting.model_dump()
 
 
@@ -3782,10 +3833,22 @@ async def clickup_workspaces(ctx=Depends(get_current_context)):
 @api.get("/integrations/google_ads/customers")
 async def google_ads_customers(ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        # #region debug-point H4:google-ads-customers-forbidden
+        _dbg_emit("H4", "server.py:/integrations/google_ads/customers", "forbidden_non_admin", {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "role": ctx.user.role, "tenant_role": ctx.tenant_role})
+        # #endregion
         raise HTTPException(403, "Admin only")
+    # #region debug-point H4:google-ads-customers-entry
+    _dbg_emit("H4", "server.py:/integrations/google_ads/customers", "list_google_ads_customers_entry", {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id})
+    # #endregion
     res = await connectors.list_google_ads_customers(ctx.tenant_id, ctx.user.id)
     if not res.get("ok"):
+        # #region debug-point H4:google-ads-customers-fail
+        _dbg_emit("H4", "server.py:/integrations/google_ads/customers", "list_google_ads_customers_failed", {"error": res.get("error"), "error_detail": res.get("error_detail")})
+        # #endregion
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
+    # #region debug-point H4:google-ads-customers-ok
+    _dbg_emit("H4", "server.py:/integrations/google_ads/customers", "list_google_ads_customers_ok", {"count": len(res.get("customers") or [])})
+    # #endregion
     return res
 
 

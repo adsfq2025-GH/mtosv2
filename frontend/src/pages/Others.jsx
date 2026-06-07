@@ -110,6 +110,7 @@ export function Integrations() {
   const [edit, setEdit] = useState(null);
   const [form, setForm] = useState({});
   const [busy, setBusy] = useState(false);
+  const [testBusy, setTestBusy] = useState("");
   const [oauthBusy, setOauthBusy] = useState(false);
   const [promptBusy, setPromptBusy] = useState(false);
   const [mtPrompt, setMtPrompt] = useState("");
@@ -261,6 +262,27 @@ export function Integrations() {
             <p className="text-xs text-slate-400 mt-3 min-h-[40px]">{i.description}</p>
             <div className="flex items-center gap-2 mt-3">
               <button className="btn-ghost text-xs !py-1.5 !px-2.5 flex-1" onClick={() => openConfig(i)} data-testid={`configure-${i.platform}`}>{i.status === "connected" ? "Reconfigure" : "Configure"}</button>
+              {user?.role === "admin" && (
+                <button
+                  className="btn-secondary text-xs"
+                  disabled={testBusy === i.platform}
+                  onClick={async () => {
+                    setTestBusy(i.platform);
+                    try {
+                      const r = await integrations.test(i.platform);
+                      alert(`Test OK: ${i.label}${r?.note ? `\n\n${r.note}` : ""}`);
+                      await load();
+                    } catch (e) {
+                      alert(e?.response?.data?.detail || e?.message || "Test failed");
+                      await load();
+                    } finally {
+                      setTestBusy("");
+                    }
+                  }}
+                >
+                  {testBusy === i.platform ? "Testing…" : "Test"}
+                </button>
+              )}
               {i.status === "connected" && (
                 GOOGLE_OAUTH.has(i.platform)
                   ? <button className="btn-danger text-xs" onClick={() => disconnectGoogle(i.platform)}>Disconnect</button>

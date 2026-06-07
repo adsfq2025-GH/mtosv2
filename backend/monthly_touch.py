@@ -192,7 +192,10 @@ async def generate_for_client(
 
     if push_clickup_actions:
         for item in created_items:
-            await _push_action_item_to_clickup(tenant_id, item, client.id)
+            try:
+                await _push_action_item_to_clickup(tenant_id, item, client.id)
+            except Exception:
+                pass
 
     return meeting
 
