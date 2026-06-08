@@ -113,7 +113,7 @@ export function ClientsList() {
 
             <div className="text-sm text-slate-300">
               This pulls your assigned clients from the <span className="font-semibold">Client Health Tracker</span> in ClickUp.
-              We match the <span className="font-semibold">Account Manager</span> field to your user name (and email when available).
+              We match the <span className="font-semibold">Account Manager</span> field (or task assignee) to your user name (and email when available).
             </div>
 
             <div className="flex items-center gap-2 mt-4">
@@ -197,6 +197,11 @@ export function ClientsList() {
                     {!!syncLastRun.debug_sample_account_managers?.length && (
                       <span className="block mt-1 text-slate-400">
                         Sample Account Manager values: {syncLastRun.debug_sample_account_managers.join(" · ")}
+                      </span>
+                    )}
+                    {!!syncLastRun.debug_sample_custom_field_names?.length && (
+                      <span className="block mt-1 text-slate-400">
+                        Sample custom fields: {syncLastRun.debug_sample_custom_field_names.join(" · ")}
                       </span>
                     )}
                   </div>

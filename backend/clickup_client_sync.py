@@ -118,6 +118,37 @@ def _resolve_clickup_user_ids(value: str, user_map: Dict[str, Dict[str, str]]) -
     return ", ".join(out) or s
 
 
+def _task_assignees_value(task: dict, user_map: Dict[str, Dict[str, str]]) -> str:
+    assignees = (task or {}).get("assignees") or []
+    if not isinstance(assignees, list) or not assignees:
+        return ""
+    out: List[str] = []
+    seen = set()
+    for a in assignees:
+        if not isinstance(a, dict):
+            continue
+        uid = str(a.get("id") or "").strip()
+        username = str(a.get("username") or "").strip()
+        email = str(a.get("email") or "").strip()
+        label = username or email
+        if not label and uid and user_map.get(uid):
+            u = user_map[uid]
+            label = str(u.get("name") or u.get("username") or u.get("email") or "").strip()
+        key = _norm(label)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+    return ", ".join(out)
+
+
+def _task_account_manager_value(task: dict, user_map: Dict[str, Dict[str, str]]) -> str:
+    v0 = _custom_field_value(task, "Account Manager") or ""
+    if v0:
+        return _resolve_clickup_user_ids(v0, user_map) if user_map else v0
+    return _task_assignees_value(task, user_map)
+
+
 async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team_id: str) -> Dict[str, Any]:
     headers = _clickup_headers(token)
     forced_raw = str(os.environ.get("CLICKUP_CLIENT_HEALTH_TRACKER_LIST_ID") or "").strip()
@@ -362,16 +393,19 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             }
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "team:loaded", {"members": len(user_map)})
         sample_ams: List[str] = []
+        sample_custom_fields: List[str] = []
         for t in tasks[:20]:
-            v0 = _custom_field_value(t, "Account Manager")
-            v = _resolve_clickup_user_ids(v0 or "", user_map) if v0 else v0
+            for cf in (t or {}).get("custom_fields") or []:
+                n = str((cf or {}).get("name") or "").strip()
+                if n:
+                    sample_custom_fields.append(n[:120])
+            v = _task_account_manager_value(t, user_map)
             if v:
                 sample_ams.append(str(v)[:120])
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "tasks:fetched", {"total": len(tasks), "sample_account_manager_values": sample_ams[:10]})
         assigned_tasks: List[dict] = []
         for t in tasks:
-            am0 = _custom_field_value(t, "Account Manager") or ""
-            am = _resolve_clickup_user_ids(am0, user_map) if am0 else am0
+            am = _task_account_manager_value(t, user_map)
             if _match_account_manager(am, user_name=user_name, user_email=user_email):
                 assigned_tasks.append(t)
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "tasks:assigned_filtered", {"assigned": len(assigned_tasks), "total": len(tasks)})
@@ -499,6 +533,7 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             "paused": paused,
             "assigned_found": len(assigned_tasks),
             "debug_sample_account_managers": sample_ams[:10],
+            "debug_sample_custom_field_names": [s for s in dict.fromkeys(sample_custom_fields) if s][:25],
         }
         await db.clickup_client_sync_logs.insert_one({"_id": run_id, "tenant_id": tenant_id, "user_id": user_id, **out})
         await db.clickup_client_sync_state.update_one(

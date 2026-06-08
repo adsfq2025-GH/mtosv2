@@ -3787,6 +3787,83 @@ async def integrations_status(ctx=Depends(get_current_context)):
     return out
 
 
+@api.get("/diagnostics/integrations")
+async def diagnostics_integrations(ctx=Depends(get_current_context)):
+    docs = await db.integrations.find(tenant_scope(ctx.tenant_id)).to_list(200)
+    safe = []
+    for d in docs:
+        dd = {k: v for k, v in (d or {}).items() if k not in ("credentials_encrypted",)}
+        if isinstance(dd.get("_id"), ObjectId):
+            dd["_id"] = str(dd["_id"])
+        safe.append(dd)
+    user_google = await db.user_oauth_tokens.find({"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google"}).to_list(200)
+    safe_user_google = []
+    for t in user_google:
+        tt = {k: v for k, v in (t or {}).items() if k not in ("refresh_token_encrypted", "access_token_encrypted")}
+        if isinstance(tt.get("_id"), ObjectId):
+            tt["_id"] = str(tt["_id"])
+        safe_user_google.append(tt)
+    return {"ok": True, "tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "integrations": safe, "user_google_tokens": safe_user_google}
+
+
+@api.get("/diagnostics/client/{client_id}")
+async def diagnostics_client(client_id: str, ctx=Depends(get_current_context)):
+    await _require_client_access(ctx, client_id)
+    cdoc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    if not cdoc:
+        raise HTTPException(404, "Client not found")
+    bindings = await db.client_bindings.find({"client_id": client_id, **tenant_scope(ctx.tenant_id)}).to_list(200)
+    safe_bindings = []
+    for b in bindings:
+        bb = dict(b or {})
+        if isinstance(bb.get("_id"), ObjectId):
+            bb["_id"] = str(bb["_id"])
+        safe_bindings.append(bb)
+    return {
+        "ok": True,
+        "tenant_id": ctx.tenant_id,
+        "user_id": ctx.user.id,
+        "client": {
+            "id": str(cdoc.get("_id")),
+            "company": cdoc.get("company"),
+            "name": cdoc.get("name"),
+            "website": cdoc.get("website"),
+            "location": cdoc.get("location"),
+            "services": cdoc.get("services") or [],
+            "gbp_data": cdoc.get("gbp_data") or {},
+            "crm_data": cdoc.get("crm_data") or {},
+        },
+        "bindings": safe_bindings,
+    }
+
+
+@api.get("/diagnostics/meeting/{meeting_id}")
+async def diagnostics_meeting(meeting_id: str, ctx=Depends(get_current_context)):
+    doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    if not doc:
+        raise HTTPException(404, "Meeting not found")
+    client_id = str(doc.get("client_id") or "").strip()
+    if client_id:
+        await _require_client_access(ctx, client_id)
+    m = Meeting.from_mongo(doc).model_dump()
+    kpi = (m or {}).get("kpi_snapshot") or {}
+    return {
+        "ok": True,
+        "tenant_id": ctx.tenant_id,
+        "user_id": ctx.user.id,
+        "meeting": {
+            "id": meeting_id,
+            "client_id": client_id,
+            "brief_generated_at": m.get("brief_generated_at"),
+            "brief_model": m.get("brief_model"),
+            "wins_count": len(m.get("wins") or []),
+            "issues_count": len(m.get("issues") or []),
+            "recommendations_count": len(m.get("strategic_recommendations") or []),
+        },
+        "kpi_availability": (kpi or {}).get("_availability") or {},
+    }
+
+
 @api.post("/integrations/{platform}/configure")
 async def configure_integration(platform: str, data: IntegrationConfigureIn, ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
