@@ -268,9 +268,12 @@ export function ClientDetail() {
   const [clickupFolderId, setClickupFolderId] = useState("");
   const [gohighlevelLocationId, setGohighlevelLocationId] = useState("");
   const [googleAdsCustomerId, setGoogleAdsCustomerId] = useState("");
+  const [gbpAccountName, setGbpAccountName] = useState("");
+  const [gbpLocationName, setGbpLocationName] = useState("");
   const [savingBindings, setSavingBindings] = useState(false);
   const [savingGhlBinding, setSavingGhlBinding] = useState(false);
   const [savingGadsBinding, setSavingGadsBinding] = useState(false);
+  const [savingGbpBinding, setSavingGbpBinding] = useState(false);
   const [showClickupPicker, setShowClickupPicker] = useState(false);
   const [clickupWorkspaces, setClickupWorkspaces] = useState([]);
   const [clickupTeamId, setClickupTeamId] = useState("");
@@ -285,6 +288,10 @@ export function ClientDetail() {
   const [gadsCustomers, setGadsCustomers] = useState([]);
   const [gadsQ, setGadsQ] = useState("");
   const [loadingGads, setLoadingGads] = useState(false);
+  const [showGbpPicker, setShowGbpPicker] = useState(false);
+  const [gbpLocations, setGbpLocations] = useState([]);
+  const [gbpQ, setGbpQ] = useState("");
+  const [loadingGbp, setLoadingGbp] = useState(false);
   const [showMeet, setShowMeet] = useState(false);
   const [meetForm, setMeetForm] = useState({ title: "", scheduled_at: "", google_meet_url: "", duration_minutes: 60 });
   const [website, setWebsite] = useState("");
@@ -316,6 +323,11 @@ export function ClientDetail() {
       const gads = (b || []).find((x) => x.platform === "google_ads");
       const custId = gads?.external_ids?.customer_id || gads?.config?.customer_id || "";
       setGoogleAdsCustomerId(custId ? String(custId) : "");
+      const gbp = (b || []).find((x) => x.platform === "google_business_profile");
+      const acct = gbp?.external_ids?.account_name || gbp?.config?.account_name || "";
+      const loc = gbp?.external_ids?.location_name || gbp?.config?.location_name || "";
+      setGbpAccountName(acct ? String(acct) : "");
+      setGbpLocationName(loc ? String(loc) : "");
 
       reviews.goal.get(id).then((g) => setReviewGoal(Number(g?.monthly_goal || 10) || 10)).catch(() => {});
       reviews.stats(id, 12).then(setReviewStats).catch(() => setReviewStats(null));
@@ -457,6 +469,18 @@ export function ClientDetail() {
     }
   };
 
+  const saveGbpBinding = async () => {
+    setSavingGbpBinding(true);
+    try {
+      await clients.upsertBinding(id, "google_business_profile", { enabled: true, external_ids: { account_name: gbpAccountName, location_name: gbpLocationName } });
+      await reload();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save Google Business Profile binding");
+    } finally {
+      setSavingGbpBinding(false);
+    }
+  };
+
   const openClickupPicker = async () => {
     setShowClickupPicker(true);
     setClickupQ("");
@@ -534,6 +558,21 @@ export function ClientDetail() {
       setGadsCustomers([]);
     } finally {
       setLoadingGads(false);
+    }
+  };
+
+  const openGbpPicker = async () => {
+    setShowGbpPicker(true);
+    setGbpQ("");
+    setLoadingGbp(true);
+    try {
+      const res = await integrations.gbpLocations();
+      setGbpLocations(res?.locations || []);
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to load Google Business Profile locations");
+      setGbpLocations([]);
+    } finally {
+      setLoadingGbp(false);
     }
   };
 
@@ -666,6 +705,14 @@ export function ClientDetail() {
             <button type="button" className="btn-ghost whitespace-nowrap" onClick={openGadsPicker} data-testid="browse-google-ads-customers">Browse</button>
           </div>
           <button className="btn-ghost w-full mt-2" onClick={saveGadsBinding} disabled={savingGadsBinding} data-testid="save-google-ads-binding">{savingGadsBinding ? "Saving…" : "Save Google Ads Customer"}</button>
+          <div className="divider my-4" />
+          <div className="label mb-2">Google Business Profile Mapping</div>
+          <label className="text-[11px] text-slate-500">Location</label>
+          <div className="flex gap-2 mt-1.5">
+            <input className="input flex-1" value={gbpLocationName} readOnly placeholder="locations/123…" />
+            <button type="button" className="btn-ghost whitespace-nowrap" onClick={openGbpPicker}>Browse</button>
+          </div>
+          <button className="btn-ghost w-full mt-2" onClick={saveGbpBinding} disabled={savingGbpBinding}>{savingGbpBinding ? "Saving…" : "Save GBP Location"}</button>
         </div>
 
         <div className="lg:col-span-2 space-y-6">
@@ -1127,6 +1174,54 @@ export function ClientDetail() {
                 </button>
               ))}
               {!loadingGads && (gadsCustomers || []).length === 0 && <div className="p-4 text-sm text-slate-400">No customers found.</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showGbpPicker && (
+        <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4" onClick={() => setShowGbpPicker(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="card-flat p-6 w-full max-w-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Select GBP Location</h3>
+              <button type="button" className="btn-ghost !p-2" onClick={() => setShowGbpPicker(false)}><X size={14} /></button>
+            </div>
+            <input className="input w-full" placeholder="Search locations…" value={gbpQ} onChange={(e) => setGbpQ(e.target.value)} />
+            <div className="mt-4 max-h-[420px] overflow-auto">
+              {loadingGbp ? (
+                <div className="text-slate-400 text-sm py-8 text-center">Loading…</div>
+              ) : (
+                <div className="space-y-2">
+                  {(gbpLocations || [])
+                    .filter((x) => {
+                      const q = (gbpQ || "").trim().toLowerCase();
+                      if (!q) return true;
+                      return String(x?.title || "").toLowerCase().includes(q)
+                        || String(x?.website || "").toLowerCase().includes(q)
+                        || String(x?.phone || "").toLowerCase().includes(q)
+                        || String(x?.location_name || "").toLowerCase().includes(q);
+                    })
+                    .slice(0, 300)
+                    .map((x) => (
+                      <button
+                        key={`${x.account_name}-${x.location_name}`}
+                        type="button"
+                        className="w-full text-left p-3 rounded-md border border-white/5 hover:bg-white/[0.04]"
+                        onClick={() => {
+                          setGbpAccountName(String(x.account_name || ""));
+                          setGbpLocationName(String(x.location_name || ""));
+                          setShowGbpPicker(false);
+                        }}
+                      >
+                        <div className="text-sm font-medium">{x.title || x.location_name}</div>
+                        <div className="text-[11px] text-slate-500 mono mt-0.5">{x.website || x.phone || x.location_name}</div>
+                      </button>
+                    ))}
+                  {(gbpLocations || []).length === 0 && (
+                    <div className="text-slate-500 text-sm py-8 text-center">No locations found. Connect Google → Business Profile first.</div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>

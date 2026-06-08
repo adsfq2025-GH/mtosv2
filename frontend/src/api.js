@@ -182,6 +182,7 @@ export const integrations = {
   gohighlevelUpsertLocationToken: (locationId, token) => api.post("/integrations/gohighlevel/location-tokens", { location_id: locationId, token }).then((r) => r.data),
   gohighlevelDeleteLocationToken: (locationId) => api.delete(`/integrations/gohighlevel/location-tokens?location_id=${encodeURIComponent(locationId)}`).then((r) => r.data),
   googleAdsCustomers: () => api.get("/integrations/google_ads/customers").then((r) => r.data),
+  gbpLocations: () => api.get("/integrations/google_business_profile/locations").then((r) => r.data),
 };
 
 export const settings = {

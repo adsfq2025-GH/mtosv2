@@ -1868,7 +1868,7 @@ async def _collect_client_comms(client_doc: dict, ctx) -> dict:
     if not location_id or not contact_id:
         raise HTTPException(400, "Client is missing GoHighLevel mapping (location_id/contact_id). Import from GHL or set mapping first.")
 
-    convs = await connectors.list_gohighlevel_conversations(ctx.tenant_id, str(location_id), str(contact_id), limit=50)
+    convs = await connectors.list_gohighlevel_conversations(ctx.tenant_id, str(location_id), str(contact_id), limit=100)
     if not convs.get("ok"):
         raise HTTPException(400, convs.get("error_detail") or convs.get("error") or "Failed to fetch GoHighLevel conversations")
     ghl_msgs: List[dict] = []
@@ -3977,11 +3977,6 @@ async def clickup_workspaces(ctx=Depends(get_current_context)):
 
 @api.get("/integrations/google_ads/customers")
 async def google_ads_customers(ctx=Depends(get_current_context)):
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        # #region debug-point H4:google-ads-customers-forbidden
-        _dbg_emit("H4", "server.py:/integrations/google_ads/customers", "forbidden_non_admin", {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "role": ctx.user.role, "tenant_role": ctx.tenant_role})
-        # #endregion
-        raise HTTPException(403, "Admin only")
     # #region debug-point H4:google-ads-customers-entry
     _dbg_emit("H4", "server.py:/integrations/google_ads/customers", "list_google_ads_customers_entry", {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id})
     # #endregion
@@ -3994,6 +3989,14 @@ async def google_ads_customers(ctx=Depends(get_current_context)):
     # #region debug-point H4:google-ads-customers-ok
     _dbg_emit("H4", "server.py:/integrations/google_ads/customers", "list_google_ads_customers_ok", {"count": len(res.get("customers") or [])})
     # #endregion
+    return res
+
+
+@api.get("/integrations/google_business_profile/locations")
+async def google_business_profile_locations(ctx=Depends(get_current_context)):
+    res = await connectors.list_gbp_locations_for_user(ctx.tenant_id, ctx.user.id)
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
     return res
 
 

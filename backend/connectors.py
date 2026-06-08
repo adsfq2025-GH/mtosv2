@@ -1420,7 +1420,7 @@ async def fetch_gbp_profile_for_client(tenant_id: str, user_id: str, client_id: 
     if not rt:
         return {"ok": False, "error": "gbp_missing_oauth"}
     try:
-        access_token = await _google_ads_access_token({"refresh_token": rt})
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, {"refresh_token": rt})
     except Exception as exc:
         return {"ok": False, "error": "gbp_oauth_error", "error_detail": str(exc)[:300]}
 
@@ -1466,7 +1466,7 @@ async def find_best_gbp_location_for_client(tenant_id: str, user_id: str, compan
     if not rt:
         return {"ok": False, "error": "missing_google_connection"}
     try:
-        access_token = await _google_ads_access_token({"refresh_token": rt})
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, {"refresh_token": rt})
     except Exception as exc:
         return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
 
@@ -1508,6 +1508,48 @@ async def find_best_gbp_location_for_client(tenant_id: str, user_id: str, compan
     if not best:
         return {"ok": True, "match": None}
     return {"ok": True, "match": best}
+
+
+async def list_gbp_locations_for_user(tenant_id: str, user_id: str) -> Dict[str, Any]:
+    rt = await get_google_refresh_token(tenant_id, user_id, "google_business_profile")
+    if not rt:
+        return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Business Profile first."}
+    try:
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, {"refresh_token": rt})
+    except Exception as exc:
+        return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
+
+    acc_res = await _gbp_list_accounts(access_token)
+    if not acc_res.get("ok"):
+        return acc_res
+    accounts = acc_res.get("accounts") or []
+
+    out = []
+    for a in accounts:
+        acct_name = a.get("name")
+        if not acct_name:
+            continue
+        loc_res = await _gbp_list_locations(access_token, acct_name)
+        if not loc_res.get("ok"):
+            continue
+        for loc in loc_res.get("locations") or []:
+            loc_name = str(loc.get("name") or "").strip()
+            title = str(loc.get("title") or "").strip()
+            website = str(loc.get("websiteUri") or "").strip()
+            phones = loc.get("phoneNumbers") or {}
+            phone = str((phones.get("primaryPhone") if isinstance(phones, dict) else "") or "").strip()
+            out.append(
+                {
+                    "account_name": str(acct_name),
+                    "location_name": loc_name,
+                    "title": title,
+                    "website": website,
+                    "phone": phone,
+                    "storefront_address": loc.get("storefrontAddress") or {},
+                }
+            )
+
+    return {"ok": True, "locations": out}
 
 
 async def list_gohighlevel_conversations(tenant_id: str, location_id: str, contact_id: str, limit: int = 50) -> Dict[str, Any]:
