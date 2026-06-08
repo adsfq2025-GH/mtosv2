@@ -63,19 +63,44 @@ GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").st
 GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
 
 
+def _clean_oauth_str(v: Any) -> str:
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    for _ in range(3):
+        s2 = s.strip()
+        if len(s2) >= 2 and (
+            (s2[0] == "`" and s2[-1] == "`")
+            or (s2[0] == '"' and s2[-1] == '"')
+            or (s2[0] == "'" and s2[-1] == "'")
+        ):
+            s = s2[1:-1].strip()
+            continue
+        s = s2
+        break
+    s = s.replace("`", "").strip()
+    return s
+
+
 async def _google_oauth_config(tenant_id: str) -> Dict[str, str]:
-    out = {"client_id": GOOGLE_OAUTH_CLIENT_ID, "client_secret": GOOGLE_OAUTH_CLIENT_SECRET, "redirect_uri": GOOGLE_OAUTH_REDIRECT_URI}
+    out = {
+        "client_id": _clean_oauth_str(GOOGLE_OAUTH_CLIENT_ID),
+        "client_secret": _clean_oauth_str(GOOGLE_OAUTH_CLIENT_SECRET),
+        "redirect_uri": _clean_oauth_str(GOOGLE_OAUTH_REDIRECT_URI),
+    }
     try:
         doc = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "google_oauth"})
         if doc:
             meta = doc.get("metadata") or {}
             enc = doc.get("credentials_encrypted") or {}
-            if str(meta.get("client_id") or "").strip():
-                out["client_id"] = str(meta.get("client_id") or "").strip()
-            if str(meta.get("redirect_uri") or "").strip():
-                out["redirect_uri"] = str(meta.get("redirect_uri") or "").strip()
+            mid = _clean_oauth_str(meta.get("client_id"))
+            mru = _clean_oauth_str(meta.get("redirect_uri"))
+            if mid:
+                out["client_id"] = mid
+            if mru:
+                out["redirect_uri"] = mru
             if str(enc.get("client_secret") or "").strip():
-                out["client_secret"] = str(decrypt_secret(enc.get("client_secret")) or "").strip()
+                out["client_secret"] = _clean_oauth_str(decrypt_secret(enc.get("client_secret")))
     except Exception:
         return out
     return out
