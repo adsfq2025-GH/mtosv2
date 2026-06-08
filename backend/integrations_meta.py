@@ -22,6 +22,7 @@ INTEGRATIONS: Dict[str, Dict[str, Any]] = {
         "fields": [
             {"key": "api_token", "label": "API Token", "secret": True, "help": "ClickUp → Settings → Apps → Generate"},
             {"key": "team_id", "label": "Workspace / Team ID", "secret": False, "help": "Optional"},
+            {"key": "client_health_tracker_list_id", "label": "Client Health Tracker List ID", "secret": False, "help": "Optional. Overrides auto-discovery for ClickUp client sync."},
         ],
     },
     "gohighlevel": {

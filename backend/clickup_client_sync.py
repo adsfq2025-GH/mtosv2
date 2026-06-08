@@ -4,6 +4,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import os
+import re
 import httpx
 
 from db import db, new_id, utcnow
@@ -18,6 +20,16 @@ def _norm(s: str) -> str:
 def _clickup_headers(token: str) -> Dict[str, str]:
     t = connectors._strip_bearer(token or "")
     return {"Authorization": t, "Accept": "application/json"}
+
+
+def _normalize_clickup_list_id(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    nums = re.findall(r"\d+", s)
+    if not nums:
+        return s
+    return max(nums, key=len)
 
 
 async def _clickup_get(url: str, headers: Dict[str, str], params: Optional[dict] = None, timeout: int = 30) -> Tuple[int, Any, str]:
@@ -66,11 +78,22 @@ async def _clickup_get_list(list_id: str, headers: Dict[str, str]) -> Optional[d
 async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team_id: str) -> Dict[str, Any]:
     headers = _clickup_headers(token)
     integration = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "clickup"})
-    cached = str(((integration or {}).get("metadata") or {}).get("client_health_tracker_list_id") or "").strip()
+    cached_raw = str(((integration or {}).get("metadata") or {}).get("client_health_tracker_list_id") or "").strip()
+    cached = _normalize_clickup_list_id(cached_raw)
+    if cached_raw and not cached:
+        return {"ok": False, "error": "clickup_list_configured_invalid", "error_detail": f"Configured Client Health Tracker List ID is invalid: {cached_raw}"}
     if cached:
         exists = await _clickup_get_list(cached, headers=headers)
-        if exists and _norm(str(exists.get("name") or "")) == _norm("Client Health Tracker"):
-            return {"ok": True, "list_id": cached, "list": exists, "source": "cached"}
+        if exists:
+            if cached_raw != cached:
+                await db.integrations.update_one(
+                    {"tenant_id": tenant_id, "platform": "clickup"},
+                    {"$set": {"metadata.client_health_tracker_list_id": cached, "updated_at": utcnow().isoformat()}},
+                    upsert=True,
+                )
+            return {"ok": True, "list_id": cached, "list": exists, "source": "configured"}
+        if cached_raw:
+            return {"ok": False, "error": "clickup_list_configured_not_accessible", "error_detail": f"Configured Client Health Tracker List ID not accessible: {cached_raw}"}
 
     wanted = _norm("Client Health Tracker")
     spaces = await _clickup_list_spaces(team_id, headers=headers)
@@ -112,6 +135,7 @@ async def fetch_client_health_tracker_tasks(token: str, list_id: str) -> Dict[st
     headers = _clickup_headers(token)
     tasks: List[dict] = []
     page = 0
+    max_pages = int(os.environ.get("CLICKUP_CLIENT_HEALTH_TRACKER_MAX_PAGES", "200") or "200")
     while True:
         status, data, err = await _clickup_get(
             f"https://api.clickup.com/api/v2/list/{list_id}/task",
@@ -124,9 +148,14 @@ async def fetch_client_health_tracker_tasks(token: str, list_id: str) -> Dict[st
         if not batch:
             break
         tasks.extend(batch)
-        page += 1
-        if page >= 20:
+        last_page = (data or {}).get("last_page")
+        if last_page is True:
             break
+        page += 1
+        if isinstance(last_page, int) and page > last_page:
+            break
+        if page >= max_pages:
+            return {"ok": False, "error": "clickup_tasks_paging_cap", "error_detail": f"Exceeded max pages ({max_pages})"}
     return {"ok": True, "tasks": tasks}
 
 
@@ -140,11 +169,38 @@ def _custom_field_value(task: dict, field_name: str) -> Optional[str]:
             return None
         options = (((cf.get("type_config") or {}).get("options")) or []) if isinstance(cf.get("type_config"), dict) else []
         if options:
-            for opt in options:
-                if str(opt.get("id")) == str(val):
-                    return str(opt.get("name") or "").strip() or None
+            opt_map = {str(opt.get("id")): str(opt.get("name") or "").strip() for opt in options}
+            if isinstance(val, list):
+                names: List[str] = []
+                for x in val:
+                    k = str((x.get("id") if isinstance(x, dict) else x))
+                    if opt_map.get(k):
+                        names.append(opt_map[k])
+                out: List[str] = []
+                seen = set()
+                for n in names:
+                    key = _norm(n)
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(n)
+                return ", ".join(out) or None
+            k = str(val)
+            if opt_map.get(k):
+                return opt_map[k] or None
         if isinstance(val, list):
-            return ", ".join([str(x).strip() for x in val if str(x).strip()]) or None
+            out: List[str] = []
+            for x in val:
+                if isinstance(x, dict):
+                    for k in ("name", "label", "value", "email"):
+                        if x.get(k):
+                            out.append(str(x.get(k)).strip())
+                            break
+                    continue
+                s = str(x).strip()
+                if s:
+                    out.append(s)
+            return ", ".join([s for s in dict.fromkeys(out) if s]) or None
         if isinstance(val, dict):
             for k in ("name", "label", "value", "email"):
                 if val.get(k):
@@ -161,10 +217,17 @@ def _match_account_manager(field_value: str, user_name: str, user_email: str) ->
     name = _norm(user_name)
     email = _norm(user_email)
     first = _norm((user_name or "").split(" ", 1)[0])
+    last = _norm((user_name or "").rsplit(" ", 1)[-1])
     local = _norm((user_email or "").split("@", 1)[0])
-    candidates = {name, email, first, local}
-    parts = {_norm(p) for p in (field_value or "").replace(";", ",").split(",") if _norm(p)}
-    return bool(parts & candidates) or v in candidates
+    candidates = {c for c in (name, email, first, last, local) if c}
+    parts = {_norm(p) for p in re.split(r"[;,/|]+", field_value or "") if _norm(p)}
+    if parts & candidates:
+        return True
+    if v in candidates:
+        return True
+    if first and (v == first or v.startswith(f"{first} ")):
+        return True
+    return False
 
 
 def _task_is_closed(task: dict) -> bool:
