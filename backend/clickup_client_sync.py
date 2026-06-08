@@ -91,6 +91,20 @@ async def _clickup_get_list(list_id: str, headers: Dict[str, str]) -> Optional[d
 
 async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team_id: str) -> Dict[str, Any]:
     headers = _clickup_headers(token)
+    forced_raw = str(os.environ.get("CLICKUP_CLIENT_HEALTH_TRACKER_LIST_ID") or "").strip()
+    forced = _normalize_clickup_list_id(forced_raw)
+    if forced_raw and not forced:
+        return {"ok": False, "error": "clickup_list_forced_invalid", "error_detail": f"CLICKUP_CLIENT_HEALTH_TRACKER_LIST_ID is invalid: {forced_raw}"}
+    if forced:
+        exists = await _clickup_get_list(forced, headers=headers)
+        if exists:
+            await db.integrations.update_one(
+                {"tenant_id": tenant_id, "platform": "clickup"},
+                {"$set": {"metadata.client_health_tracker_list_id": forced, "updated_at": utcnow().isoformat()}},
+                upsert=True,
+            )
+            return {"ok": True, "list_id": forced, "list": exists, "source": "env"}
+        return {"ok": False, "error": "clickup_list_forced_not_accessible", "error_detail": f"CLICKUP_CLIENT_HEALTH_TRACKER_LIST_ID not accessible: {forced_raw}"}
     integration = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "clickup"})
     cached_raw = str(((integration or {}).get("metadata") or {}).get("client_health_tracker_list_id") or "").strip()
     cached = _normalize_clickup_list_id(cached_raw)

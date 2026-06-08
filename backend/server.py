@@ -4269,6 +4269,24 @@ async def _startup():
         await bootstrap_admin()
     except Exception as exc:
         logger.error("bootstrap_admin failed: %s", exc)
+    try:
+        enabled = (os.environ.get("CLICKUP_AUTO_SYNC_ENABLED", "true") or "true").strip().lower() in ("1", "true", "yes", "on")
+        hours = float(os.environ.get("CLICKUP_AUTO_SYNC_HOURS", "24") or "24")
+        if enabled and hours > 0:
+            interval_s = max(300, int(hours * 3600))
+
+            async def _clickup_loop():
+                await asyncio.sleep(20)
+                while True:
+                    try:
+                        await clickup_client_sync.sync_all_tenants()
+                    except Exception as exc:
+                        logger.error("clickup auto sync failed: %s", exc)
+                    await asyncio.sleep(interval_s)
+
+            asyncio.create_task(_clickup_loop())
+    except Exception as exc:
+        logger.error("clickup auto sync init failed: %s", exc)
     logger.info("Monthly Touch OS API ready")
 
 
