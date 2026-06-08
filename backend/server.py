@@ -4,6 +4,7 @@ import io
 import copy
 import logging
 import os
+import time
 import uvicorn
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1653,23 +1654,50 @@ async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(
 
 @api.get("/import/clickup/clients/status")
 async def clickup_client_sync_status(user_id: str = Query(default=""), ctx=Depends(get_current_context)):
+    # region debug-point B1:clickup-sync-status
+    async def _dbg_emit(hypothesis_id: str, msg: str, data: dict) -> None:
+        try:
+            url = (os.environ.get("DEBUG_SERVER_URL") or "").strip()
+            if not url:
+                return
+            async with httpx.AsyncClient(timeout=2) as c:
+                await c.post(url, json={"sessionId": os.environ.get("DEBUG_SESSION_ID") or "clickup-client-sync", "runId": "pre", "hypothesisId": hypothesis_id, "location": "api:/import/clickup/clients/status", "msg": msg, "data": data, "ts": int(time.time() * 1000)})
+        except Exception:
+            return
+    # endregion
     target_user_id = ctx.user.id
     if user_id and (ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")):
         target_user_id = user_id
+    await _dbg_emit("H1", "status:begin", {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
     doc = await db.clickup_client_sync_state.find_one({"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
     state = doc or {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id), "last_success_at": None, "last_error": None}
+    await _dbg_emit("H1", "status:ok", {"state": state})
     return {"ok": True, "state": state}
 
 
 @api.post("/import/clickup/clients/sync")
 async def clickup_client_sync_now(ctx=Depends(get_current_context)):
+    # region debug-point B2:clickup-sync-now
+    async def _dbg_emit(hypothesis_id: str, msg: str, data: dict) -> None:
+        try:
+            url = (os.environ.get("DEBUG_SERVER_URL") or "").strip()
+            if not url:
+                return
+            async with httpx.AsyncClient(timeout=2) as c:
+                await c.post(url, json={"sessionId": os.environ.get("DEBUG_SESSION_ID") or "clickup-client-sync", "runId": "pre", "hypothesisId": hypothesis_id, "location": "api:/import/clickup/clients/sync", "msg": msg, "data": data, "ts": int(time.time() * 1000)})
+        except Exception:
+            return
+    # endregion
+    await _dbg_emit("H2", "sync:queued", {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "user_name": ctx.user.name, "user_email": ctx.user.email})
     async def _run():
+        await _dbg_emit("H2", "sync:run:begin", {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id})
         res = await clickup_client_sync.sync_assigned_clients_for_user(
             tenant_id=ctx.tenant_id,
             user_id=ctx.user.id,
             user_name=ctx.user.name,
             user_email=ctx.user.email,
         )
+        await _dbg_emit("H2", "sync:run:done", {"res": res})
         if res.get("ok"):
             await db.integrations.update_one(
                 {"tenant_id": ctx.tenant_id, "platform": "clickup"},

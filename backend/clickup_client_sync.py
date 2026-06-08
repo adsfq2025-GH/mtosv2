@@ -13,6 +13,20 @@ import connectors
 from models import Client, ClientIntegrationBinding
 
 
+# region debug-point C0:clickup-sync-core
+async def _dbg_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None) -> None:
+    try:
+        url = (os.environ.get("DEBUG_SERVER_URL") or "").strip()
+        if not url:
+            return
+        session_id = (os.environ.get("DEBUG_SESSION_ID") or "clickup-client-sync").strip() or "clickup-client-sync"
+        async with httpx.AsyncClient(timeout=2) as c:
+            await c.post(url, json={"sessionId": session_id, "runId": "pre", "hypothesisId": hypothesis_id, "location": location, "msg": msg, "data": data or {}, "ts": int(datetime.now(tz=timezone.utc).timestamp() * 1000)})
+    except Exception:
+        return
+# endregion
+
+
 def _norm(s: str) -> str:
     return " ".join((s or "").strip().lower().split())
 
@@ -259,6 +273,7 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
     state_key = {"tenant_id": tenant_id, "user_id": user_id}
 
     try:
+        await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "run:begin", {"tenant_id": tenant_id, "user_id": user_id, "user_name": user_name, "user_email": user_email})
         await db.clickup_client_sync_state.update_one(
             state_key,
             {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": True, "started_at": started_at, "last_run_id": run_id, "updated_at": started_at}},
@@ -267,6 +282,7 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
         creds = await connectors.get_credentials(tenant_id, "clickup")
         token = connectors._strip_bearer(str((creds or {}).get("api_token") or ""))
         team_id = str((creds or {}).get("team_id") or "").strip()
+        await _dbg_emit("H4", "clickup_client_sync:sync_assigned_clients_for_user", "creds:loaded", {"has_token": bool(token), "team_id": team_id})
         if not token:
             raise ValueError("ClickUp is not connected (missing api_token).")
         if not team_id:
@@ -280,17 +296,25 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
         if not list_res.get("ok"):
             raise ValueError(list_res.get("error_detail") or "Client Health Tracker list not found")
         list_id = str(list_res.get("list_id") or "").strip()
+        await _dbg_emit("H3", "clickup_client_sync:sync_assigned_clients_for_user", "list:resolved", {"list_res": list_res})
 
         tasks_res = await fetch_client_health_tracker_tasks(token=token, list_id=list_id)
         if not tasks_res.get("ok"):
             raise ValueError(tasks_res.get("error_detail") or "Failed to load ClickUp tasks")
 
         tasks = tasks_res.get("tasks") or []
+        sample_ams: List[str] = []
+        for t in tasks[:20]:
+            v = _custom_field_value(t, "Account Manager")
+            if v:
+                sample_ams.append(str(v)[:120])
+        await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "tasks:fetched", {"total": len(tasks), "sample_account_manager_values": sample_ams[:10]})
         assigned_tasks: List[dict] = []
         for t in tasks:
             am = _custom_field_value(t, "Account Manager") or ""
             if _match_account_manager(am, user_name=user_name, user_email=user_email):
                 assigned_tasks.append(t)
+        await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "tasks:assigned_filtered", {"assigned": len(assigned_tasks), "total": len(tasks)})
 
         created = 0
         updated = 0
@@ -420,11 +444,13 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": False, "started_at": started_at, "finished_at": finished_at, "last_success_at": finished_at, "last_error": None, "last_run_id": run_id, "updated_at": finished_at}},
             upsert=True,
         )
+        await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "run:ok", out)
         return out
     except Exception as e:
         finished_at = utcnow().isoformat()
         err = str(e)
         out = {"ok": False, "run_id": run_id, "started_at": started_at, "finished_at": finished_at, "error": err}
+        await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "run:err", out)
         await db.clickup_client_sync_logs.insert_one({"_id": run_id, "tenant_id": tenant_id, "user_id": user_id, **out})
         await db.clickup_client_sync_state.update_one(
             state_key,
