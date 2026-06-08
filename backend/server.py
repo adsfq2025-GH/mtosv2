@@ -3874,6 +3874,44 @@ async def diagnostics_integrations(ctx=Depends(get_current_context)):
     return {"ok": True, "tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "integrations": safe, "user_google_tokens": safe_user_google}
 
 
+@api.get("/diagnostics/google-oauth")
+async def diagnostics_google_oauth(ctx=Depends(get_current_context)):
+    doc = await db.integrations.find_one({"tenant_id": ctx.tenant_id, "platform": "google_oauth"})
+    meta = (doc or {}).get("metadata") or {}
+    enc = (doc or {}).get("credentials_encrypted") or {}
+    secret_decrypt_ok = False
+    try:
+        if str(enc.get("client_secret") or "").strip():
+            secret_decrypt_ok = bool(str(decrypt_secret(enc.get("client_secret")) or "").strip())
+    except Exception:
+        secret_decrypt_ok = False
+    cfg = await _google_oauth_config(ctx.tenant_id)
+    cid = str(cfg.get("client_id") or "").strip()
+    rid = str(cfg.get("redirect_uri") or "").strip()
+    return {
+        "ok": True,
+        "tenant_id": ctx.tenant_id,
+        "has_env": {
+            "client_id": bool(GOOGLE_OAUTH_CLIENT_ID),
+            "client_secret": bool(GOOGLE_OAUTH_CLIENT_SECRET),
+            "redirect_uri": bool(GOOGLE_OAUTH_REDIRECT_URI),
+        },
+        "has_integration": {
+            "client_id": bool(str(meta.get("client_id") or "").strip()),
+            "client_secret_encrypted": bool(str(enc.get("client_secret") or "").strip()),
+            "client_secret_decrypt_ok": secret_decrypt_ok,
+            "redirect_uri": bool(str(meta.get("redirect_uri") or "").strip()),
+        },
+        "effective": {
+            "client_id_tail": cid[-10:] if cid else "",
+            "redirect_uri": rid,
+            "client_id_source": "integration" if cid and str(meta.get("client_id") or "").strip() == cid else ("env" if cid else "missing"),
+            "redirect_uri_source": "integration" if rid and str(meta.get("redirect_uri") or "").strip() == rid else ("env" if rid else "missing"),
+            "client_secret_source": "integration" if secret_decrypt_ok else ("env" if bool(GOOGLE_OAUTH_CLIENT_SECRET) else "missing"),
+        },
+    }
+
+
 @api.get("/diagnostics/client/{client_id}")
 async def diagnostics_client(client_id: str, ctx=Depends(get_current_context)):
     await _require_client_access(ctx, client_id)
