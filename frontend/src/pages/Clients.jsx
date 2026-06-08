@@ -17,23 +17,12 @@ export function ClientsList() {
   const [syncResult, setSyncResult] = useState(null);
   const { user } = useAuth();
   const navigate = useNavigate();
-  // #region debug-point A1:clickup-sync-ui
-  const dbgEmit = useCallback((hypothesisId, location, msg, data = {}) => {
-    fetch("http://127.0.0.1:7777/event", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: "clickup-client-sync", runId: "pre", hypothesisId, location, msg, data, ts: Date.now() }),
-    }).catch(() => {});
-  }, []);
-  // #endregion
   const load = useCallback(() => clients.list().then(setList), []);
   useEffect(() => { load(); }, [load]);
   const _loadClickupStatus = useCallback(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const isNetworkError = (e) => !e?.response && String(e?.message || "").toLowerCase().includes("network error");
     let lastErr = null;
-    const started = Date.now();
-    dbgEmit("H1", "ClientsList:_loadClickupStatus", "status:begin", { origin: window.location.origin });
     for (const ms of [0, 600, 1600, 3000]) {
       if (ms) await sleep(ms);
       try {
@@ -41,17 +30,9 @@ export function ClientsList() {
         setSyncStatus(r?.state || null);
         setSyncLastRun(r?.last_run || null);
         setImportErr("");
-        dbgEmit("H1", "ClientsList:_loadClickupStatus", "status:ok", { ms: Date.now() - started, state: r?.state || null });
         return;
       } catch (e) {
         lastErr = e;
-        dbgEmit("H1", "ClientsList:_loadClickupStatus", "status:err", {
-          ms: Date.now() - started,
-          message: String(e?.message || ""),
-          hasResponse: !!e?.response,
-          status: e?.response?.status,
-          detail: e?.response?.data?.detail,
-        });
         if (!isNetworkError(e)) break;
       }
     }
@@ -159,15 +140,8 @@ export function ClientsList() {
                     const r = await clients.clickupSyncNow();
                     setSyncResult(r);
                     setImportErr("");
-                    dbgEmit("H2", "ClientsList:syncNow", "syncNow:ok", { res: r });
                     await load();
                   } catch (e2) {
-                    dbgEmit("H2", "ClientsList:syncNow", "syncNow:err", {
-                      message: String(e2?.message || ""),
-                      hasResponse: !!e2?.response,
-                      status: e2?.response?.status,
-                      detail: e2?.response?.data?.detail,
-                    });
                     setImportErr(e2?.response?.data?.detail || e2?.message || "Import failed");
                   } finally {
                     setImportBusy(false);

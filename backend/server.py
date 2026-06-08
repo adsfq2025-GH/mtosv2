@@ -20,6 +20,7 @@ import httpx
 from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from starlette.middleware.cors import CORSMiddleware
+from bson import ObjectId
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
@@ -1670,6 +1671,8 @@ async def clickup_client_sync_status(user_id: str = Query(default=""), ctx=Depen
         target_user_id = user_id
     await _dbg_emit("H1", "status:begin", {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
     doc = await db.clickup_client_sync_state.find_one({"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
+    if isinstance(doc, dict) and isinstance(doc.get("_id"), ObjectId):
+        doc = {k: v for k, v in doc.items() if k != "_id"}
     state = doc or {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id), "last_success_at": None, "last_error": None}
     await _dbg_emit("H1", "status:ok", {"state": state})
     last_run_id = str((state or {}).get("last_run_id") or "").strip()
@@ -4276,7 +4279,7 @@ async def _startup():
     except Exception as exc:
         logger.error("bootstrap_admin failed: %s", exc)
     try:
-        enabled = (os.environ.get("CLICKUP_AUTO_SYNC_ENABLED", "true") or "true").strip().lower() in ("1", "true", "yes", "on")
+        enabled = (os.environ.get("CLICKUP_AUTO_SYNC_ENABLED", "false") or "false").strip().lower() in ("1", "true", "yes", "on")
         hours = float(os.environ.get("CLICKUP_AUTO_SYNC_HOURS", "24") or "24")
         if enabled and hours > 0:
             interval_s = max(300, int(hours * 3600))
