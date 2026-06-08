@@ -130,7 +130,14 @@ async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict, start_d: O
             return {"error": "clickup_missing_team_id", "error_detail": "Missing ClickUp workspace/team_id. Set it in Integrations → ClickUp."}
 
     start_d = start_d or _last_30_days_range()[0]
-    date_updated_gt = str(int(start_d.replace(tzinfo=timezone.utc).timestamp() * 1000))
+    start_dt = (
+        start_d
+        if isinstance(start_d, datetime)
+        else datetime(int(start_d.year), int(start_d.month), int(start_d.day), tzinfo=timezone.utc)
+    )
+    if isinstance(start_dt, datetime) and start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    date_updated_gt = str(int(start_dt.timestamp() * 1000))
     url = f"https://api.clickup.com/api/v2/team/{team_id}/task"
     params = [
         ("include_closed", "true"),
@@ -280,12 +287,29 @@ async def _google_ads_access_token(creds: Dict[str, str]) -> str:
     return str(token)
 
 
+async def _google_ads_access_token_for_tenant(tenant_id: str, creds: Dict[str, str]) -> str:
+    merged = dict(creds or {})
+    cid = str((merged or {}).get("oauth_client_id") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or "").strip()
+    secret = str((merged or {}).get("oauth_client_secret") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or "").strip()
+    if not cid or not secret:
+        oauth = await get_credentials(tenant_id, "google_oauth")
+        if not cid:
+            cid = str((oauth or {}).get("client_id") or "").strip()
+            if cid:
+                merged["oauth_client_id"] = cid
+        if not secret:
+            secret = str((oauth or {}).get("client_secret") or "").strip()
+            if secret:
+                merged["oauth_client_secret"] = secret
+    return await _google_ads_access_token(merged)
+
+
 def _normalize_customer_id(v: Any) -> str:
     s = str(v or "").strip()
     return s.replace("-", "").replace(" ", "")
 
 
-async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict, start_d: Optional[date] = None, end_d: Optional[date] = None) -> Dict[str, Any]:
+async def fetch_google_ads_monthly(tenant_id: str, creds: Dict[str, str], binding: dict, start_d: Optional[date] = None, end_d: Optional[date] = None) -> Dict[str, Any]:
     developer_token = (creds or {}).get("developer_token")
     if not developer_token:
         return {}
@@ -298,7 +322,7 @@ async def fetch_google_ads_monthly(creds: Dict[str, str], binding: dict, start_d
     if not customer_id:
         return {"error": "google_ads_missing_customer_id", "error_detail": "Missing Google Ads customer_id for this client."}
 
-    access_token = await _google_ads_access_token(creds)
+    access_token = await _google_ads_access_token_for_tenant(tenant_id, creds)
     if not start_d or not end_d:
         start_d, end_d = _last_30_days_range()
     q = (
@@ -381,6 +405,8 @@ async def build_kpi_snapshot(
         period_start, period_end = _last_30_days_range()
     snapshot["_period"] = _period_meta(cur_start=period_start, cur_end=period_end, prev_start=compare_start, prev_end=compare_end)
     snapshot["_availability"] = {}
+    def _is_err_payload(v: Any) -> bool:
+        return isinstance(v, dict) and bool(v.get("error"))
 
     clickup_creds = await get_credentials(tenant_id, "clickup")
     clickup_binding = await get_client_binding(tenant_id, client_id, "clickup")
@@ -389,9 +415,13 @@ async def build_kpi_snapshot(
         if clickup_binding and folder_id:
             try:
                 clickup_data = await fetch_clickup_monthly(clickup_creds, clickup_binding, start_d=period_start, end_d=period_end)
-                if clickup_data:
+                if _is_err_payload(clickup_data):
+                    snapshot["_availability"]["clickup"] = {"ok": False, "error": clickup_data.get("error"), "error_detail": clickup_data.get("error_detail")}
+                elif clickup_data:
                     snapshot["clickup"] = {**(snapshot.get("clickup") or {}), **clickup_data}
-                snapshot["_availability"]["clickup"] = {"ok": True}
+                    snapshot["_availability"]["clickup"] = {"ok": True}
+                else:
+                    snapshot["_availability"]["clickup"] = {"ok": False, "error": "clickup_no_data"}
             except Exception as exc:
                 snapshot["_availability"]["clickup"] = {"ok": False, "error": "clickup_error", "error_detail": str(exc)[:300]}
         else:
@@ -404,7 +434,10 @@ async def build_kpi_snapshot(
     if ghl_api_key:
         try:
             ghl_data = await fetch_gohighlevel_monthly(tenant_id, ghl_binding or {"external_ids": {}, "config": {}}, start_d=period_start, end_d=period_end)
-            if ghl_data:
+            if _is_err_payload(ghl_data):
+                snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
+                snapshot["_availability"]["gohighlevel"] = {"ok": False, "error": ghl_data.get("error"), "error_detail": ghl_data.get("error_detail")}
+            elif ghl_data:
                 snapshot["gohighlevel"] = {**(snapshot.get("gohighlevel") or {}), **ghl_data}
                 snapshot["_availability"]["gohighlevel"] = {"ok": True}
             else:
@@ -428,7 +461,7 @@ async def build_kpi_snapshot(
             else:
                 merged = {**gads_creds, "refresh_token": rt}
                 try:
-                    gads_data = await fetch_google_ads_monthly(merged, gads_binding or {"external_ids": {}, "config": {}}, start_d=period_start, end_d=period_end)
+                    gads_data = await fetch_google_ads_monthly(tenant_id, merged, gads_binding or {"external_ids": {}, "config": {}}, start_d=period_start, end_d=period_end)
                     if gads_data:
                         snapshot["google_ads"] = {**(snapshot.get("google_ads") or {}), **gads_data}
                         snapshot["_availability"]["google_ads"] = {"ok": True}
@@ -499,7 +532,7 @@ async def list_google_ads_customers(tenant_id: str, user_id: str) -> Dict[str, A
         return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Ads first."}
     creds = {**creds, "refresh_token": refresh_token}
     try:
-        access_token = await _google_ads_access_token(creds)
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, creds)
     except Exception as exc:
         return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
     headers = {"Authorization": f"Bearer {access_token}", "developer-token": str(developer_token), "Accept": "application/json"}
@@ -541,7 +574,7 @@ async def test_google_meet_for_user(tenant_id: str, user_id: str) -> Dict[str, A
         return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Meet first."}
     creds = {"refresh_token": rt}
     try:
-        await _google_ads_access_token(creds)
+        await _google_ads_access_token_for_tenant(tenant_id, creds)
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
