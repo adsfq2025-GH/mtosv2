@@ -1672,7 +1672,13 @@ async def clickup_client_sync_status(user_id: str = Query(default=""), ctx=Depen
     doc = await db.clickup_client_sync_state.find_one({"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
     state = doc or {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id), "last_success_at": None, "last_error": None}
     await _dbg_emit("H1", "status:ok", {"state": state})
-    return {"ok": True, "state": state}
+    last_run_id = str((state or {}).get("last_run_id") or "").strip()
+    last_run = None
+    if last_run_id:
+        last_run = await db.clickup_client_sync_logs.find_one({"_id": last_run_id, "tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
+        if last_run:
+            last_run = {k: v for k, v in last_run.items() if k not in ("tenant_id", "user_id")}
+    return {"ok": True, "state": state, "last_run": last_run}
 
 
 @api.post("/import/clickup/clients/sync")

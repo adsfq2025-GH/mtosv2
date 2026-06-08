@@ -13,6 +13,7 @@ export function ClientsList() {
   const [importBusy, setImportBusy] = useState(false);
   const [importErr, setImportErr] = useState("");
   const [syncStatus, setSyncStatus] = useState(null);
+  const [syncLastRun, setSyncLastRun] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -38,6 +39,7 @@ export function ClientsList() {
       try {
         const r = await clients.clickupSyncStatus();
         setSyncStatus(r?.state || null);
+        setSyncLastRun(r?.last_run || null);
         setImportErr("");
         dbgEmit("H1", "ClientsList:_loadClickupStatus", "status:ok", { ms: Date.now() - started, state: r?.state || null });
         return;
@@ -213,6 +215,16 @@ export function ClientsList() {
                 {!!syncStatus?.last_error && (
                   <div className="text-xs text-rose-200 mt-2">
                     Last error: {syncStatus.last_error}
+                  </div>
+                )}
+                {!!syncLastRun && !syncStatus?.running && (
+                  <div className="text-xs text-slate-300 mt-2">
+                    Last run: assigned {syncLastRun.assigned_found ?? 0}, created {syncLastRun.created ?? 0}, updated {syncLastRun.updated ?? 0}
+                    {!!syncLastRun.debug_sample_account_managers?.length && (
+                      <span className="block mt-1 text-slate-400">
+                        Sample Account Manager values: {syncLastRun.debug_sample_account_managers.join(" · ")}
+                      </span>
+                    )}
                   </div>
                 )}
               </div>

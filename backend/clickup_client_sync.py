@@ -89,6 +89,35 @@ async def _clickup_get_list(list_id: str, headers: Dict[str, str]) -> Optional[d
     return data if status == 200 else None
 
 
+async def _clickup_get_team(team_id: str, headers: Dict[str, str]) -> Optional[dict]:
+    status, data, _ = await _clickup_get(f"https://api.clickup.com/api/v2/team/{team_id}", headers=headers)
+    return data if status == 200 else None
+
+
+def _resolve_clickup_user_ids(value: str, user_map: Dict[str, Dict[str, str]]) -> str:
+    s = str(value or "").strip()
+    if not s or not user_map:
+        return s
+    ids = [x for x in re.findall(r"\d+", s) if x]
+    if not ids:
+        return s
+    out: List[str] = []
+    seen = set()
+    for uid in ids:
+        u = user_map.get(str(uid)) or {}
+        name = str(u.get("name") or u.get("username") or "").strip()
+        email = str(u.get("email") or "").strip()
+        label = name or email or ""
+        if not label:
+            continue
+        key = _norm(label)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+    return ", ".join(out) or s
+
+
 async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team_id: str) -> Dict[str, Any]:
     headers = _clickup_headers(token)
     forced_raw = str(os.environ.get("CLICKUP_CLIENT_HEALTH_TRACKER_LIST_ID") or "").strip()
@@ -317,15 +346,31 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             raise ValueError(tasks_res.get("error_detail") or "Failed to load ClickUp tasks")
 
         tasks = tasks_res.get("tasks") or []
+        team = await _clickup_get_team(team_id, headers=headers)
+        user_map: Dict[str, Dict[str, str]] = {}
+        for m in (((team or {}).get("team") or {}).get("members") or []):
+            u = (m or {}).get("user") or {}
+            uid = str(u.get("id") or "").strip()
+            if not uid:
+                continue
+            user_map[uid] = {
+                "id": uid,
+                "username": str(u.get("username") or "").strip(),
+                "email": str(u.get("email") or "").strip(),
+                "name": str(u.get("username") or "").strip(),
+            }
+        await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "team:loaded", {"members": len(user_map)})
         sample_ams: List[str] = []
         for t in tasks[:20]:
-            v = _custom_field_value(t, "Account Manager")
+            v0 = _custom_field_value(t, "Account Manager")
+            v = _resolve_clickup_user_ids(v0 or "", user_map) if v0 else v0
             if v:
                 sample_ams.append(str(v)[:120])
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "tasks:fetched", {"total": len(tasks), "sample_account_manager_values": sample_ams[:10]})
         assigned_tasks: List[dict] = []
         for t in tasks:
-            am = _custom_field_value(t, "Account Manager") or ""
+            am0 = _custom_field_value(t, "Account Manager") or ""
+            am = _resolve_clickup_user_ids(am0, user_map) if am0 else am0
             if _match_account_manager(am, user_name=user_name, user_email=user_email):
                 assigned_tasks.append(t)
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "tasks:assigned_filtered", {"assigned": len(assigned_tasks), "total": len(tasks)})
@@ -447,10 +492,12 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             "started_at": started_at,
             "finished_at": finished_at,
             "list_id": list_id,
+            "list_source": str(list_res.get("source") or ""),
             "created": created,
             "updated": updated,
             "paused": paused,
             "assigned_found": len(assigned_tasks),
+            "debug_sample_account_managers": sample_ams[:10],
         }
         await db.clickup_client_sync_logs.insert_one({"_id": run_id, "tenant_id": tenant_id, "user_id": user_id, **out})
         await db.clickup_client_sync_state.update_one(
