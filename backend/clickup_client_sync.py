@@ -346,6 +346,7 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             raise ValueError(tasks_res.get("error_detail") or "Failed to load ClickUp tasks")
 
         tasks = tasks_res.get("tasks") or []
+        headers = _clickup_headers(token)
         team = await _clickup_get_team(team_id, headers=headers)
         user_map: Dict[str, Dict[str, str]] = {}
         for m in (((team or {}).get("team") or {}).get("members") or []):
