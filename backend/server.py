@@ -573,6 +573,31 @@ async def oauth_google_start(platform: str = Query(...), ctx=Depends(get_current
     scopes = google_scopes_for_platform(platform)
     if not scopes:
         raise HTTPException(400, "Missing scopes for platform")
+    # #region debug-point GO1:oauth-config-source
+    try:
+        doc = await db.integrations.find_one({"tenant_id": ctx.tenant_id, "platform": "google_oauth"})
+        meta = (doc or {}).get("metadata") or {}
+        enc = (doc or {}).get("credentials_encrypted") or {}
+        _dbg_emit(
+            "GO1",
+            "server.py:/oauth/google/start",
+            "oauth_config",
+            {
+                "tenant_id": ctx.tenant_id,
+                "user_id": ctx.user.id,
+                "platform": platform,
+                "has_env_client_id": bool(GOOGLE_OAUTH_CLIENT_ID),
+                "has_env_secret": bool(GOOGLE_OAUTH_CLIENT_SECRET),
+                "has_env_redirect_uri": bool(GOOGLE_OAUTH_REDIRECT_URI),
+                "has_meta_client_id": bool(str(meta.get("client_id") or "").strip()),
+                "has_meta_redirect_uri": bool(str(meta.get("redirect_uri") or "").strip()),
+                "has_enc_secret": bool(str(enc.get("client_secret") or "").strip()),
+                "redirect_uri": str(cfg.get("redirect_uri") or "")[:180],
+            },
+        )
+    except Exception:
+        pass
+    # #endregion
     state = new_id()
     await db.oauth_states.insert_one(
         {
@@ -627,6 +652,31 @@ async def oauth_google_callback(code: str = Query(...), state: str = Query(...))
     cfg = await _google_oauth_config(str(tenant_id))
     if not cfg.get("client_id") or not cfg.get("client_secret") or not cfg.get("redirect_uri"):
         raise HTTPException(500, "Google OAuth is not configured. Set GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET/GOOGLE_OAUTH_REDIRECT_URI on the backend or configure Integrations → Google OAuth.")
+    # #region debug-point GO2:oauth-callback-config
+    try:
+        doc = await db.integrations.find_one({"tenant_id": str(tenant_id), "platform": "google_oauth"})
+        meta = (doc or {}).get("metadata") or {}
+        enc = (doc or {}).get("credentials_encrypted") or {}
+        _dbg_emit(
+            "GO2",
+            "server.py:/oauth/google/callback",
+            "oauth_callback_config",
+            {
+                "tenant_id": str(tenant_id),
+                "user_id": str(user_id),
+                "platform": platform,
+                "has_env_client_id": bool(GOOGLE_OAUTH_CLIENT_ID),
+                "has_env_secret": bool(GOOGLE_OAUTH_CLIENT_SECRET),
+                "has_env_redirect_uri": bool(GOOGLE_OAUTH_REDIRECT_URI),
+                "has_meta_client_id": bool(str(meta.get("client_id") or "").strip()),
+                "has_meta_redirect_uri": bool(str(meta.get("redirect_uri") or "").strip()),
+                "has_enc_secret": bool(str(enc.get("client_secret") or "").strip()),
+                "redirect_uri": str(cfg.get("redirect_uri") or "")[:180],
+            },
+        )
+    except Exception:
+        pass
+    # #endregion
 
     payload = {
         "client_id": cfg.get("client_id"),
@@ -646,6 +696,24 @@ async def oauth_google_callback(code: str = Query(...), state: str = Query(...))
                 detail = f"{j.get('error') or 'oauth_error'}: {j.get('error_description') or ''}".strip()
         except Exception:
             pass
+        # #region debug-point GO3:oauth-token-error
+        try:
+            _dbg_emit(
+                "GO3",
+                "server.py:/oauth/google/callback",
+                "oauth_token_exchange_failed",
+                {
+                    "tenant_id": str(tenant_id),
+                    "user_id": str(user_id),
+                    "platform": platform,
+                    "http_status": resp.status_code,
+                    "detail": str(detail)[:220],
+                    "redirect_uri": str(cfg.get("redirect_uri") or "")[:180],
+                },
+            )
+        except Exception:
+            pass
+        # #endregion
         raise HTTPException(400, f"oauth_http_{resp.status_code}: {detail}")
     data = resp.json() or {}
     refresh_token = data.get("refresh_token") or ""
