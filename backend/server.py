@@ -505,7 +505,8 @@ async def login(request: Request, data: LoginIn, _: None = Depends(require_db_re
 
 @api.post("/auth/google")
 async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(require_db_ready)):
-    if not GOOGLE_OAUTH_CLIENT_ID:
+    client_id = _clean_oauth_str(GOOGLE_OAUTH_CLIENT_ID)
+    if not client_id:
         raise HTTPException(500, "Google login is not configured on the backend")
     cred = (data.credential or "").strip()
     if not cred:
@@ -515,7 +516,7 @@ async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(
     if resp.status_code != 200:
         raise HTTPException(400, "Invalid Google credential")
     info = resp.json() or {}
-    if str(info.get("aud") or "") != str(GOOGLE_OAUTH_CLIENT_ID):
+    if str(info.get("aud") or "") != client_id:
         raise HTTPException(400, "Google credential audience mismatch")
     email = str(info.get("email") or "").strip().lower()
     if not email:

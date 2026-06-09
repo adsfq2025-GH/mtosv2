@@ -27,7 +27,8 @@ export function Login() {
   };
 
   useEffect(() => {
-    const cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    let cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    if (cid) cid = cid.replace(/^["'`]+|["'`]+$/g, '').trim();
     if (!cid) return;
     const id = "google-gsi";
     if (!document.getElementById(id)) {
@@ -44,7 +45,8 @@ export function Login() {
   }, []);
 
   useEffect(() => {
-    const cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    let cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+    if (cid) cid = cid.replace(/^["'`]+|["'`]+$/g, '').trim();
     if (!googleReady || !cid) return;
     if (!window.google?.accounts?.id) return;
     window.google.accounts.id.initialize({

@@ -123,7 +123,7 @@ export function Integrations() {
   const [ghlTokenLocId, setGhlTokenLocId] = useState("");
   const [ghlTokenValue, setGhlTokenValue] = useState("");
   const [ghlTokenSavedIds, setGhlTokenSavedIds] = useState([]);
-  const load = () => integrations.status().then(setList);
+  const load = () => integrations.status().then((r) => setList(toArray(r))).catch(() => setList([]));
   useEffect(() => { load(); }, []);
   useEffect(() => {
     if (user?.role !== "admin") return;
@@ -252,7 +252,7 @@ export function Integrations() {
     <div>
       <PageHead title="Integrations" subtitle="13 platforms ready to plug in. Connect to power the meeting brief and KPI snapshots." />
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {list.map((i) => (
+        {toArray(list).map((i) => (
           <div key={i.platform} className="card-flat p-5" data-testid={`integration-${i.platform}`}>
             <div className="flex items-center justify-between">
               <div>
@@ -484,10 +484,10 @@ export function DocsHub() {
   const [active, setActive] = useState(null);
   const [doc, setDoc] = useState(null);
   const [q, setQ] = useState("");
-  useEffect(() => { docs.list().then((d) => { setData(d); if (d.items[0]) { setActive(d.items[0].slug); } }); }, []);
+  useEffect(() => { docs.list().then((d) => { setData(d || { items: [], categories: [], wiki_type: "tenant" }); if (d?.items?.[0]) { setActive(d.items[0].slug); } }).catch(() => {}); }, []);
   useEffect(() => { if (active) docs.get(active).then(setDoc); }, [active]);
 
-  const filtered = data.items.filter((d) => !q || d.title.toLowerCase().includes(q.toLowerCase()) || d.summary.toLowerCase().includes(q.toLowerCase()));
+  const filtered = toArray(data?.items).filter((d) => !q || d.title.toLowerCase().includes(q.toLowerCase()) || d.summary.toLowerCase().includes(q.toLowerCase()));
 
   return (
     <div>
@@ -503,7 +503,7 @@ export function DocsHub() {
             <MagnifyingGlass size={14} className="absolute left-2.5 top-2.5 text-slate-500" />
             <input className="input !pl-8 !py-2 text-sm" placeholder="Search wiki…" value={q} onChange={(e) => setQ(e.target.value)} data-testid="docs-search" />
           </div>
-          {data.categories.map((cat) => (
+          {toArray(data?.categories).map((cat) => (
             <div key={cat.category} className="mb-3">
               <div className="label mb-1">{cat.category}</div>
               {filtered.filter((d) => d.category === cat.category).map((d) => (
