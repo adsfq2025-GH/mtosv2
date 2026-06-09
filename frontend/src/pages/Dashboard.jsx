@@ -4,6 +4,8 @@ import { dashboard } from "../api";
 import { PageHead } from "../Layout";
 import { Users, Heartbeat, Warning, CalendarCheck, CheckSquare, Megaphone, TrendUp, ArrowRight, Sparkle } from "@phosphor-icons/react";
 
+const toArray = (v) => (Array.isArray(v) ? v : []);
+
 const StatCard = ({ icon: Icon, label, value, hint, tone = "info", testid }) => {
   const toneClass = { success: "chip-success", warn: "chip-warn", danger: "chip-danger", info: "chip-info" }[tone] || "chip-info";
   return (
@@ -20,7 +22,17 @@ const StatCard = ({ icon: Icon, label, value, hint, tone = "info", testid }) => 
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
-  useEffect(() => { dashboard.overview().then(setData).catch(() => {}); }, []);
+  useEffect(() => {
+    dashboard.overview().then((res) => {
+      setData({
+        ...(res || {}),
+        recent_meetings: toArray(res?.recent_meetings),
+        at_risk_clients: toArray(res?.at_risk_clients),
+        prep_queue: toArray(res?.prep_queue),
+        top_suggestions: toArray(res?.top_suggestions),
+      });
+    }).catch(() => {});
+  }, []);
 
   return (
     <div>

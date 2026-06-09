@@ -7,9 +7,11 @@ import {
   ArrowRight, CheckCircle, Clock, Megaphone, Plugs, BookOpen, Plus, MagnifyingGlass, Check, X, Sparkle,
 } from "@phosphor-icons/react";
 
+const toArray = (v) => (Array.isArray(v) ? v : []);
+
 export function MeetingsList() {
   const [list, setList] = useState([]);
-  useEffect(() => { meetingsApi.list().then(setList); }, []);
+  useEffect(() => { meetingsApi.list().then((rows) => setList(toArray(rows))).catch(() => setList([])); }, []);
   return (
     <div>
       <PageHead title="Meetings" subtitle="Every Monthly Touch — prep, transcripts, recaps and outcomes." />
@@ -37,7 +39,7 @@ export function MeetingsList() {
 export function Actions() {
   const [items, setItems] = useState([]);
   const [filter, setFilter] = useState("all");
-  const load = () => actionItems.list().then(setItems);
+  const load = () => actionItems.list().then((rows) => setItems(toArray(rows))).catch(() => setItems([]));
   useEffect(() => { load(); }, []);
   const filtered = items.filter((a) => filter === "all" || a.status === filter);
   const setStatus = async (id, status) => { await actionItems.update(id, { status }); load(); };
@@ -77,7 +79,7 @@ export function Actions() {
 
 export function ContentQueue() {
   const [items, setItems] = useState([]);
-  const load = () => contentCaptures.list().then(setItems);
+  const load = () => contentCaptures.list().then((rows) => setItems(toArray(rows))).catch(() => setItems([]));
   useEffect(() => { load(); }, []);
   const route = async (id, val) => { await contentCaptures.update(id, { routed_to_marketing: val }); load(); };
 
