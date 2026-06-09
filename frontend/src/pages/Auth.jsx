@@ -4,6 +4,23 @@ import { useAuth } from "../auth";
 import { Brand } from "../Layout";
 import { Sparkle, ArrowRight } from "@phosphor-icons/react";
 
+// #region debug-point A:login-page-debug
+const dbgLogin = (hypothesisId, location, msg, data = {}) =>
+  fetch("http://127.0.0.1:7777/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "google-login-blankpage",
+      runId: "pre-fix",
+      hypothesisId,
+      location,
+      msg: `[DEBUG] ${msg}`,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+// #endregion
+
 export function Login() {
   const { login, loginWithGoogle } = useAuth();
   const navigate = useNavigate();
@@ -12,6 +29,7 @@ export function Login() {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [googleReady, setGoogleReady] = useState(false);
+  const googleClientId = String(process.env.REACT_APP_GOOGLE_CLIENT_ID || "").replace(/^["'`]+|["'`]+$/g, "").trim();
 
   const submit = async (e) => {
     e.preventDefault(); setErr(""); setLoading(true);
@@ -27,8 +45,10 @@ export function Login() {
   };
 
   useEffect(() => {
-    let cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
-    if (cid) cid = cid.replace(/^["'`]+|["'`]+$/g, '').trim();
+    const cid = googleClientId;
+    // #region debug-point A:gsi-bootstrap
+    dbgLogin("A", "Auth.jsx:gsiBootstrap", "gsi_bootstrap_start", { hasClientId: !!cid, clientIdPrefix: cid ? cid.slice(0, 12) : "", clientIdLength: cid ? cid.length : 0 });
+    // #endregion
     if (!cid) return;
     const id = "google-gsi";
     if (!document.getElementById(id)) {
@@ -37,39 +57,86 @@ export function Login() {
       s.src = "https://accounts.google.com/gsi/client";
       s.async = true;
       s.defer = true;
-      s.onload = () => setGoogleReady(true);
+      s.onload = () => {
+        // #region debug-point A:gsi-script-loaded
+        dbgLogin("A", "Auth.jsx:gsiBootstrap", "gsi_script_loaded", {});
+        // #endregion
+        setGoogleReady(true);
+      };
       document.body.appendChild(s);
     } else {
+      // #region debug-point A:gsi-script-present
+      dbgLogin("A", "Auth.jsx:gsiBootstrap", "gsi_script_already_present", {});
+      // #endregion
       setGoogleReady(true);
     }
-  }, []);
+  }, [googleClientId]);
 
   useEffect(() => {
-    let cid = process.env.REACT_APP_GOOGLE_CLIENT_ID;
-    if (cid) cid = cid.replace(/^["'`]+|["'`]+$/g, '').trim();
+    const cid = googleClientId;
+    // #region debug-point A:gsi-init-check
+    dbgLogin("A", "Auth.jsx:gsiInit", "gsi_init_check", { googleReady, hasClientId: !!cid, hasGoogleObject: !!window.google?.accounts?.id });
+    // #endregion
     if (!googleReady || !cid) return;
-    if (!window.google?.accounts?.id) return;
-    window.google.accounts.id.initialize({
-      client_id: cid,
-      callback: async (resp) => {
-        try {
-          await loginWithGoogle(resp.credential);
-          navigate("/");
-        } catch (e) {
-          const detail = e?.response?.data?.detail;
-          const status = e?.response?.status;
-          if (detail) setErr(String(detail));
-          else if (status) setErr(`Google sign-in failed (HTTP ${status})`);
-          else setErr(`Google sign-in failed (${e?.message || "Network/CORS error"})`);
+    let pollId = null;
+    let timeoutId = null;
+    const mountGoogleButton = () => {
+      if (!window.google?.accounts?.id) return false;
+      window.google.accounts.id.initialize({
+        client_id: cid,
+        callback: async (resp) => {
+          // #region debug-point A:gsi-callback
+          dbgLogin("A", "Auth.jsx:gsiInit", "gsi_callback", { hasCredential: !!resp?.credential, credentialLength: String(resp?.credential || "").length });
+          // #endregion
+          try {
+            await loginWithGoogle(resp.credential);
+            navigate("/");
+          } catch (e) {
+            // #region debug-point A:gsi-callback-error
+            dbgLogin("A", "Auth.jsx:gsiInit", "gsi_callback_error", { status: e?.response?.status, detail: e?.response?.data?.detail, message: e?.message });
+            // #endregion
+            const detail = e?.response?.data?.detail;
+            const status = e?.response?.status;
+            if (detail) setErr(String(detail));
+            else if (status) setErr(`Google sign-in failed (HTTP ${status})`);
+            else setErr(`Google sign-in failed (${e?.message || "Network/CORS error"})`);
+          }
+        },
+      });
+      const el = document.getElementById("googleSignInDiv");
+      if (el) {
+        el.innerHTML = "";
+        window.google.accounts.id.renderButton(el, { theme: "outline", size: "large", width: 360 });
+        // #region debug-point A:gsi-rendered
+        dbgLogin("A", "Auth.jsx:gsiInit", "gsi_button_rendered", { hasElement: !!el });
+        // #endregion
+      }
+      return true;
+    };
+    if (!mountGoogleButton()) {
+      // #region debug-point A:gsi-poll-start
+      dbgLogin("A", "Auth.jsx:gsiInit", "gsi_poll_start", {});
+      // #endregion
+      pollId = window.setInterval(() => {
+        if (mountGoogleButton()) {
+          window.clearInterval(pollId);
+          pollId = null;
         }
-      },
-    });
-    const el = document.getElementById("googleSignInDiv");
-    if (el) {
-      el.innerHTML = "";
-      window.google.accounts.id.renderButton(el, { theme: "outline", size: "large", width: 360 });
+      }, 250);
+      timeoutId = window.setTimeout(() => {
+        if (pollId) {
+          window.clearInterval(pollId);
+          // #region debug-point A:gsi-poll-timeout
+          dbgLogin("A", "Auth.jsx:gsiInit", "gsi_poll_timeout", {});
+          // #endregion
+        }
+      }, 5000);
     }
-  }, [googleReady, loginWithGoogle, navigate]);
+    return () => {
+      if (pollId) window.clearInterval(pollId);
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
+  }, [googleClientId, googleReady, loginWithGoogle, navigate]);
 
   return (
     <div className="app-bg min-h-screen grid lg:grid-cols-2">
@@ -101,7 +168,7 @@ export function Login() {
           <button type="submit" className="btn-primary w-full mt-4 flex items-center justify-center gap-2" disabled={loading} data-testid="login-submit-btn">
             {loading ? "Signing in…" : "Sign in"} <ArrowRight size={16} weight="bold" />
           </button>
-          {process.env.REACT_APP_GOOGLE_CLIENT_ID && (
+          {googleClientId && (
             <>
               <div className="divider my-5" />
               <div className="flex justify-center" id="googleSignInDiv" data-testid="google-login-btn" />

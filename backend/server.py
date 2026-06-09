@@ -506,6 +506,13 @@ async def login(request: Request, data: LoginIn, _: None = Depends(require_db_re
 @api.post("/auth/google")
 async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(require_db_ready)):
     client_id = _clean_oauth_str(GOOGLE_OAUTH_CLIENT_ID)
+    # #region debug-point B:google-login-entry
+    _dbg_emit("B", "server.py:/auth/google", "google_login_entry", {
+        "has_client_id": bool(client_id),
+        "client_id_prefix": client_id[:12] if client_id else "",
+        "credential_length": len((data.credential or "").strip()),
+    })
+    # #endregion
     if not client_id:
         raise HTTPException(500, "Google login is not configured on the backend")
     cred = (data.credential or "").strip()
@@ -513,9 +520,21 @@ async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(
         raise HTTPException(400, "Missing credential")
     async with httpx.AsyncClient(timeout=20) as client:
         resp = await client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": cred})
+    # #region debug-point B:google-login-tokeninfo
+    _dbg_emit("B", "server.py:/auth/google", "google_login_tokeninfo", {
+        "status_code": resp.status_code,
+    })
+    # #endregion
     if resp.status_code != 200:
         raise HTTPException(400, "Invalid Google credential")
     info = resp.json() or {}
+    # #region debug-point B:google-login-audience
+    _dbg_emit("B", "server.py:/auth/google", "google_login_audience", {
+        "aud": str(info.get("aud") or ""),
+        "expected": client_id,
+        "email": str(info.get("email") or ""),
+    })
+    # #endregion
     if str(info.get("aud") or "") != client_id:
         raise HTTPException(400, "Google credential audience mismatch")
     email = str(info.get("email") or "").strip().lower()
@@ -565,11 +584,21 @@ async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(
     else:
         membership = await ensure_membership(user)
     token = create_token(user.id, user.role, membership.tenant_id, membership.role)
+    # #region debug-point B:google-login-success
+    _dbg_emit("B", "server.py:/auth/google", "google_login_success", {
+        "user_id": str(user.id),
+        "email": user.email,
+        "tenant_id": membership.tenant_id,
+    })
+    # #endregion
     return {"token": token, "user": to_public(user).model_dump(), "tenant_id": membership.tenant_id}
 
 
 @api.get("/auth/me")
 async def me(user: User = Depends(get_current_user)):
+    # #region debug-point D:auth-me
+    _dbg_emit("D", "server.py:/auth/me", "auth_me_ok", {"user_id": str(user.id), "email": user.email})
+    # #endregion
     return to_public(user).model_dump()
 
 

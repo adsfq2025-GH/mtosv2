@@ -9,6 +9,23 @@ import {
 
 const toArray = (v) => (Array.isArray(v) ? v : []);
 
+// #region debug-point E:others-debug
+const dbgOthers = (hypothesisId, location, msg, data = {}) =>
+  fetch("http://127.0.0.1:7777/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "google-login-blankpage",
+      runId: "pre-fix",
+      hypothesisId,
+      location,
+      msg: `[DEBUG] ${msg}`,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+// #endregion
+
 export function MeetingsList() {
   const [list, setList] = useState([]);
   useEffect(() => { meetingsApi.list().then((rows) => setList(toArray(rows))).catch(() => setList([])); }, []);
@@ -123,8 +140,32 @@ export function Integrations() {
   const [ghlTokenLocId, setGhlTokenLocId] = useState("");
   const [ghlTokenValue, setGhlTokenValue] = useState("");
   const [ghlTokenSavedIds, setGhlTokenSavedIds] = useState([]);
-  const load = () => integrations.status().then((r) => setList(toArray(r))).catch(() => setList([]));
+  const load = () => integrations.status().then((r) => {
+    // #region debug-point E:integrations-load-ok
+    dbgOthers("E", "Others.jsx:Integrations", "integrations_status_ok", { isArray: Array.isArray(r), length: Array.isArray(r) ? r.length : null, type: typeof r });
+    // #endregion
+    setList(toArray(r));
+  }).catch((e) => {
+    // #region debug-point E:integrations-load-fail
+    dbgOthers("E", "Others.jsx:Integrations", "integrations_status_fail", { status: e?.response?.status, detail: e?.response?.data?.detail, message: e?.message });
+    // #endregion
+    setList([]);
+  });
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    // #region debug-point E:integrations-render
+    dbgOthers("E", "Others.jsx:Integrations", "integrations_render", { listIsArray: Array.isArray(list), listLength: Array.isArray(list) ? list.length : null, userRole: user?.role || null });
+    // #endregion
+  }, [list, user?.role]);
+  useEffect(() => {
+    const onError = (event) => {
+      // #region debug-point C:integrations-window-error
+      dbgOthers("C", "Others.jsx:Integrations", "window_error", { message: String(event?.message || ""), filename: event?.filename || "", lineno: event?.lineno || null });
+      // #endregion
+    };
+    window.addEventListener("error", onError);
+    return () => window.removeEventListener("error", onError);
+  }, []);
   useEffect(() => {
     if (user?.role !== "admin") return;
     aiTerritory.getSettings().then((r) => {
