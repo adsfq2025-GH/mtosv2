@@ -116,6 +116,16 @@ def _safe_err_detail(resp: httpx.Response) -> str:
     try:
         data = resp.json() or {}
         if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("status") or err.get("code")
+                details = err.get("details")
+                if isinstance(details, list) and details:
+                    first = details[0]
+                    if isinstance(first, dict):
+                        msg = msg or first.get("message") or first.get("reason")
+                if msg:
+                    return str(msg)
             if data.get("message"):
                 return str(data.get("message"))
             if data.get("err"):
@@ -124,7 +134,21 @@ def _safe_err_detail(resp: httpx.Response) -> str:
                 return str(data.get("error"))
         return str(data)[:300]
     except Exception:
-        return (resp.text or "")[:300]
+        text = str(resp.text or "").strip()
+        low = text.lower()
+        if "<html" in low or "<!doctype" in low:
+            m = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.I | re.S)
+            if m:
+                title = re.sub(r"\s+", " ", m.group(1)).strip()
+                if title:
+                    return f"html_error_page: {title[:220]}"
+            m = re.search(r"<h1[^>]*>(.*?)</h1>", text, flags=re.I | re.S)
+            if m:
+                h1 = re.sub(r"\s+", " ", m.group(1)).strip()
+                if h1:
+                    return f"html_error_page: {h1[:220]}"
+            return f"html_error_page_http_{resp.status_code}"
+        return text[:300]
 
 
 async def fetch_clickup_monthly(creds: Dict[str, str], binding: dict, start_d: Optional[date] = None, end_d: Optional[date] = None) -> Dict[str, Any]:
