@@ -5,7 +5,6 @@ export const API_BASE = `${BASE}/api`;
 
 export const api = axios.create({ baseURL: API_BASE });
 
-const toArray = (v) => (Array.isArray(v) ? v : []);
 const pickArray = (v, keys = []) => {
   if (Array.isArray(v)) return v;
   for (const k of keys) {
