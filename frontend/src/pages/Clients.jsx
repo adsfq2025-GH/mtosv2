@@ -6,6 +6,7 @@ import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, S
 import { useAuth } from "../auth";
 
 const healthChip = (h) => h >= 80 ? "chip-success" : h >= 60 ? "chip-info" : h >= 40 ? "chip-warn" : "chip-danger";
+const toArray = (v) => (Array.isArray(v) ? v : []);
 
 export function ClientsList() {
   const [list, setList] = useState([]); const [showNew, setShowNew] = useState(false); const [showImport, setShowImport] = useState(false);
@@ -17,7 +18,7 @@ export function ClientsList() {
   const [syncResult, setSyncResult] = useState(null);
   const { user } = useAuth();
   const navigate = useNavigate();
-  const load = useCallback(() => clients.list().then(setList), []);
+  const load = useCallback(() => clients.list().then((rows) => setList(toArray(rows))).catch(() => setList([])), []);
   useEffect(() => { load(); }, [load]);
   const _loadClickupStatus = useCallback(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -262,6 +263,22 @@ export function ClientDetail() {
     }).catch(() => {});
   }, []);
   // #endregion
+  useEffect(() => {
+    const onError = (event) => {
+      const msg = String(event?.message || "");
+      if (!msg.toLowerCase().includes("reading 'length'")) return;
+      dbgEmit("F1", "Clients.jsx:ClientDetail", "window_error_length", {
+        clientId: id,
+        message: msg,
+        reviewEventsType: Array.isArray(reviewEvents) ? "array" : typeof reviewEvents,
+        meetsType: Array.isArray(meets) ? "array" : typeof meets,
+        actionsType: Array.isArray(actions) ? "array" : typeof actions,
+        suggestionsType: Array.isArray(suggestions) ? "array" : typeof suggestions,
+      });
+    };
+    window.addEventListener("error", onError);
+    return () => window.removeEventListener("error", onError);
+  }, [actions, dbgEmit, id, meets, reviewEvents, suggestions]);
   const [client, setClient] = useState(null);
   const [meets, setMeets] = useState([]);
   const [actions, setActions] = useState([]);
@@ -312,18 +329,19 @@ export function ClientDetail() {
 
   const reload = useCallback(
     () => Promise.all([clients.get(id), meetings.list(id), actionItems.list({ client_id: id }), clients.listBindings(id)]).then(([c, m, a, b]) => {
-      setClient(c); setMeets(m); setActions(a);
+      setClient(c); setMeets(toArray(m)); setActions(toArray(a));
       setWebsite(String(c?.website || ""));
-      const clickup = (b || []).find((x) => x.platform === "clickup");
+      const safeBindings = toArray(b);
+      const clickup = safeBindings.find((x) => x.platform === "clickup");
       const folderId = clickup?.external_ids?.folder_id || clickup?.config?.folder_id || "";
       setClickupFolderId(folderId ? String(folderId) : "");
-      const ghl = (b || []).find((x) => x.platform === "gohighlevel");
+      const ghl = safeBindings.find((x) => x.platform === "gohighlevel");
       const locId = ghl?.external_ids?.location_id || ghl?.config?.location_id || "";
       setGohighlevelLocationId(locId ? String(locId) : "");
-      const gads = (b || []).find((x) => x.platform === "google_ads");
+      const gads = safeBindings.find((x) => x.platform === "google_ads");
       const custId = gads?.external_ids?.customer_id || gads?.config?.customer_id || "";
       setGoogleAdsCustomerId(custId ? String(custId) : "");
-      const gbp = (b || []).find((x) => x.platform === "google_business_profile");
+      const gbp = safeBindings.find((x) => x.platform === "google_business_profile");
       const acct = gbp?.external_ids?.account_name || gbp?.config?.account_name || "";
       const loc = gbp?.external_ids?.location_name || gbp?.config?.location_name || "";
       setGbpAccountName(acct ? String(acct) : "");
@@ -331,9 +349,9 @@ export function ClientDetail() {
 
       reviews.goal.get(id).then((g) => setReviewGoal(Number(g?.monthly_goal || 10) || 10)).catch(() => {});
       reviews.stats(id, 12).then(setReviewStats).catch(() => setReviewStats(null));
-      reviews.events.list(id, 200).then(setReviewEvents).catch(() => setReviewEvents([]));
+      reviews.events.list(id, 200).then((rows) => setReviewEvents(toArray(rows))).catch(() => setReviewEvents([]));
       clients.suggestions.get(id).then((r) => {
-        setSuggestions(r?.suggestions || []);
+        setSuggestions(toArray(r?.suggestions));
         setSuggestionsMeta({ generated_at: r?.generated_at || null, model: r?.model || null });
       }).catch(() => {
         setSuggestions([]);
@@ -490,13 +508,13 @@ export function ClientDetail() {
     // #endregion
     try {
       const ws = await integrations.clickupWorkspaces();
-      const list = ws?.workspaces || [];
+      const list = toArray(ws?.workspaces || ws?.teams);
       setClickupWorkspaces(list);
       const teamId = list?.[0]?.id ? String(list[0].id) : "";
       setClickupTeamId(teamId);
       if (teamId) {
         const res = await integrations.clickupFolders(teamId);
-        setClickupFolders(res?.folders || []);
+        setClickupFolders(toArray(res?.folders));
       } else {
         setClickupFolders([]);
       }
@@ -516,7 +534,7 @@ export function ClientDetail() {
     setLoadingClickup(true);
     try {
       const res = await integrations.clickupFolders(teamId);
-      setClickupFolders(res?.folders || []);
+      setClickupFolders(toArray(res?.folders));
     } catch (e) {
       alert(e?.response?.data?.detail || "Failed to load ClickUp folders");
       setClickupFolders([]);
@@ -531,7 +549,7 @@ export function ClientDetail() {
     setLoadingGhl(true);
     try {
       const res = await integrations.gohighlevelLocations();
-      setGhlLocations(res?.locations || []);
+      setGhlLocations(toArray(res?.locations));
     } catch (e) {
       alert(e?.response?.data?.detail || "Failed to load GoHighLevel locations");
       setGhlLocations([]);
@@ -549,7 +567,7 @@ export function ClientDetail() {
     // #endregion
     try {
       const res = await integrations.googleAdsCustomers();
-      setGadsCustomers(res?.customers || []);
+      setGadsCustomers(toArray(res?.customers));
     } catch (e) {
       // #region debug-point H4:gads-picker-error
       dbgEmit("H4", "Clients.jsx:openGadsPicker", "error", { status: e?.response?.status, detail: e?.response?.data?.detail, message: e?.message });
@@ -567,7 +585,7 @@ export function ClientDetail() {
     setLoadingGbp(true);
     try {
       const res = await integrations.gbpLocations();
-      setGbpLocations(res?.locations || []);
+      setGbpLocations(toArray(res?.locations));
     } catch (e) {
       alert(e?.response?.data?.detail || "Failed to load Google Business Profile locations");
       setGbpLocations([]);
