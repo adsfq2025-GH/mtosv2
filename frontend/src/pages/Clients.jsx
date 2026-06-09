@@ -80,7 +80,7 @@ export function ClientsList() {
               {c.location && <span className="chip chip-muted"><MapPin size={11} /> {c.location}</span>}
               <span className={`chip ${c.churn_risk === "high" ? "chip-danger" : c.churn_risk === "medium" ? "chip-warn" : "chip-success"}`}>{c.churn_risk} risk</span>
             </div>
-            <div className="text-xs text-slate-400 mt-3">{(c.services || []).slice(0, 3).join(" · ") || "No services tagged"}</div>
+            <div className="text-xs text-slate-400 mt-3">{toArray(c.services).slice(0, 3).join(" · ") || "No services tagged"}</div>
           </Link>
         ))}
       </div>
@@ -691,7 +691,7 @@ export function ClientDetail() {
           </div>
           <div className="divider my-4" />
           <div className="label mb-2">Services</div>
-          <div className="flex flex-wrap gap-1.5">{(client.services || []).map((s) => <span key={s} className="chip chip-muted">{s}</span>) || "—"}</div>
+          <div className="flex flex-wrap gap-1.5">{toArray(client.services).map((s) => <span key={s} className="chip chip-muted">{s}</span>) || "—"}</div>
           <div className="divider my-4" />
           <div className="label mb-2">Signal</div>
           <div className="flex gap-2 text-xs">
@@ -763,11 +763,11 @@ export function ClientDetail() {
                 </div>
               </div>
 
-              {(healthTrend.churn_risk_indicators || []).length > 0 && (
+              {toArray(healthTrend.churn_risk_indicators).length > 0 && (
                 <div className="mt-4">
                   <div className="text-xs text-slate-400 mb-2">Churn indicators</div>
                   <div className="flex flex-wrap gap-2">
-                    {(healthTrend.churn_risk_indicators || []).slice(0, 8).map((x, idx2) => (
+                    {toArray(healthTrend.churn_risk_indicators).slice(0, 8).map((x, idx2) => (
                       <span key={`${x}-${idx2}`} className="chip chip-muted">{x}</span>
                     ))}
                   </div>
@@ -777,7 +777,7 @@ export function ClientDetail() {
               <div className="mt-4">
                 <div className="text-xs text-slate-400 mb-2">Recent health check-ins</div>
                 <div className="space-y-2">
-                  {(healthTrend.items || []).slice(0, 6).map((it) => (
+                  {toArray(healthTrend.items).slice(0, 6).map((it) => (
                     <div key={it.meeting_id} className="p-3 rounded-md border border-white/5 flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-sm font-medium truncate">{it.meeting_title || "Meeting"}</div>
@@ -789,7 +789,7 @@ export function ClientDetail() {
                       </div>
                     </div>
                   ))}
-                  {(healthTrend.items || []).length === 0 && <div className="text-slate-500 text-sm py-2">No health check-ins logged yet.</div>}
+                  {toArray(healthTrend.items).length === 0 && <div className="text-slate-500 text-sm py-2">No health check-ins logged yet.</div>}
                 </div>
               </div>
 
@@ -831,7 +831,7 @@ export function ClientDetail() {
               <div className="mt-4">
                 <div className="text-xs text-slate-400 mb-2">Recent meetings</div>
                 <div className="space-y-2">
-                  {(feedbackTrend.items || []).slice(0, 6).map((it) => (
+                  {toArray(feedbackTrend.items).slice(0, 6).map((it) => (
                     <div key={it.meeting_id} className="p-3 rounded-md border border-white/5 flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-sm font-medium truncate">{it.meeting_title || "Meeting"}</div>
@@ -845,7 +845,7 @@ export function ClientDetail() {
                       </div>
                     </div>
                   ))}
-                  {(feedbackTrend.items || []).length === 0 && <div className="text-slate-500 text-sm py-2">No feedback submitted yet.</div>}
+                  {toArray(feedbackTrend.items).length === 0 && <div className="text-slate-500 text-sm py-2">No feedback submitted yet.</div>}
                 </div>
               </div>
             </div>
@@ -875,7 +875,7 @@ export function ClientDetail() {
             <div className="space-y-3 mt-4">
               {suggestions.slice(0, 12).map((s, idx2) => {
                 const explain = s.explain || {};
-                const paths = explain.kpi_paths || [];
+                const paths = toArray(explain.kpi_paths);
                 const obs = explain.observed_values || {};
                 return (
                   <div key={idx2} className="p-4 rounded-md border border-white/5 bg-white/[0.02]">
@@ -973,7 +973,7 @@ export function ClientDetail() {
               <div>
                 <div className="text-xs text-slate-400 mb-2">Review Growth Trend (last 6 months)</div>
                 {(() => {
-                  const t = (reviewStats?.trend || []).slice(-6);
+                  const t = toArray(reviewStats?.trend).slice(-6);
                   const maxV = Math.max(1, ...t.map((x) => Number(x.received || 0)));
                   return (
                     <div className="space-y-2">
@@ -993,9 +993,9 @@ export function ClientDetail() {
               <div className="space-y-4">
                 <div>
                   <div className="text-xs text-slate-400 mb-2">Opportunity Detection</div>
-                  {(reviewStats?.opportunities || []).length === 0 && <div className="text-sm text-slate-500">No alerts.</div>}
+                  {toArray(reviewStats?.opportunities).length === 0 && <div className="text-sm text-slate-500">No alerts.</div>}
                   <div className="space-y-2">
-                    {(reviewStats?.opportunities || []).slice(0, 4).map((o, idx2) => (
+                    {toArray(reviewStats?.opportunities).slice(0, 4).map((o, idx2) => (
                       <div key={`${o.type}-${idx2}`} className="p-3 rounded-md border border-white/5 bg-white/[0.02] text-sm text-slate-200">{o.message}</div>
                     ))}
                   </div>
@@ -1003,7 +1003,7 @@ export function ClientDetail() {
                 <div>
                   <div className="text-xs text-slate-400 mb-2">Suggested Review Scripts</div>
                   <div className="space-y-2">
-                    {(reviewStats?.suggested_scripts || []).slice(0, 3).map((s, idx2) => (
+                    {toArray(reviewStats?.suggested_scripts).slice(0, 3).map((s, idx2) => (
                       <div key={idx2} className="p-3 rounded-md border border-white/5 bg-white/[0.02] text-sm text-slate-200">{s}</div>
                     ))}
                   </div>
@@ -1011,7 +1011,7 @@ export function ClientDetail() {
                 <div>
                   <div className="text-xs text-slate-400 mb-2">QR Code Recommendations</div>
                   <div className="space-y-2">
-                    {(reviewStats?.qr_code_recommendations || []).slice(0, 3).map((s, idx2) => (
+                    {toArray(reviewStats?.qr_code_recommendations).slice(0, 3).map((s, idx2) => (
                       <div key={idx2} className="p-3 rounded-md border border-white/5 bg-white/[0.02] text-sm text-slate-200">{s}</div>
                     ))}
                   </div>
