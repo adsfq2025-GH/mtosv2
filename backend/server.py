@@ -104,6 +104,25 @@ async def _google_oauth_config(tenant_id: str) -> Dict[str, str]:
     except Exception:
         return out
     return out
+
+
+async def _google_login_client_id() -> str:
+    cid = _clean_oauth_str(GOOGLE_OAUTH_CLIENT_ID)
+    if cid:
+        return cid
+    try:
+        docs = await db.integrations.find({"platform": "google_oauth"}).to_list(20)
+        seen: List[str] = []
+        for doc in docs:
+            meta = doc.get("metadata") or {}
+            mid = _clean_oauth_str(meta.get("client_id"))
+            if mid and mid not in seen:
+                seen.append(mid)
+        if seen:
+            return seen[0]
+    except Exception:
+        return ""
+    return ""
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "").strip()
 
 from db import db, decrypt_secret, encrypt_secret, new_id, utcnow  # noqa: E402
@@ -505,7 +524,7 @@ async def login(request: Request, data: LoginIn, _: None = Depends(require_db_re
 
 @api.post("/auth/google")
 async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(require_db_ready)):
-    client_id = _clean_oauth_str(GOOGLE_OAUTH_CLIENT_ID)
+    client_id = await _google_login_client_id()
     # #region debug-point B:google-login-entry
     _dbg_emit("B", "server.py:/auth/google", "google_login_entry", {
         "has_client_id": bool(client_id),
