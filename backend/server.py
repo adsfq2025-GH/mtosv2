@@ -4098,8 +4098,8 @@ async def disconnect_integration(platform: str, ctx=Depends(get_current_context)
 
 @api.get("/integrations/clickup/workspaces")
 async def clickup_workspaces(ctx=Depends(get_current_context)):
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        raise HTTPException(403, "Admin only")
+    if str(ctx.tenant_role or "") == "viewer":
+        raise HTTPException(403, "Forbidden")
     res = await connectors.list_clickup_workspaces(ctx.tenant_id)
     if not res.get("ok"):
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "Failed")
@@ -4133,8 +4133,8 @@ async def google_business_profile_locations(ctx=Depends(get_current_context)):
 
 @api.get("/integrations/clickup/lists")
 async def clickup_lists(team_id: Optional[str] = Query(default=None), ctx=Depends(get_current_context)):
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        raise HTTPException(403, "Admin only")
+    if str(ctx.tenant_role or "") == "viewer":
+        raise HTTPException(403, "Forbidden")
     if not team_id:
         doc = await db.integrations.find_one({"$and": [{"platform": "clickup"}, tenant_scope(ctx.tenant_id)]})
         team_id = ((doc or {}).get("metadata") or {}).get("team_id")
@@ -4154,8 +4154,8 @@ async def clickup_lists(team_id: Optional[str] = Query(default=None), ctx=Depend
 
 @api.get("/integrations/clickup/folders")
 async def clickup_folders(team_id: Optional[str] = Query(default=None), ctx=Depends(get_current_context)):
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        raise HTTPException(403, "Admin only")
+    if str(ctx.tenant_role or "") == "viewer":
+        raise HTTPException(403, "Forbidden")
     if not team_id:
         doc = await db.integrations.find_one({"$and": [{"platform": "clickup"}, tenant_scope(ctx.tenant_id)]})
         team_id = ((doc or {}).get("metadata") or {}).get("team_id")

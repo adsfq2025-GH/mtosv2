@@ -35,6 +35,25 @@ async def get_credentials(tenant_id: str, platform: str) -> Dict[str, str]:
     return {**meta, **dec}
 
 
+def _clean_oauth_str(v: Any) -> str:
+    s = str(v or "").strip()
+    if not s:
+        return ""
+    for _ in range(3):
+        s2 = s.strip()
+        if len(s2) >= 2 and (
+            (s2[0] == "`" and s2[-1] == "`")
+            or (s2[0] == '"' and s2[-1] == '"')
+            or (s2[0] == "'" and s2[-1] == "'")
+        ):
+            s = s2[1:-1].strip()
+            continue
+        s = s2
+        break
+    s = s.replace("`", "").strip()
+    return s
+
+
 async def get_google_refresh_token(tenant_id: str, user_id: str, platform: str) -> str:
     doc = await db.user_oauth_tokens.find_one(
         {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform}
@@ -266,8 +285,8 @@ async def fetch_gohighlevel_monthly(tenant_id: str, binding: dict, start_d: Opti
 
 async def _google_ads_access_token(creds: Dict[str, str]) -> str:
     rt = (creds or {}).get("refresh_token")
-    cid = (creds or {}).get("oauth_client_id") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
-    secret = (creds or {}).get("oauth_client_secret") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    cid = _clean_oauth_str((creds or {}).get("oauth_client_id") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID"))
+    secret = _clean_oauth_str((creds or {}).get("oauth_client_secret") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET"))
     if not rt or not cid or not secret:
         raise ValueError("Missing Google OAuth credentials")
     payload = {
@@ -289,16 +308,16 @@ async def _google_ads_access_token(creds: Dict[str, str]) -> str:
 
 async def _google_ads_access_token_for_tenant(tenant_id: str, creds: Dict[str, str]) -> str:
     merged = dict(creds or {})
-    cid = str((merged or {}).get("oauth_client_id") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or "").strip()
-    secret = str((merged or {}).get("oauth_client_secret") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or "").strip()
+    cid = _clean_oauth_str((merged or {}).get("oauth_client_id") or os.environ.get("GOOGLE_OAUTH_CLIENT_ID"))
+    secret = _clean_oauth_str((merged or {}).get("oauth_client_secret") or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET"))
     if not cid or not secret:
         oauth = await get_credentials(tenant_id, "google_oauth")
         if not cid:
-            cid = str((oauth or {}).get("client_id") or "").strip()
+            cid = _clean_oauth_str((oauth or {}).get("client_id"))
             if cid:
                 merged["oauth_client_id"] = cid
         if not secret:
-            secret = str((oauth or {}).get("client_secret") or "").strip()
+            secret = _clean_oauth_str((oauth or {}).get("client_secret"))
             if secret:
                 merged["oauth_client_secret"] = secret
     return await _google_ads_access_token(merged)
@@ -603,7 +622,7 @@ async def list_google_meet_conference_records(tenant_id: str, user_id: str, meet
         return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Meet first."}
     creds = {"refresh_token": rt}
     try:
-        access_token = await _google_ads_access_token(creds)
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, creds)
     except Exception as exc:
         return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
     url = f"https://meet.googleapis.com/v2/spaces/{meet_code}/conferenceRecords"
@@ -622,7 +641,7 @@ async def _get_google_meet_transcripts(tenant_id: str, user_id: str, conference_
         return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Meet first."}
     creds = {"refresh_token": rt}
     try:
-        access_token = await _google_ads_access_token(creds)
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, creds)
     except Exception as exc:
         return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
     url = f"https://meet.googleapis.com/v2/{conference_record_name}/transcripts"
@@ -641,7 +660,7 @@ async def _google_docs_document(tenant_id: str, user_id: str, document_id: str) 
         raise ValueError("missing_google_connection")
     creds = {"refresh_token": rt}
     try:
-        access_token = await _google_ads_access_token(creds)
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, creds)
     except Exception as exc:
         raise ValueError(str(exc))
     url = f"https://docs.googleapis.com/v1/documents/{document_id}"
@@ -1642,7 +1661,7 @@ async def list_gmail_messages_for_contact(tenant_id: str, user_id: str, email: s
     if not refresh_token:
         return {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Gmail first."}
     try:
-        access_token = await _google_ads_access_token({"refresh_token": refresh_token})
+        access_token = await _google_ads_access_token_for_tenant(tenant_id, {"refresh_token": refresh_token})
     except Exception as exc:
         return {"ok": False, "error": "oauth_error", "error_detail": str(exc)[:300]}
 
