@@ -5,6 +5,15 @@ export const API_BASE = `${BASE}/api`;
 
 export const api = axios.create({ baseURL: API_BASE });
 
+const toArray = (v) => (Array.isArray(v) ? v : []);
+const pickArray = (v, keys = []) => {
+  if (Array.isArray(v)) return v;
+  for (const k of keys) {
+    if (Array.isArray(v?.[k])) return v[k];
+  }
+  return [];
+};
+
 api.interceptors.request.use((config) => {
   const t = localStorage.getItem("mtos_token");
   if (t) config.headers.Authorization = `Bearer ${t}`;
@@ -38,7 +47,7 @@ export const users = {
 };
 
 export const clients = {
-  list: () => api.get("/clients").then((r) => r.data),
+  list: () => api.get("/clients").then((r) => pickArray(r.data, ["items", "clients"])),
   create: (data) => api.post("/clients", data).then((r) => r.data),
   get: (id) => api.get(`/clients/${id}`).then((r) => r.data),
   update: (id, patch) => api.patch(`/clients/${id}`, patch).then((r) => r.data),
@@ -47,7 +56,7 @@ export const clients = {
     get: (id) => api.get(`/clients/${encodeURIComponent(id)}/suggestions`).then((r) => r.data),
     generate: (id, payload = {}) => api.post(`/clients/${encodeURIComponent(id)}/suggestions/generate`, payload).then((r) => r.data),
   },
-  listBindings: (id) => api.get(`/clients/${id}/bindings`).then((r) => r.data),
+  listBindings: (id) => api.get(`/clients/${id}/bindings`).then((r) => pickArray(r.data, ["items", "bindings"])),
   upsertBinding: (id, platform, payload) => api.put(`/clients/${id}/bindings/${platform}`, payload).then((r) => r.data),
   deleteBinding: (id, platform) => api.delete(`/clients/${id}/bindings/${platform}`).then((r) => r.data),
   generateMonthlyTouch: (id, payload = {}) => api.post(`/clients/${id}/monthly-touch`, payload).then((r) => r.data),
@@ -60,7 +69,7 @@ export const clients = {
 };
 
 export const meetings = {
-  list: (clientId) => api.get(`/meetings${clientId ? `?client_id=${clientId}` : ""}`).then((r) => r.data),
+  list: (clientId) => api.get(`/meetings${clientId ? `?client_id=${clientId}` : ""}`).then((r) => pickArray(r.data, ["items", "meetings"])),
   create: (data) => api.post("/meetings", data).then((r) => r.data),
   get: (id) => api.get(`/meetings/${id}`).then((r) => r.data),
   update: (id, patch) => api.patch(`/meetings/${id}`, patch).then((r) => r.data),
@@ -81,7 +90,7 @@ export const meetings = {
 export const actionItems = {
   list: (params = {}) => {
     const q = new URLSearchParams(params).toString();
-    return api.get(`/action-items${q ? `?${q}` : ""}`).then((r) => r.data);
+    return api.get(`/action-items${q ? `?${q}` : ""}`).then((r) => pickArray(r.data, ["items", "action_items"]));
   },
   create: (data) => api.post("/action-items", data).then((r) => r.data),
   update: (id, patch) => api.patch(`/action-items/${id}`, patch).then((r) => r.data),
@@ -108,7 +117,7 @@ export const reviews = {
   },
   stats: (clientId, months = 12) => api.get(`/reviews/${encodeURIComponent(clientId)}/stats?months=${encodeURIComponent(months)}`).then((r) => r.data),
   events: {
-    list: (clientId, limit = 200) => api.get(`/reviews/${encodeURIComponent(clientId)}/events?limit=${encodeURIComponent(limit)}`).then((r) => r.data),
+    list: (clientId, limit = 200) => api.get(`/reviews/${encodeURIComponent(clientId)}/events?limit=${encodeURIComponent(limit)}`).then((r) => pickArray(r.data, ["items", "events"])),
     create: (clientId, payload) => api.post(`/reviews/${encodeURIComponent(clientId)}/events`, payload).then((r) => r.data),
   },
 };
