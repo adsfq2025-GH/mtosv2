@@ -1023,6 +1023,93 @@ class RuntimeBridge:
         user_legacy_by_id = await self._load_user_legacy_map([str((rows[0] or {}).get("account_manager_user_id") or "").strip()])
         return self._client_row_to_doc(rows[0], tenant_legacy_id, user_legacy_by_id)
 
+    async def upsert_client(self, tenant_legacy_id: str, doc: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        client_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id) if client_legacy_id else None
+        account_manager_user_id = await self.resolve_target_user_id(str((doc or {}).get("account_manager_id") or "").strip())
+        payload = {
+            "tenant_id": target_tenant_id,
+            "name": str((doc or {}).get("name") or "").strip(),
+            "company": str((doc or {}).get("company") or "").strip(),
+            "industry": (doc or {}).get("industry"),
+            "primary_contact": (doc or {}).get("primary_contact"),
+            "email": (doc or {}).get("email"),
+            "phone": (doc or {}).get("phone"),
+            "website": (doc or {}).get("website"),
+            "location": (doc or {}).get("location"),
+            "account_manager_user_id": account_manager_user_id,
+            "account_manager_name": (doc or {}).get("account_manager_name"),
+            "services": list((doc or {}).get("services") or []),
+            "assigned_products": list((doc or {}).get("assigned_products") or []),
+            "crm_data": dict((doc or {}).get("crm_data") or {}),
+            "gbp_data": dict((doc or {}).get("gbp_data") or {}),
+            "onboarding_date": (doc or {}).get("onboarding_date"),
+            "mrr": _safe_float((doc or {}).get("mrr"), 0.0),
+            "health_score": _safe_int((doc or {}).get("health_score"), 75),
+            "churn_risk": str((doc or {}).get("churn_risk") or "low"),
+            "sentiment": str((doc or {}).get("sentiment") or "neutral"),
+            "notes": (doc or {}).get("notes"),
+            "avatar_url": (doc or {}).get("avatar_url"),
+            "status": str((doc or {}).get("status") or "active"),
+            "suggestions": list((doc or {}).get("suggestions") or []),
+            "suggestions_generated_at": (doc or {}).get("suggestions_generated_at"),
+            "suggestions_model": (doc or {}).get("suggestions_model"),
+            "feedback_alert": bool((doc or {}).get("feedback_alert", False)),
+            "feedback_alert_level": str((doc or {}).get("feedback_alert_level") or "low"),
+            "feedback_alert_reason": (doc or {}).get("feedback_alert_reason"),
+            "feedback_last_submitted_at": (doc or {}).get("feedback_last_submitted_at"),
+            "feedback_rolling_avg": dict((doc or {}).get("feedback_rolling_avg") or {}),
+            "health_alert": bool((doc or {}).get("health_alert", False)),
+            "health_alert_level": str((doc or {}).get("health_alert_level") or "low"),
+            "health_alert_reason": (doc or {}).get("health_alert_reason"),
+            "churn_risk_score": _safe_int((doc or {}).get("churn_risk_score"), 0),
+            "churn_risk_indicators": list((doc or {}).get("churn_risk_indicators") or []),
+            "nps_rolling_avg": (doc or {}).get("nps_rolling_avg"),
+            "sentiment_rolling": dict((doc or {}).get("sentiment_rolling") or {}),
+            "health_last_submitted_at": (doc or {}).get("health_last_submitted_at"),
+            "is_deleted": False,
+        }
+        if target_client_id:
+            result = await self._request(
+                "PATCH",
+                "clients",
+                params={"id": f"eq.{target_client_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "clients",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        user_legacy_by_id = await self._load_user_legacy_map([str((rows[0] or {}).get("account_manager_user_id") or "").strip()])
+        return self._client_row_to_doc(rows[0], tenant_legacy_id, user_legacy_by_id)
+
+    async def soft_delete_client(self, tenant_legacy_id: str, client_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_client_id:
+            return False
+        await self._request(
+            "PATCH",
+            "clients",
+            params={"id": f"eq.{target_client_id}"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
     async def _load_client_legacy_map(self, client_ids: Sequence[str]) -> dict[str, str]:
         clean_ids = [str(client_id).strip() for client_id in client_ids if str(client_id).strip()]
         if not clean_ids:
@@ -1167,6 +1254,146 @@ class RuntimeBridge:
         client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
         user_legacy_by_id = await self._load_user_legacy_map([str(row.get("account_manager_user_id") or "").strip()])
         return self._meeting_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, user_legacy_by_id)
+
+    async def resolve_target_meeting_id(self, tenant_legacy_id: str, meeting_legacy_id: str) -> Optional[str]:
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "meetings",
+            select="id,legacy_source_id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{meeting_legacy_id},id.eq.{meeting_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return str((rows[0] or {}).get("id") or "").strip() or None
+
+    async def upsert_meeting(self, tenant_legacy_id: str, doc: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        meeting_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id) if meeting_legacy_id else None
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, str((doc or {}).get("client_id") or "").strip())
+        if not target_client_id:
+            return None
+        account_manager_user_id = await self.resolve_target_user_id(str((doc or {}).get("account_manager_id") or "").strip())
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "client_name": (doc or {}).get("client_name"),
+            "account_manager_user_id": account_manager_user_id,
+            "account_manager_name": (doc or {}).get("account_manager_name"),
+            "title": str((doc or {}).get("title") or "").strip(),
+            "scheduled_at": (doc or {}).get("scheduled_at"),
+            "status": str((doc or {}).get("status") or "scheduled"),
+            "google_meet_url": (doc or {}).get("google_meet_url"),
+            "duration_minutes": _safe_int((doc or {}).get("duration_minutes"), 60),
+            "brief_generated_at": (doc or {}).get("brief_generated_at"),
+            "brief_model": (doc or {}).get("brief_model"),
+            "wins": list((doc or {}).get("wins") or []),
+            "wins_library": list((doc or {}).get("wins_library") or []),
+            "issues": list((doc or {}).get("issues") or []),
+            "issues_library": list((doc or {}).get("issues_library") or []),
+            "talking_points": list((doc or {}).get("talking_points") or []),
+            "talking_points_library": list((doc or {}).get("talking_points_library") or []),
+            "suggested_questions": list((doc or {}).get("suggested_questions") or []),
+            "prep_checklist": list((doc or {}).get("prep_checklist") or []),
+            "ace_up_the_sleeve": list((doc or {}).get("ace_up_the_sleeve") or []),
+            "testimonial_opportunity": (doc or {}).get("testimonial_opportunity"),
+            "strategic_recommendations": list((doc or {}).get("strategic_recommendations") or []),
+            "campaign_recommendations": list((doc or {}).get("campaign_recommendations") or []),
+            "health_signal": (doc or {}).get("health_signal"),
+            "automation_draft": dict((doc or {}).get("automation_draft") or {}),
+            "automation_draft_generated_at": (doc or {}).get("automation_draft_generated_at"),
+            "automation_approved_at": (doc or {}).get("automation_approved_at"),
+            "kpi_snapshot": dict((doc or {}).get("kpi_snapshot") or {}),
+            "notes": (doc or {}).get("notes"),
+            "transcript": (doc or {}).get("transcript"),
+            "transcript_source": dict((doc or {}).get("transcript_source") or {}),
+            "transcript_analyzed_at": (doc or {}).get("transcript_analyzed_at"),
+            "sentiment": (doc or {}).get("sentiment"),
+            "sentiment_summary": (doc or {}).get("sentiment_summary"),
+            "transcript_analysis": dict((doc or {}).get("transcript_analysis") or {}),
+            "transcript_analysis_by_model": dict((doc or {}).get("transcript_analysis_by_model") or {}),
+            "nps_score": (doc or {}).get("nps_score"),
+            "sentiment_classification": (doc or {}).get("sentiment_classification"),
+            "health_notes": (doc or {}).get("health_notes"),
+            "recap_html": (doc or {}).get("recap_html"),
+            "recap_email": (doc or {}).get("recap_email"),
+            "recap_subject": (doc or {}).get("recap_subject"),
+            "recap_sent_at": (doc or {}).get("recap_sent_at"),
+            "meeting_score": (doc or {}).get("meeting_score"),
+            "checklist": dict((doc or {}).get("checklist") or {}),
+            "deliverable_reviews": dict((doc or {}).get("deliverable_reviews") or {}),
+            "discovery_questions": list((doc or {}).get("discovery_questions") or []),
+            "feedback": dict((doc or {}).get("feedback") or {}) if (doc or {}).get("feedback") is not None else None,
+            "is_deleted": False,
+        }
+        if target_meeting_id:
+            result = await self._request(
+                "PATCH",
+                "meetings",
+                params={"id": f"eq.{target_meeting_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "meetings",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        user_legacy_by_id = await self._load_user_legacy_map([str(row.get("account_manager_user_id") or "").strip()])
+        return self._meeting_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, user_legacy_by_id)
+
+    async def soft_delete_meeting(self, tenant_legacy_id: str, meeting_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+        if not target_meeting_id:
+            return False
+        await self._request(
+            "PATCH",
+            "meetings",
+            params={"id": f"eq.{target_meeting_id}"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def soft_delete_meetings_for_client(self, tenant_legacy_id: str, client_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return False
+        await self._request(
+            "PATCH",
+            "meetings",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
 
     def _integration_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})

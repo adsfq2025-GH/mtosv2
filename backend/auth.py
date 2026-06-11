@@ -299,6 +299,8 @@ async def resolve_tenant_id_from_host(host: str) -> Optional[str]:
     bridge_tenant_id = await get_runtime_bridge().resolve_tenant_legacy_id_from_host(h)
     if bridge_tenant_id:
         return bridge_tenant_id
+    if is_supabase_service_configured():
+        return None
 
     base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
     if _mongo_available() and base_domain and h.endswith("." + base_domain):
@@ -372,7 +374,7 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
     bridged_user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
     if bridged_user:
         return bridged_user
-    if _mongo_available():
+    if _mongo_available() and not is_supabase_service_configured():
         doc = await db.users.find_one({"_id": user_id})
         if doc:
             return User.from_mongo(doc)
@@ -397,6 +399,7 @@ async def ensure_default_tenant() -> str:
         if doc:
             _DEFAULT_TENANT_ID = str(doc.get("_id") or doc.get("id") or "default")
             return _DEFAULT_TENANT_ID
+        raise RuntimeError("Unable to resolve default tenant from Supabase")
     doc = await db.tenants.find_one({"slug": "default"})
     if not doc:
         t = Tenant(slug="default", name="Default")
@@ -420,6 +423,7 @@ async def ensure_internal_wiki_tenant_id() -> str:
         if doc:
             _INTERNAL_WIKI_TENANT_ID = str(doc.get("_id") or doc.get("id") or slug)
             return _INTERNAL_WIKI_TENANT_ID
+        raise RuntimeError("Unable to resolve internal wiki tenant from Supabase")
     doc = await db.tenants.find_one({"slug": slug})
     if not doc:
         t = Tenant(slug=slug, name="Internal")
@@ -442,6 +446,7 @@ async def ensure_membership_for_tenant(user: User, tenant_id: str, role_if_creat
         membership = _bridge_membership_to_model(created)
         if membership:
             return membership
+        raise RuntimeError("Unable to resolve tenant membership from Supabase")
     doc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(tenant_id), "status": "active"})
     if doc:
         return TenantMembership.from_mongo(doc)
@@ -471,6 +476,7 @@ async def ensure_membership(user: User) -> TenantMembership:
         membership = _bridge_membership_to_model(created)
         if membership:
             return membership
+        raise RuntimeError("Unable to create default tenant membership from Supabase")
     doc = await db.tenant_memberships.find_one({"user_id": user.id, "status": "active"})
     if doc:
         return TenantMembership.from_mongo(doc)
@@ -490,7 +496,7 @@ async def get_current_context(request: Request, creds: Optional[HTTPAuthorizatio
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
-    if not user and _mongo_available():
+    if not user and _mongo_available() and not is_supabase_service_configured():
         doc = await db.users.find_one({"_id": user_id})
         user = User.from_mongo(doc) if doc else None
     if not user:
@@ -502,7 +508,7 @@ async def get_current_context(request: Request, creds: Optional[HTTPAuthorizatio
         m = None
         if is_supabase_service_configured():
             m = _bridge_membership_to_model(await get_runtime_bridge().get_user_membership(str(host_tenant_id), user.id))
-        if not m and _mongo_available():
+        if not m and _mongo_available() and not is_supabase_service_configured():
             mdoc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(host_tenant_id), "status": "active"})
             m = TenantMembership.from_mongo(mdoc) if mdoc else None
         if not m:

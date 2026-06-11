@@ -7,19 +7,56 @@ import httpx
 
 import ai
 import connectors
-from db import db, utcnow
+from db import db, is_mongo_configured, utcnow
 from models import ActionItem, Client, Meeting, User
+from runtime_bridge import get_runtime_bridge
 
 
 def _tenant_scope(tenant_id: str) -> dict:
     return {"$or": [{"tenant_id": tenant_id}, {"tenant_id": {"$exists": False}}]}
 
 
+async def _get_client_doc(tenant_id: str, client_id: str) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("clients"):
+        doc = await bridge.get_client(tenant_id, client_id)
+        if doc:
+            return doc
+    if not is_mongo_configured():
+        return None
+    return await db.clients.find_one({"_id": client_id, **_tenant_scope(tenant_id)})
+
+
+async def _list_active_client_docs() -> List[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("clients"):
+        docs = await bridge.list_clients("default", limit=1000)
+        return [doc for doc in docs if str((doc or {}).get("status") or "") == "active"]
+    if not is_mongo_configured():
+        return []
+    return await db.clients.find({"status": "active"}).to_list(1000)
+
+
 async def _ensure_meeting_for_client(tenant_id: str, client: Client, user: Optional[User]) -> Meeting:
     title = f"Monthly Touch — {utcnow().strftime('%B %Y')}"
-    existing = await db.meetings.find_one({"$and": [{"client_id": client.id, "title": title}, _tenant_scope(tenant_id)]})
-    if existing:
-        return Meeting.from_mongo(existing)
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("meetings"):
+        meetings = await bridge.list_meetings(tenant_id, limit=500)
+        existing = next(
+            (
+                doc
+                for doc in meetings
+                if str((doc or {}).get("client_id") or "") == str(client.id)
+                and str((doc or {}).get("title") or "") == title
+            ),
+            None,
+        )
+        if existing:
+            return Meeting.from_mongo(existing)
+    elif is_mongo_configured():
+        existing = await db.meetings.find_one({"$and": [{"client_id": client.id, "title": title}, _tenant_scope(tenant_id)]})
+        if existing:
+            return Meeting.from_mongo(existing)
 
     meeting = Meeting(
         tenant_id=tenant_id,
@@ -33,11 +70,31 @@ async def _ensure_meeting_for_client(tenant_id: str, client: Client, user: Optio
         duration_minutes=60,
         status="prep",
     )
+    if bridge.is_enabled_for("meetings"):
+        stored = await bridge.upsert_meeting(tenant_id, meeting.to_mongo())
+        if stored:
+            if is_mongo_configured():
+                await db.meetings.insert_one(meeting.to_mongo())
+            return Meeting.from_mongo(stored)
+        raise RuntimeError("Unable to create monthly touch meeting in Supabase")
     await db.meetings.insert_one(meeting.to_mongo())
     return meeting
 
 
 async def _upsert_action_item(tenant_id: str, client_id: str, meeting_id: str, title: str, description: str, owner: Optional[str]) -> ActionItem:
+    if not is_mongo_configured():
+        due = (utcnow() + timedelta(days=14)).date().isoformat()
+        return ActionItem(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            meeting_id=meeting_id,
+            title=title,
+            description=description,
+            owner=owner,
+            due_date=due,
+            priority="medium",
+            status="open",
+        )
     existing = await db.action_items.find_one(
         {"$and": [{"client_id": client_id, "meeting_id": meeting_id, "title": title}, _tenant_scope(tenant_id)]}
     )
@@ -101,10 +158,7 @@ async def _push_action_item_to_clickup(tenant_id: str, item: ActionItem, client_
             if resp2.status_code in (200, 201):
                 list_id = str((resp2.json() or {}).get("id") or (resp2.json() or {}).get("list", {}).get("id") or "")
         if list_id:
-            await db.client_bindings.update_one(
-                {"$and": [{"client_id": client_id, "platform": "clickup"}, _tenant_scope(tenant_id)]},
-                {"$set": {"external_ids.action_list_id": str(list_id), "updated_at": utcnow().isoformat()}},
-            )
+            await connectors._update_client_binding_external_ids(tenant_id, client_id, "clickup", {"action_list_id": str(list_id)})
         return str(list_id) if list_id else None
 
     target_list_id = await ensure_action_list_id()
@@ -123,6 +177,8 @@ async def _push_action_item_to_clickup(tenant_id: str, item: ActionItem, client_
     external_id = data.get("id")
     external_url = data.get("url")
     update: Dict[str, Any] = {"pushed_to": "clickup", "external_id": external_id, "external_url": external_url, "updated_at": utcnow().isoformat()}
+    if not is_mongo_configured():
+        return item.model_copy(update=update)
     await db.action_items.update_one({"_id": item.id, **_tenant_scope(tenant_id)}, {"$set": update})
     doc = await db.action_items.find_one({"_id": item.id, **_tenant_scope(tenant_id)})
     return ActionItem.from_mongo(doc) if doc else item
@@ -137,7 +193,7 @@ async def generate_for_client(
     extra_context: Optional[str] = None,
     push_clickup_actions: bool = True,
 ) -> Meeting:
-    c_doc = await db.clients.find_one({"_id": client_id, **_tenant_scope(tenant_id)})
+    c_doc = await _get_client_doc(tenant_id, client_id)
     if not c_doc:
         raise ValueError("Client not found")
     client = Client.from_mongo(c_doc)
@@ -172,9 +228,17 @@ async def generate_for_client(
         "status": "prep",
         "updated_at": utcnow().isoformat(),
     }
-    await db.meetings.update_one({"_id": meeting.id, **_tenant_scope(tenant_id)}, {"$set": update})
-    m_doc = await db.meetings.find_one({"_id": meeting.id, **_tenant_scope(tenant_id)})
-    meeting = Meeting.from_mongo(m_doc) if m_doc else meeting
+    bridge = get_runtime_bridge()
+    next_doc = {**meeting.to_mongo(), **update}
+    if bridge.is_enabled_for("meetings"):
+        m_doc = await bridge.upsert_meeting(tenant_id, next_doc)
+        if is_mongo_configured():
+            await db.meetings.update_one({"_id": meeting.id, **_tenant_scope(tenant_id)}, {"$set": update})
+        meeting = Meeting.from_mongo(m_doc) if m_doc else meeting
+    else:
+        await db.meetings.update_one({"_id": meeting.id, **_tenant_scope(tenant_id)}, {"$set": update})
+        m_doc = await db.meetings.find_one({"_id": meeting.id, **_tenant_scope(tenant_id)})
+        meeting = Meeting.from_mongo(m_doc) if m_doc else meeting
 
     owner = meeting.account_manager_name or meeting.account_manager_id
     created_items: List[ActionItem] = []
@@ -201,7 +265,7 @@ async def generate_for_client(
 
 
 async def generate_for_all(*, model_key: Optional[str] = None, extra_context: Optional[str] = None) -> Dict[str, Any]:
-    clients = await db.clients.find({"status": "active"}).to_list(1000)
+    clients = await _list_active_client_docs()
     ok = 0
     failed: List[Dict[str, str]] = []
     for c in clients:
