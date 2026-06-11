@@ -9,11 +9,9 @@ from typing import Any, Optional, Sequence
 
 import httpx
 
-from supabase_config import get_supabase_settings
+from supabase_config import get_runtime_bridge_settings, reset_supabase_settings_cache
 
 logger = logging.getLogger("mtos.runtime_bridge")
-
-DEFAULT_RUNTIME_BRIDGE_DOMAINS = ("tenants", "clients", "meetings", "integrations", "profiles")
 
 
 def _to_bool(value: Any, default: bool = False) -> bool:
@@ -21,13 +19,6 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
-
-
-def _parse_csv(value: str, default: Sequence[str]) -> tuple[str, ...]:
-    raw = str(value or "").strip()
-    if not raw:
-        return tuple(default)
-    return tuple(sorted({part.strip().lower() for part in raw.split(",") if part.strip()}))
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -98,26 +89,6 @@ def merge_prefer_bridge(
     return out
 
 
-@lru_cache(maxsize=1)
-def get_runtime_bridge_settings() -> dict[str, Any]:
-    supabase = get_supabase_settings()
-    enabled = _to_bool(os.environ.get("SUPABASE_RUNTIME_BRIDGE_ENABLED"), bool(supabase.get("enabled")))
-    timeout_seconds = max(2.0, float(os.environ.get("SUPABASE_RUNTIME_BRIDGE_TIMEOUT_SECONDS", "8") or "8"))
-    domains = _parse_csv(
-        os.environ.get("SUPABASE_RUNTIME_BRIDGE_DOMAINS", ""),
-        DEFAULT_RUNTIME_BRIDGE_DOMAINS,
-    )
-    return {
-        "enabled": enabled,
-        "domains": domains,
-        "timeout_seconds": timeout_seconds,
-        "url": str(supabase.get("url") or "").rstrip("/"),
-        "service_role_key": str(supabase.get("service_role_key") or "").strip(),
-        "db_schema": str(supabase.get("db_schema") or "public").strip() or "public",
-        "service_configured": bool(enabled and supabase.get("service_configured")),
-    }
-
-
 class RuntimeBridge:
     def __init__(self, settings: Optional[dict[str, Any]] = None):
         self.settings = settings or get_runtime_bridge_settings()
@@ -131,12 +102,27 @@ class RuntimeBridge:
             return False
         return str(domain or "").strip().lower() in set(self.settings.get("domains") or ())
 
+    def is_mirror_enabled_for(self, domain: str) -> bool:
+        if not self.service_configured:
+            return False
+        return str(domain or "").strip().lower() in set(self.settings.get("mirror_domains") or ())
+
     def _headers(self) -> dict[str, str]:
         return {
             "apikey": str(self.settings.get("service_role_key") or ""),
             "Authorization": f"Bearer {self.settings.get('service_role_key') or ''}",
             "Accept-Profile": str(self.settings.get("db_schema") or "public"),
         }
+
+    def _write_headers(self, *, prefer: Optional[str] = None) -> dict[str, str]:
+        headers = {
+            **self._headers(),
+            "Content-Profile": str(self.settings.get("db_schema") or "public"),
+            "Content-Type": "application/json",
+        }
+        if prefer:
+            headers["Prefer"] = prefer
+        return headers
 
     async def _select(
         self,
@@ -173,6 +159,113 @@ class RuntimeBridge:
             logger.warning("runtime bridge query failed for %s: %s", relation, exc)
             return None
 
+    async def _request(
+        self,
+        method: str,
+        relation: str,
+        *,
+        params: Optional[dict[str, str]] = None,
+        payload: Any = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> Any:
+        async with httpx.AsyncClient(timeout=float(self.settings.get("timeout_seconds") or 8.0)) as client:
+            response = await client.request(
+                method.upper(),
+                f"{self.settings['url']}/rest/v1/{relation.lstrip('/')}",
+                params=params,
+                json=payload,
+                headers=headers or self._write_headers(),
+            )
+        response.raise_for_status()
+        if not response.text.strip():
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return response.text
+
+    async def mirror_tenant_settings(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        if not self.is_mirror_enabled_for("settings"):
+            return {"attempted": False, "ok": False, "reason": "disabled"}
+
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return {"attempted": False, "ok": False, "reason": "tenant_not_mapped"}
+
+        payload = {
+            "tenant_id": target_tenant_id,
+            "branding": dict(doc.get("branding") or {}),
+            "terminology": dict(doc.get("terminology") or {}),
+            "workflows": dict(doc.get("workflows") or {}),
+            "analysis": dict(doc.get("analysis") or {}),
+            "created_at": doc.get("created_at"),
+            "updated_at": doc.get("updated_at"),
+            "is_deleted": False,
+        }
+
+        existing_rows = await self._safe_select(
+            "tenant_settings",
+            select="id",
+            filters={"tenant_id": f"eq.{target_tenant_id}", "is_deleted": "eq.false"},
+            limit=1,
+        )
+        if existing_rows is None:
+            raise RuntimeError("tenant_settings mirror preflight failed")
+
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            if not row_id:
+                raise RuntimeError("tenant_settings mirror target row missing id")
+            result = await self._request(
+                "PATCH",
+                "tenant_settings",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+            return {
+                "attempted": True,
+                "ok": True,
+                "mode": "update",
+                "reason": reason,
+                "target_tenant_id": target_tenant_id,
+                "result": result,
+            }
+
+        result = await self._request(
+            "POST",
+            "tenant_settings",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        return {
+            "attempted": True,
+            "ok": True,
+            "mode": "insert",
+            "reason": reason,
+            "target_tenant_id": target_tenant_id,
+            "result": result,
+        }
+
+    async def safe_mirror_tenant_settings(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return await self.mirror_tenant_settings(tenant_legacy_id, doc, reason=reason)
+        except Exception as exc:
+            logger.warning("tenant_settings mirror failed for tenant %s (%s): %s", tenant_legacy_id, reason or "unknown", exc)
+            return {"attempted": True, "ok": False, "reason": reason or "unknown", "error": str(exc)}
+
     async def resolve_target_tenant_id(self, tenant_legacy_id: str) -> Optional[str]:
         if not self.service_configured:
             return None
@@ -192,6 +285,48 @@ class RuntimeBridge:
             return None
         tenant_id = str((rows[0] or {}).get("id") or "").strip()
         return tenant_id or None
+
+    async def resolve_target_user_id(self, user_legacy_id: str) -> Optional[str]:
+        if not self.service_configured:
+            return None
+        filters = {"email": "not.is.null"}
+        if _is_uuid(user_legacy_id):
+            filters["or"] = f"(legacy_source_id.eq.{user_legacy_id},id.eq.{user_legacy_id})"
+        else:
+            filters["legacy_source_id"] = f"eq.{user_legacy_id}"
+
+        rows = await self._safe_select(
+            "user_profiles",
+            select="id,legacy_source_id",
+            filters=filters,
+            limit=1,
+        )
+        if not rows:
+            return None
+        user_id = str((rows[0] or {}).get("id") or "").strip()
+        return user_id or None
+
+    async def get_tenant(self, tenant_legacy_id: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("tenants"):
+            return None
+        filters = {"is_deleted": "eq.false"}
+        if _is_uuid(tenant_legacy_id):
+            filters["or"] = f"(legacy_source_id.eq.{tenant_legacy_id},id.eq.{tenant_legacy_id})"
+        else:
+            filters["legacy_source_id"] = f"eq.{tenant_legacy_id}"
+        rows = await self._safe_select(
+            "tenants",
+            select="id,legacy_source_id,slug,name,status,subscription_status,subscription_expires_at,trial_ends_at,metadata",
+            filters=filters,
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = dict(rows[0] or {})
+        row["_id"] = str(row.get("legacy_source_id") or row.get("id") or tenant_legacy_id)
+        row["id"] = row["_id"]
+        row["metadata"] = dict(row.get("metadata") or {})
+        return row
 
     async def resolve_tenant_legacy_id_from_host(self, host: str) -> Optional[str]:
         if not self.is_enabled_for("tenants"):
@@ -268,7 +403,88 @@ class RuntimeBridge:
             "name": display_name or None,
             "avatar_url": row.get("avatar_url"),
             "role": row.get("system_role"),
+            "auth_provider": row.get("auth_provider"),
         }
+
+    async def get_user_profile_by_email(self, email: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("profiles"):
+            return None
+        normalized_email = str(email or "").strip().lower()
+        if not normalized_email:
+            return None
+        rows = await self._safe_select(
+            "user_profiles",
+            select="id,email,full_name,avatar_url,auth_provider,system_role,legacy_source_id",
+            filters={"email": f"eq.{normalized_email}"},
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = rows[0] or {}
+        profile_id = str(row.get("legacy_source_id") or row.get("id") or normalized_email)
+        display_name = str(row.get("full_name") or "").strip()
+        if not display_name and row.get("email"):
+            display_name = str(row.get("email")).split("@", 1)[0]
+        return {
+            "_id": profile_id,
+            "id": profile_id,
+            "email": row.get("email"),
+            "name": display_name or None,
+            "avatar_url": row.get("avatar_url"),
+            "role": row.get("system_role"),
+            "auth_provider": row.get("auth_provider"),
+        }
+
+    def _settings_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["branding"] = dict(doc.get("branding") or {})
+        doc["terminology"] = dict(doc.get("terminology") or {})
+        doc["workflows"] = dict(doc.get("workflows") or {})
+        doc["analysis"] = dict(doc.get("analysis") or {})
+        doc.pop("id", None)
+        return doc
+
+    async def get_tenant_settings(self, tenant_legacy_id: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("settings"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "tenant_settings",
+            select="id,tenant_id,branding,terminology,workflows,analysis,created_at,updated_at",
+            filters={"tenant_id": f"eq.{target_tenant_id}", "is_deleted": "eq.false"},
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._settings_row_to_doc(rows[0], tenant_legacy_id)
+
+    def _tenant_domain_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("id") or doc.get("domain") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["domain"] = str(doc.get("domain") or "").strip().lower()
+        doc["is_primary"] = bool(doc.get("is_primary"))
+        doc.pop("id", None)
+        return doc
+
+    async def list_tenant_domains(self, tenant_legacy_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("domains"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        rows = await self._safe_select(
+            "tenant_domains",
+            select="id,tenant_id,domain,is_primary,verified_at,created_at,updated_at",
+            filters={"tenant_id": f"eq.{target_tenant_id}", "is_deleted": "eq.false"},
+            order="is_primary.desc,domain.asc",
+            limit=limit,
+        )
+        return [self._tenant_domain_row_to_doc(row, tenant_legacy_id) for row in (rows or [])]
 
     async def _load_user_legacy_map(self, user_ids: Sequence[str]) -> dict[str, str]:
         clean_ids = [str(user_id).strip() for user_id in user_ids if str(user_id).strip()]
@@ -377,6 +593,24 @@ class RuntimeBridge:
             for row in rows
             if str(row.get("id") or "").strip()
         }
+
+    async def resolve_target_client_id(self, tenant_legacy_id: str, client_legacy_id: str) -> Optional[str]:
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "clients",
+            select="id,legacy_source_id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{client_legacy_id},id.eq.{client_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return str((rows[0] or {}).get("id") or "").strip() or None
 
     def _meeting_row_to_doc(
         self,
@@ -512,6 +746,613 @@ class RuntimeBridge:
         )
         return [self._integration_row_to_doc(row, tenant_legacy_id) for row in (rows or [])]
 
+    async def get_tenant_integration(self, tenant_legacy_id: str, platform: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("integrations"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        normalized_platform = str(platform or "").strip().lower()
+        if not target_tenant_id or not normalized_platform:
+            return None
+        rows = await self._safe_select(
+            "tenant_integrations",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "platform": f"eq.{normalized_platform}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._integration_row_to_doc(rows[0], tenant_legacy_id)
+
+    async def mirror_tenant_integration(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        if not self.is_mirror_enabled_for("integrations"):
+            return {"attempted": False, "ok": False, "reason": "disabled"}
+
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        platform = str((doc or {}).get("platform") or "").strip().lower()
+        if not target_tenant_id or not platform:
+            return {"attempted": False, "ok": False, "reason": "tenant_or_platform_not_mapped"}
+
+        payload = {
+            "tenant_id": target_tenant_id,
+            "platform": platform,
+            "label": str((doc or {}).get("label") or platform).strip() or platform,
+            "status": str((doc or {}).get("status") or "not_connected").strip() or "not_connected",
+            "last_synced_at": (doc or {}).get("last_synced_at"),
+            "last_error": (doc or {}).get("last_error"),
+            "metadata": dict((doc or {}).get("metadata") or {}),
+            "vault_secret_ref": (doc or {}).get("vault_secret_ref"),
+            "oauth_connection_ref": (doc or {}).get("oauth_connection_ref"),
+            "is_deleted": False,
+        }
+
+        existing_rows = await self._safe_select(
+            "tenant_integrations",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "platform": f"eq.{platform}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows is None:
+            raise RuntimeError("tenant_integrations mirror preflight failed")
+
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            if not row_id:
+                raise RuntimeError("tenant_integrations mirror target row missing id")
+            result = await self._request(
+                "PATCH",
+                "tenant_integrations",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+            return {
+                "attempted": True,
+                "ok": True,
+                "mode": "update",
+                "reason": reason,
+                "target_tenant_id": target_tenant_id,
+                "platform": platform,
+                "result": result,
+            }
+
+        result = await self._request(
+            "POST",
+            "tenant_integrations",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        return {
+            "attempted": True,
+            "ok": True,
+            "mode": "insert",
+            "reason": reason,
+            "target_tenant_id": target_tenant_id,
+            "platform": platform,
+            "result": result,
+        }
+
+    async def safe_mirror_tenant_integration(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return await self.mirror_tenant_integration(tenant_legacy_id, doc, reason=reason)
+        except Exception as exc:
+            logger.warning(
+                "tenant_integrations mirror failed for tenant %s platform %s (%s): %s",
+                tenant_legacy_id,
+                str((doc or {}).get("platform") or "").strip(),
+                reason or "unknown",
+                exc,
+            )
+            return {"attempted": True, "ok": False, "reason": reason or "unknown", "error": str(exc)}
+
+    async def soft_delete_tenant_integration(
+        self,
+        tenant_legacy_id: str,
+        platform: str,
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        if not self.is_mirror_enabled_for("integrations"):
+            return {"attempted": False, "ok": False, "reason": "disabled"}
+
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        normalized_platform = str(platform or "").strip().lower()
+        if not target_tenant_id or not normalized_platform:
+            return {"attempted": False, "ok": False, "reason": "tenant_or_platform_not_mapped"}
+
+        result = await self._request(
+            "PATCH",
+            "tenant_integrations",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "platform": f"eq.{normalized_platform}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        return {
+            "attempted": True,
+            "ok": True,
+            "mode": "soft_delete",
+            "reason": reason,
+            "target_tenant_id": target_tenant_id,
+            "platform": normalized_platform,
+            "result": result,
+        }
+
+    async def safe_soft_delete_tenant_integration(
+        self,
+        tenant_legacy_id: str,
+        platform: str,
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return await self.soft_delete_tenant_integration(tenant_legacy_id, platform, reason=reason)
+        except Exception as exc:
+            logger.warning(
+                "tenant_integrations soft delete failed for tenant %s platform %s (%s): %s",
+                tenant_legacy_id,
+                platform,
+                reason or "unknown",
+                exc,
+            )
+            return {"attempted": True, "ok": False, "reason": reason or "unknown", "error": str(exc)}
+
+    def _client_binding_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, client_legacy_id: str) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or doc.get("platform") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["enabled"] = bool(doc.get("enabled", True))
+        doc["external_ids"] = dict(doc.get("external_ids") or {})
+        doc["config"] = dict(doc.get("config") or {})
+        for key in ("legacy_source_id", "legacy_source_kind", "id", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def list_client_bindings(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("client_bindings"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return []
+        rows = await self._safe_select(
+            "client_integration_bindings",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            order="platform.asc",
+            limit=limit,
+        )
+        return [self._client_binding_row_to_doc(row, tenant_legacy_id, client_legacy_id) for row in (rows or [])]
+
+    def _user_oauth_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, user_legacy_id: str) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("id") or f"{doc.get('provider') or 'oauth'}:{doc.get('platform') or ''}")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["user_id"] = user_legacy_id
+        doc["scopes"] = list(doc.get("scopes") or [])
+        for key in ("id", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def get_user_oauth_account(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        provider: str,
+        platform: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("oauth_accounts"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        normalized_provider = str(provider or "").strip().lower()
+        normalized_platform = str(platform or "").strip().lower()
+        if not target_tenant_id or not target_user_id or not normalized_provider or not normalized_platform:
+            return None
+        rows = await self._safe_select(
+            "user_oauth_accounts",
+            select="id,tenant_id,user_id,provider,platform,account_email,external_account_id,scopes,last_synced_at,oauth_connection_ref,created_at,updated_at",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "provider": f"eq.{normalized_provider}",
+                "platform": f"eq.{normalized_platform}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._user_oauth_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
+
+    async def list_user_oauth_accounts(
+        self,
+        tenant_legacy_id: str,
+        *,
+        provider: Optional[str] = None,
+        platform: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("oauth_accounts"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "is_deleted": "eq.false",
+        }
+        normalized_provider = str(provider or "").strip().lower()
+        normalized_platform = str(platform or "").strip().lower()
+        if normalized_provider:
+            filters["provider"] = f"eq.{normalized_provider}"
+        if normalized_platform:
+            filters["platform"] = f"eq.{normalized_platform}"
+        rows = await self._safe_select(
+            "user_oauth_accounts",
+            select="id,tenant_id,user_id,provider,platform,account_email,external_account_id,scopes,last_synced_at,oauth_connection_ref,created_at,updated_at",
+            filters=filters,
+            order="updated_at.desc,created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        user_ids = [
+            str((row or {}).get("user_id") or "").strip()
+            for row in rows
+            if str((row or {}).get("user_id") or "").strip()
+        ]
+        legacy_user_by_id = await self._load_user_legacy_map(user_ids)
+        return [
+            self._user_oauth_row_to_doc(
+                row,
+                tenant_legacy_id,
+                legacy_user_by_id.get(str((row or {}).get("user_id") or "").strip())
+                or str((row or {}).get("user_id") or "").strip(),
+            )
+            for row in rows
+        ]
+
+    async def mirror_user_oauth_account(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        doc: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        if not self.is_mirror_enabled_for("oauth_accounts"):
+            return {"attempted": False, "ok": False, "reason": "disabled"}
+
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        provider = str((doc or {}).get("provider") or "").strip().lower()
+        platform = str((doc or {}).get("platform") or "").strip().lower()
+        if not target_tenant_id or not target_user_id or not provider or not platform:
+            return {"attempted": False, "ok": False, "reason": "tenant_user_or_platform_not_mapped"}
+
+        payload = {
+            "tenant_id": target_tenant_id,
+            "user_id": target_user_id,
+            "provider": provider,
+            "platform": platform,
+            "account_email": (doc or {}).get("account_email"),
+            "external_account_id": (doc or {}).get("external_account_id"),
+            "scopes": list((doc or {}).get("scopes") or []),
+            "last_synced_at": (doc or {}).get("last_synced_at"),
+            "oauth_connection_ref": (doc or {}).get("oauth_connection_ref"),
+            "is_deleted": False,
+        }
+
+        existing_rows = await self._safe_select(
+            "user_oauth_accounts",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "provider": f"eq.{provider}",
+                "platform": f"eq.{platform}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows is None:
+            raise RuntimeError("user_oauth_accounts mirror preflight failed")
+
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            if not row_id:
+                raise RuntimeError("user_oauth_accounts mirror target row missing id")
+            result = await self._request(
+                "PATCH",
+                "user_oauth_accounts",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+            return {
+                "attempted": True,
+                "ok": True,
+                "mode": "update",
+                "reason": reason,
+                "target_tenant_id": target_tenant_id,
+                "target_user_id": target_user_id,
+                "platform": platform,
+                "result": result,
+            }
+
+        result = await self._request(
+            "POST",
+            "user_oauth_accounts",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        return {
+            "attempted": True,
+            "ok": True,
+            "mode": "insert",
+            "reason": reason,
+            "target_tenant_id": target_tenant_id,
+            "target_user_id": target_user_id,
+            "platform": platform,
+            "result": result,
+        }
+
+    async def safe_mirror_user_oauth_account(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        doc: dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return await self.mirror_user_oauth_account(tenant_legacy_id, user_legacy_id, doc, reason=reason)
+        except Exception as exc:
+            logger.warning(
+                "user_oauth_accounts mirror failed for tenant %s user %s platform %s (%s): %s",
+                tenant_legacy_id,
+                user_legacy_id,
+                str((doc or {}).get("platform") or "").strip(),
+                reason or "unknown",
+                exc,
+            )
+            return {"attempted": True, "ok": False, "reason": reason or "unknown", "error": str(exc)}
+
+    async def soft_delete_user_oauth_account(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        provider: str,
+        platform: str,
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        if not self.is_mirror_enabled_for("oauth_accounts"):
+            return {"attempted": False, "ok": False, "reason": "disabled"}
+
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        normalized_provider = str(provider or "").strip().lower()
+        normalized_platform = str(platform or "").strip().lower()
+        if not target_tenant_id or not target_user_id or not normalized_provider or not normalized_platform:
+            return {"attempted": False, "ok": False, "reason": "tenant_user_or_platform_not_mapped"}
+
+        result = await self._request(
+            "PATCH",
+            "user_oauth_accounts",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "provider": f"eq.{normalized_provider}",
+                "platform": f"eq.{normalized_platform}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        return {
+            "attempted": True,
+            "ok": True,
+            "mode": "soft_delete",
+            "reason": reason,
+            "target_tenant_id": target_tenant_id,
+            "target_user_id": target_user_id,
+            "platform": normalized_platform,
+            "result": result,
+        }
+
+    async def safe_soft_delete_user_oauth_account(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        provider: str,
+        platform: str,
+        *,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        try:
+            return await self.soft_delete_user_oauth_account(
+                tenant_legacy_id,
+                user_legacy_id,
+                provider,
+                platform,
+                reason=reason,
+            )
+        except Exception as exc:
+            logger.warning(
+                "user_oauth_accounts soft delete failed for tenant %s user %s platform %s (%s): %s",
+                tenant_legacy_id,
+                user_legacy_id,
+                platform,
+                reason or "unknown",
+                exc,
+            )
+            return {"attempted": True, "ok": False, "reason": reason or "unknown", "error": str(exc)}
+
+    async def smoke_check(self, tenant_legacy_id: Optional[str] = None) -> dict[str, Any]:
+        settings = self.settings
+        summary: dict[str, Any] = {
+            "enabled": bool(settings.get("enabled")),
+            "service_configured": bool(settings.get("service_configured")),
+            "url": str(settings.get("url") or ""),
+            "db_schema": str(settings.get("db_schema") or "public"),
+            "domains": list(settings.get("domains") or ()),
+            "supported_domains": list(settings.get("supported_domains") or ()),
+            "tenant_source_id": tenant_legacy_id,
+            "target_tenant_id": None,
+            "checks": [],
+        }
+        if not self.service_configured:
+            return summary
+
+        target_tenant_id = await self.resolve_target_tenant_id(str(tenant_legacy_id or ""))
+        summary["target_tenant_id"] = target_tenant_id
+        if tenant_legacy_id and not target_tenant_id:
+            summary["checks"].append(
+                {"domain": "tenants", "ok": False, "mode": "bridge", "reason": "tenant_not_mapped"}
+            )
+            return summary
+
+        bridge_tenant = await self.get_tenant(str(tenant_legacy_id or "")) if tenant_legacy_id else None
+        if bridge_tenant is not None:
+            summary["checks"].append(
+                {
+                    "domain": "tenants",
+                    "ok": True,
+                    "mode": "bridge",
+                    "slug": bridge_tenant.get("slug"),
+                    "status": bridge_tenant.get("status"),
+                }
+            )
+
+        bridged_client_id: Optional[str] = None
+
+        if tenant_legacy_id and self.is_enabled_for("settings"):
+            settings_doc = await self.get_tenant_settings(tenant_legacy_id)
+            summary["checks"].append(
+                {
+                    "domain": "settings",
+                    "ok": settings_doc is not None,
+                    "mode": "bridge",
+                    "present": settings_doc is not None,
+                }
+            )
+
+        if tenant_legacy_id and self.is_enabled_for("domains"):
+            tenant_domains = await self.list_tenant_domains(tenant_legacy_id, limit=5)
+            summary["checks"].append(
+                {
+                    "domain": "domains",
+                    "ok": True,
+                    "mode": "bridge",
+                    "count": len(tenant_domains),
+                }
+            )
+
+        if tenant_legacy_id and self.is_enabled_for("clients"):
+            clients = await self.list_clients(tenant_legacy_id, limit=1)
+            bridged_client_id = str((clients[0] or {}).get("_id") or "").strip() if clients else None
+            summary["checks"].append(
+                {
+                    "domain": "clients",
+                    "ok": True,
+                    "mode": "bridge",
+                    "count": len(clients),
+                    "sample_client_id": bridged_client_id,
+                }
+            )
+
+        if tenant_legacy_id and self.is_enabled_for("meetings"):
+            meetings = await self.list_meetings(tenant_legacy_id, limit=1)
+            summary["checks"].append(
+                {
+                    "domain": "meetings",
+                    "ok": True,
+                    "mode": "bridge",
+                    "count": len(meetings),
+                }
+            )
+
+        if tenant_legacy_id and self.is_enabled_for("integrations"):
+            integrations = await self.list_tenant_integrations(tenant_legacy_id, limit=3)
+            summary["checks"].append(
+                {
+                    "domain": "integrations",
+                    "ok": True,
+                    "mode": "bridge",
+                    "count": len(integrations),
+                }
+            )
+
+        if tenant_legacy_id and self.is_enabled_for("oauth_accounts"):
+            summary["checks"].append(
+                {
+                    "domain": "oauth_accounts",
+                    "ok": True,
+                    "mode": "bridge",
+                    "reason": "configured_no_default_user_probe",
+                }
+            )
+
+        if tenant_legacy_id and self.is_enabled_for("client_bindings"):
+            if bridged_client_id:
+                bindings = await self.list_client_bindings(tenant_legacy_id, bridged_client_id, limit=10)
+                summary["checks"].append(
+                    {
+                        "domain": "client_bindings",
+                        "ok": True,
+                        "mode": "bridge",
+                        "count": len(bindings),
+                        "sample_client_id": bridged_client_id,
+                    }
+                )
+            else:
+                summary["checks"].append(
+                    {
+                        "domain": "client_bindings",
+                        "ok": True,
+                        "mode": "bridge",
+                        "count": 0,
+                        "reason": "skipped_no_client",
+                    }
+                )
+
+        return summary
+
 
 @lru_cache(maxsize=1)
 def get_runtime_bridge() -> RuntimeBridge:
@@ -519,5 +1360,5 @@ def get_runtime_bridge() -> RuntimeBridge:
 
 
 def reset_runtime_bridge_cache() -> None:
-    get_runtime_bridge_settings.cache_clear()
+    reset_supabase_settings_cache()
     get_runtime_bridge.cache_clear()

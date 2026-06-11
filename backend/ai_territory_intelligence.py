@@ -8,7 +8,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import ai_visibility
 import connectors
 from db import db, new_id, utcnow
+from oauth_runtime import has_google_oauth_connection, is_no_mongo_oauth_token_read_enabled
 from models import ActionItem
+from runtime_bridge import get_runtime_bridge
 
 
 def _norm(s: str) -> str:
@@ -186,6 +188,19 @@ def _confidence_from_sources(availability: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _pick_google_business_profile_user_id(tenant_id: str, preferred_user_id: str) -> Optional[str]:
+    if preferred_user_id:
+        if await has_google_oauth_connection(tenant_id, str(preferred_user_id), "google_business_profile"):
+            return str(preferred_user_id)
+    if is_no_mongo_oauth_token_read_enabled():
+        bridge_docs = await get_runtime_bridge().list_user_oauth_accounts(
+            tenant_id,
+            provider="google",
+            platform="google_business_profile",
+            limit=1,
+        )
+        if bridge_docs:
+            return str((bridge_docs[0] or {}).get("user_id") or "").strip() or None
+        return None
     if preferred_user_id:
         tok = await db.user_oauth_tokens.find_one({"tenant_id": tenant_id, "user_id": str(preferred_user_id), "platform": "google_business_profile"})
         if tok:

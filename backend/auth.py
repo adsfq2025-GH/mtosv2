@@ -87,6 +87,24 @@ def decode_token(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
 
 
+def _runtime_profile_to_user(profile: Optional[dict]) -> Optional[User]:
+    if not profile:
+        return None
+    system_role = str(profile.get("role") or "").strip().lower()
+    app_role = "admin" if system_role == "platform_admin" else "manager"
+    auth_provider = str(profile.get("auth_provider") or "local").strip().lower() or "local"
+    return User(
+        _id=str(profile.get("id") or profile.get("_id") or ""),
+        email=str(profile.get("email") or "").strip().lower(),
+        name=str(profile.get("name") or "").strip() or str(profile.get("email") or "").split("@", 1)[0] or "User",
+        role=app_role,
+        password_hash="",
+        avatar_url=profile.get("avatar_url"),
+        active=True,
+        auth_provider="google" if auth_provider == "google" else "local",
+    )
+
+
 async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> User:
     if not creds or not creds.credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -97,7 +115,10 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     doc = await db.users.find_one({"_id": user_id})
     if not doc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        bridged_user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
+        if not bridged_user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        return bridged_user
     return User.from_mongo(doc)
 
 
@@ -166,9 +187,9 @@ async def get_current_context(request: Request, creds: Optional[HTTPAuthorizatio
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     doc = await db.users.find_one({"_id": user_id})
-    if not doc:
+    user = User.from_mongo(doc) if doc else _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
+    if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-    user = User.from_mongo(doc)
     tenant_id = payload.get("tenant_id")
     tenant_role = payload.get("trole")
     host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Optional
 
@@ -224,6 +225,26 @@ def run_all_command(
             indent=2,
         )
     )
+
+
+@app.command("oauth-token-backfill")
+def oauth_token_backfill_command(
+    tenant_id: Optional[str] = typer.Option(None, help="Optional legacy tenant id filter."),
+    user_id: Optional[str] = typer.Option(None, help="Optional legacy user id filter."),
+    platform: Optional[str] = typer.Option(None, help="Optional platform filter."),
+    limit: Optional[int] = typer.Option(None, help="Optional Mongo row limit."),
+):
+    from oauth_runtime import backfill_google_oauth_tokens_from_mongo
+
+    result = asyncio.run(
+        backfill_google_oauth_tokens_from_mongo(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            platform=platform,
+            limit=limit,
+        )
+    )
+    typer.echo(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

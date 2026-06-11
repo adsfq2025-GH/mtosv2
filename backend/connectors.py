@@ -11,6 +11,12 @@ import httpx
 from fastapi import HTTPException
 
 from db import db, decrypt_secret
+from oauth_runtime import (
+    decode_inline_oauth_connection_ref,
+    get_google_oauth_bridge_account,
+    is_no_mongo_oauth_token_read_enabled,
+)
+from runtime_bridge import get_runtime_bridge
 
 
 def _demo_kpi_enabled() -> bool:
@@ -22,7 +28,19 @@ def _tenant_scope(tenant_id: str) -> dict:
 
 
 async def _get_integration_doc(tenant_id: str, platform: str) -> Optional[dict]:
-    return await db.integrations.find_one({"$and": [{"platform": platform}, _tenant_scope(tenant_id)]})
+    mongo_doc = await db.integrations.find_one({"$and": [{"platform": platform}, _tenant_scope(tenant_id)]})
+    bridge_doc = await get_runtime_bridge().get_tenant_integration(tenant_id, platform)
+    if mongo_doc and bridge_doc:
+        return {
+            **dict(mongo_doc or {}),
+            **dict(bridge_doc or {}),
+            "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or {}),
+            "metadata": {
+                **dict((mongo_doc or {}).get("metadata") or {}),
+                **dict((bridge_doc or {}).get("metadata") or {}),
+            },
+        }
+    return bridge_doc or mongo_doc
 
 
 async def get_credentials(tenant_id: str, platform: str) -> Dict[str, str]:
@@ -55,6 +73,14 @@ def _clean_oauth_str(v: Any) -> str:
 
 
 async def get_google_refresh_token(tenant_id: str, user_id: str, platform: str) -> str:
+    bridge_doc = await get_google_oauth_bridge_account(tenant_id, user_id, platform)
+    bridge_token = decode_inline_oauth_connection_ref((bridge_doc or {}).get("oauth_connection_ref"))
+    if bridge_token:
+        return bridge_token
+    if bridge_doc is not None:
+        return ""
+    if is_no_mongo_oauth_token_read_enabled():
+        return ""
     doc = await db.user_oauth_tokens.find_one(
         {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform}
     )

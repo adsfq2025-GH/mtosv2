@@ -17,6 +17,7 @@ import urllib.request
 
 from dotenv import load_dotenv
 import httpx
+import jwt
 from fastapi import APIRouter, Body, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 from starlette.middleware.cors import CORSMiddleware
@@ -89,7 +90,7 @@ async def _google_oauth_config(tenant_id: str) -> Dict[str, str]:
         "redirect_uri": _clean_oauth_str(GOOGLE_OAUTH_REDIRECT_URI),
     }
     try:
-        doc = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "google_oauth"})
+        doc = await _get_integration_runtime_doc(tenant_id, "google_oauth")
         if doc:
             meta = doc.get("metadata") or {}
             enc = doc.get("credentials_encrypted") or {}
@@ -191,7 +192,15 @@ from models import (  # noqa: E402
 )
 from integrations_meta import INTEGRATIONS, list_integrations
 from docs_content import DOCS, get_categories, get_doc, get_docs_summary
+from oauth_runtime import (
+    build_google_oauth_state,
+    clear_google_oauth_token,
+    decode_google_oauth_state,
+    is_no_mongo_oauth_token_read_enabled,
+    write_google_oauth_token,
+)
 from runtime_bridge import get_runtime_bridge, merge_prefer_bridge
+from supabase_config import get_runtime_bridge_env_summary
 import ai
 import ai_visibility
 import ai_territory_intelligence
@@ -234,6 +243,168 @@ def _day_bounds(start_date: str, end_date: str) -> tuple[str, str]:
     s = _parse_iso_date(start_date) or _default_last_30_days()[0]
     e = _parse_iso_date(end_date) or _default_last_30_days()[1]
     return f"{s}T00:00:00", f"{e}T23:59:59.999999"
+
+
+def _default_tenant_settings(tenant_id: str) -> TenantSettings:
+    return TenantSettings(
+        tenant_id=tenant_id,
+        branding={"product_name": "Monthly Touch OS"},
+        terminology={"monthly_touch": "Monthly Touch", "client_singular": "Client", "client_plural": "Clients"},
+        workflows={"meeting_types": [{"key": "monthly_touch", "label": "Monthly Touch", "wins_count": 3, "issues_count": 2}]},
+        analysis={"ai_default_model": ai.DEFAULT_MODEL, "ai_territory_scan_frequency_hours": 24, "ai_territory_max_prompts": 60},
+    )
+
+
+def _tenant_settings_default_doc(tenant_id: str) -> dict[str, Any]:
+    return _default_tenant_settings(tenant_id).to_mongo()
+
+
+def _normalize_tenant_settings_doc(tenant_id: str, doc: Optional[dict[str, Any]]) -> dict[str, Any]:
+    base = _tenant_settings_default_doc(tenant_id)
+    source = dict(doc or {})
+    normalized = {**base, **source}
+    normalized["tenant_id"] = tenant_id
+    normalized["branding"] = dict(source.get("branding") or base.get("branding") or {})
+    normalized["terminology"] = dict(source.get("terminology") or base.get("terminology") or {})
+    normalized["workflows"] = dict(source.get("workflows") or base.get("workflows") or {})
+    normalized["analysis"] = dict(source.get("analysis") or base.get("analysis") or {})
+    normalized["created_at"] = source.get("created_at") or base.get("created_at")
+    normalized["updated_at"] = source.get("updated_at") or base.get("updated_at")
+    normalized.pop("id", None)
+    return normalized
+
+
+async def _get_tenant_settings_doc(tenant_id: str, *, ensure_exists: bool = False) -> dict[str, Any]:
+    doc = await db.tenant_settings.find_one({"tenant_id": tenant_id})
+    if doc:
+        return _normalize_tenant_settings_doc(tenant_id, doc)
+
+    bridge_doc = await get_runtime_bridge().get_tenant_settings(tenant_id)
+    if bridge_doc:
+        normalized_bridge = _normalize_tenant_settings_doc(tenant_id, bridge_doc)
+        if ensure_exists:
+            await db.tenant_settings.update_one(
+                {"tenant_id": tenant_id},
+                {"$set": normalized_bridge},
+                upsert=True,
+            )
+            stored = await db.tenant_settings.find_one({"tenant_id": tenant_id})
+            return _normalize_tenant_settings_doc(tenant_id, stored or normalized_bridge)
+        return normalized_bridge
+
+    default_doc = _tenant_settings_default_doc(tenant_id)
+    if ensure_exists:
+        await db.tenant_settings.update_one(
+            {"tenant_id": tenant_id},
+            {"$setOnInsert": default_doc},
+            upsert=True,
+        )
+        return _normalize_tenant_settings_doc(
+            tenant_id,
+            await db.tenant_settings.find_one({"tenant_id": tenant_id}),
+        )
+    return _normalize_tenant_settings_doc(tenant_id, default_doc)
+
+
+async def _mirror_tenant_settings_doc(tenant_id: str, doc: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    normalized = _normalize_tenant_settings_doc(tenant_id, doc)
+    bridge = get_runtime_bridge()
+    mirror_status = {"attempted": False, "ok": False, "reason": "disabled"}
+    if bridge.is_mirror_enabled_for("settings"):
+        mirror_status = await bridge.safe_mirror_tenant_settings(tenant_id, normalized, reason=reason)
+    return {"doc": normalized, "mirror": mirror_status}
+
+
+async def _write_tenant_settings_patch(
+    tenant_id: str,
+    patch: dict[str, Any],
+    *,
+    reason: str,
+    upsert: bool = True,
+) -> dict[str, Any]:
+    baseline = await _get_tenant_settings_doc(tenant_id)
+    next_doc = _normalize_tenant_settings_doc(tenant_id, {**baseline, **dict(patch or {})})
+    await db.tenant_settings.update_one({"tenant_id": tenant_id}, {"$set": next_doc}, upsert=upsert)
+    stored = await db.tenant_settings.find_one({"tenant_id": tenant_id})
+    final_doc = _normalize_tenant_settings_doc(tenant_id, stored or next_doc)
+    mirror_status = {"attempted": False, "ok": False, "reason": "disabled"}
+    bridge = get_runtime_bridge()
+    if bridge.is_mirror_enabled_for("settings"):
+        mirror_status = await bridge.safe_mirror_tenant_settings(tenant_id, final_doc, reason=reason)
+    return {"doc": final_doc, "mirror": mirror_status}
+
+
+def _merge_runtime_integration_docs(mongo_doc: Optional[dict[str, Any]], bridge_doc: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not mongo_doc and not bridge_doc:
+        return None
+    if mongo_doc and bridge_doc:
+        return {
+            **dict(mongo_doc or {}),
+            **dict(bridge_doc or {}),
+            "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or {}),
+            "metadata": {
+                **dict((mongo_doc or {}).get("metadata") or {}),
+                **dict((bridge_doc or {}).get("metadata") or {}),
+            },
+        }
+    return dict(bridge_doc or mongo_doc or {})
+
+
+async def _get_integration_runtime_doc(tenant_id: str, platform: str) -> Optional[dict[str, Any]]:
+    mongo_doc = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(tenant_id)]})
+    bridge_doc = await get_runtime_bridge().get_tenant_integration(tenant_id, platform)
+    return _merge_runtime_integration_docs(mongo_doc, bridge_doc)
+
+
+async def _mirror_tenant_integration_doc(tenant_id: str, doc: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    bridge = get_runtime_bridge()
+    if not bridge.is_mirror_enabled_for("integrations"):
+        return {"attempted": False, "ok": False, "reason": "disabled"}
+    return await bridge.safe_mirror_tenant_integration(tenant_id, doc, reason=reason)
+
+
+async def _soft_delete_tenant_integration_doc(tenant_id: str, platform: str, *, reason: str) -> dict[str, Any]:
+    bridge = get_runtime_bridge()
+    if not bridge.is_mirror_enabled_for("integrations"):
+        return {"attempted": False, "ok": False, "reason": "disabled"}
+    return await bridge.safe_soft_delete_tenant_integration(tenant_id, platform, reason=reason)
+
+
+async def _get_user_oauth_runtime_doc(tenant_id: str, user_id: str, provider: str, platform: str) -> Optional[dict[str, Any]]:
+    bridge_doc = await get_runtime_bridge().get_user_oauth_account(tenant_id, user_id, provider, platform)
+    if is_no_mongo_oauth_token_read_enabled():
+        return bridge_doc
+    mongo_doc = await db.user_oauth_tokens.find_one(
+        {"tenant_id": tenant_id, "user_id": user_id, "provider": provider, "platform": platform}
+    )
+    return _merge_runtime_integration_docs(mongo_doc, bridge_doc)
+
+
+async def _mirror_user_oauth_account_doc(
+    tenant_id: str,
+    user_id: str,
+    doc: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    bridge = get_runtime_bridge()
+    if not bridge.is_mirror_enabled_for("oauth_accounts"):
+        return {"attempted": False, "ok": False, "reason": "disabled"}
+    return await bridge.safe_mirror_user_oauth_account(tenant_id, user_id, doc, reason=reason)
+
+
+async def _soft_delete_user_oauth_account_doc(
+    tenant_id: str,
+    user_id: str,
+    provider: str,
+    platform: str,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    bridge = get_runtime_bridge()
+    if not bridge.is_mirror_enabled_for("oauth_accounts"):
+        return {"attempted": False, "ok": False, "reason": "disabled"}
+    return await bridge.safe_soft_delete_user_oauth_account(tenant_id, user_id, provider, platform, reason=reason)
 
 
 async def _require_client_access(ctx, client_id: str) -> dict:
@@ -480,14 +651,11 @@ async def register(request: Request, data: RegisterIn, _: None = Depends(require
         else:
             membership = await ensure_membership(user)
         if not await db.tenant_settings.find_one({"tenant_id": membership.tenant_id}):
-            settings = TenantSettings(
-                tenant_id=membership.tenant_id,
-                branding={"product_name": "Monthly Touch OS"},
-                terminology={"monthly_touch": "Monthly Touch", "client_singular": "Client", "client_plural": "Clients"},
-                workflows={"meeting_types": [{"key": "monthly_touch", "label": "Monthly Touch", "wins_count": 3, "issues_count": 2}]},
-                analysis={"ai_default_model": ai.DEFAULT_MODEL},
+            await _write_tenant_settings_patch(
+                membership.tenant_id,
+                _tenant_settings_default_doc(membership.tenant_id),
+                reason="auth_register_bootstrap",
             )
-            await db.tenant_settings.insert_one(settings.to_mongo())
         token = create_token(user.id, user.role, membership.tenant_id, membership.role)
         return {"token": token, "user": to_public(user).model_dump(), "tenant_id": membership.tenant_id}
     except HTTPException:
@@ -658,7 +826,7 @@ async def oauth_google_start(platform: str = Query(...), ctx=Depends(get_current
         raise HTTPException(400, "Missing scopes for platform")
     # #region debug-point GO1:oauth-config-source
     try:
-        doc = await db.integrations.find_one({"tenant_id": ctx.tenant_id, "platform": "google_oauth"})
+        doc = await _get_integration_runtime_doc(ctx.tenant_id, "google_oauth")
         meta = (doc or {}).get("metadata") or {}
         enc = (doc or {}).get("credentials_encrypted") or {}
         _dbg_emit(
@@ -681,17 +849,11 @@ async def oauth_google_start(platform: str = Query(...), ctx=Depends(get_current
     except Exception:
         pass
     # #endregion
-    state = new_id()
-    await db.oauth_states.insert_one(
-        {
-            "_id": state,
-            "tenant_id": ctx.tenant_id,
-            "user_id": ctx.user.id,
-            "provider": "google",
-            "platform": platform,
-            "scopes": scopes,
-            "created_at": utcnow().isoformat(),
-        }
+    state = build_google_oauth_state(
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user.id,
+        platform=platform,
+        scopes=scopes,
     )
     params = {
         "client_id": cfg.get("client_id"),
@@ -709,35 +871,47 @@ async def oauth_google_start(platform: str = Query(...), ctx=Depends(get_current
 
 @api.get("/oauth/google/status")
 async def oauth_google_status(platform: str = Query(...), ctx=Depends(get_current_context)):
-    doc = await db.user_oauth_tokens.find_one(
-        {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": platform}
-    )
+    doc = await _get_user_oauth_runtime_doc(ctx.tenant_id, ctx.user.id, "google", platform)
     if not doc:
+        return {"ok": True, "connected": False}
+    refresh_token = await connectors.get_google_refresh_token(ctx.tenant_id, ctx.user.id, platform)
+    if not refresh_token:
         return {"ok": True, "connected": False}
     return {"ok": True, "connected": True, "platform": platform, "scopes": doc.get("scopes") or [], "updated_at": doc.get("updated_at")}
 
 
 @api.post("/oauth/google/disconnect")
 async def oauth_google_disconnect(platform: str = Query(...), ctx=Depends(get_current_context)):
-    await db.user_oauth_tokens.delete_one({"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": platform})
+    runtime_doc = await _get_user_oauth_runtime_doc(ctx.tenant_id, ctx.user.id, "google", platform)
+    disconnect_result = await clear_google_oauth_token(
+        ctx.tenant_id,
+        ctx.user.id,
+        platform,
+        account_email=(runtime_doc or {}).get("account_email"),
+        scopes=list((runtime_doc or {}).get("scopes") or []),
+        updated_at=utcnow().isoformat(),
+    )
+    if not disconnect_result.get("ok"):
+        raise HTTPException(503, "OAuth disconnect could not be completed safely. Token state remains unchanged.")
     return {"ok": True}
 
 
 @api.get("/oauth/google/callback")
 async def oauth_google_callback(code: str = Query(...), state: str = Query(...)):
-    st = await db.oauth_states.find_one({"_id": state, "provider": "google"})
-    if not st:
+    try:
+        st = decode_google_oauth_state(state)
+    except jwt.PyJWTError:
         raise HTTPException(400, "Invalid OAuth state")
-    tenant_id = st.get("tenant_id")
-    user_id = st.get("user_id")
-    platform = st.get("platform")
-    scopes = st.get("scopes") or []
+    tenant_id = str(st.get("tenant_id") or "").strip()
+    user_id = str(st.get("user_id") or "").strip()
+    platform = str(st.get("platform") or "").strip()
+    scopes = [str(scope).strip() for scope in (st.get("scopes") or []) if str(scope).strip()]
     cfg = await _google_oauth_config(str(tenant_id))
     if not cfg.get("client_id") or not cfg.get("client_secret") or not cfg.get("redirect_uri"):
         raise HTTPException(500, "Google OAuth is not configured. Set GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET/GOOGLE_OAUTH_REDIRECT_URI on the backend or configure Integrations → Google OAuth.")
     # #region debug-point GO2:oauth-callback-config
     try:
-        doc = await db.integrations.find_one({"tenant_id": str(tenant_id), "platform": "google_oauth"})
+        doc = await _get_integration_runtime_doc(str(tenant_id), "google_oauth")
         meta = (doc or {}).get("metadata") or {}
         enc = (doc or {}).get("credentials_encrypted") or {}
         _dbg_emit(
@@ -771,7 +945,6 @@ async def oauth_google_callback(code: str = Query(...), state: str = Query(...))
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post("https://oauth2.googleapis.com/token", data=payload)
     if resp.status_code != 200:
-        await db.oauth_states.delete_one({"_id": state})
         detail = resp.text[:300]
         try:
             j = resp.json() or {}
@@ -801,24 +974,21 @@ async def oauth_google_callback(code: str = Query(...), state: str = Query(...))
     data = resp.json() or {}
     refresh_token = data.get("refresh_token") or ""
     if not str(refresh_token).strip():
-        await db.oauth_states.delete_one({"_id": state})
         raise HTTPException(400, "Google did not return a refresh_token. Re-run Connect and ensure prompt=consent is forced.")
 
     now = utcnow().isoformat()
-    await db.user_oauth_tokens.update_one(
-        {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform},
-        {"$set": {
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "provider": "google",
-            "platform": platform,
-            "refresh_token_encrypted": encrypt_secret(str(refresh_token)),
-            "scopes": scopes,
-            "updated_at": now,
-        }, "$setOnInsert": {"created_at": now}},
-        upsert=True,
+    user_doc = await db.users.find_one({"_id": user_id})
+    write_result = await write_google_oauth_token(
+        str(tenant_id),
+        str(user_id),
+        str(platform or "").strip(),
+        str(refresh_token),
+        scopes,
+        account_email=(user_doc or {}).get("email"),
+        updated_at=now,
     )
-    await db.oauth_states.delete_one({"_id": state})
+    if not write_result.get("ok"):
+        raise HTTPException(503, "OAuth token storage is unavailable. Connection was not finalized safely.")
 
     html = f"""<!doctype html><html><head><meta charset="utf-8"></head>
 <body><script>
@@ -838,17 +1008,7 @@ window.close();
 
 @api.get("/settings")
 async def get_settings(ctx=Depends(get_current_context)):
-    doc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    if not doc:
-        settings = TenantSettings(
-            tenant_id=ctx.tenant_id,
-            branding={"product_name": "Monthly Touch OS"},
-            terminology={"monthly_touch": "Monthly Touch", "client_singular": "Client", "client_plural": "Clients"},
-            workflows={"meeting_types": [{"key": "monthly_touch", "label": "Monthly Touch", "wins_count": 3, "issues_count": 2}]},
-            analysis={"ai_default_model": ai.DEFAULT_MODEL, "ai_territory_scan_frequency_hours": 24, "ai_territory_max_prompts": 60},
-        )
-        await db.tenant_settings.insert_one(settings.to_mongo())
-        return settings.model_dump()
+    doc = await _get_tenant_settings_doc(ctx.tenant_id, ensure_exists=True)
     return TenantSettings.from_mongo(doc).model_dump()
 
 
@@ -863,8 +1023,8 @@ async def put_settings(data: TenantSettingsIn, ctx=Depends(get_current_context))
         "analysis": data.analysis or {},
         "updated_at": utcnow().isoformat(),
     }
-    await db.tenant_settings.update_one({"tenant_id": ctx.tenant_id}, {"$set": patch}, upsert=True)
-    doc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    result = await _write_tenant_settings_patch(ctx.tenant_id, patch, reason="settings_put")
+    doc = result["doc"]
     return TenantSettings.from_mongo(doc).model_dump()
 
 
@@ -915,8 +1075,8 @@ async def _ai_visibility_entitlement(ctx) -> dict:
     if await _is_internal_tenant_id(ctx.tenant_id):
         return {"enabled": True, "trial_expires_at": None, "reason": "internal_tenant"}
 
-    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
     analysis = settings.analysis or {}
     ent = (analysis.get("entitlements") or {}) if isinstance(analysis, dict) else {}
     enabled = bool(ent.get("ai_visibility"))
@@ -962,8 +1122,8 @@ async def super_grant_ai_visibility(
     if not tdoc:
         raise HTTPException(404, "Tenant not found")
 
-    sdoc = await db.tenant_settings.find_one({"tenant_id": tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=tenant_id)
+    sdoc = await _get_tenant_settings_doc(tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
     analysis = dict(settings.analysis or {})
     ent = dict((analysis.get("entitlements") or {}) if isinstance(analysis, dict) else {})
     ent["ai_visibility"] = bool(enabled)
@@ -974,7 +1134,7 @@ async def super_grant_ai_visibility(
         analysis.pop("ai_visibility_trial_expires_at", None)
 
     patch = {"analysis": analysis, "updated_at": utcnow().isoformat()}
-    await db.tenant_settings.update_one({"tenant_id": tenant_id}, {"$set": patch}, upsert=True)
+    await _write_tenant_settings_patch(tenant_id, patch, reason="ai_visibility_admin_set")
     return {"ok": True}
 
 
@@ -1237,8 +1397,8 @@ def _ai_territory_settings(settings: TenantSettings) -> Dict[str, Any]:
 async def get_ai_territory_settings(ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
     return {"ok": True, **_ai_territory_settings(settings)}
 
 
@@ -1250,15 +1410,15 @@ async def put_ai_territory_settings(
 ):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
     analysis = dict(settings.analysis or {}) if isinstance(settings.analysis, dict) else {}
     analysis["ai_territory_scan_frequency_hours"] = int(scan_frequency_hours)
     analysis["ai_territory_max_prompts"] = int(max_prompts)
-    await db.tenant_settings.update_one(
-        {"tenant_id": ctx.tenant_id},
-        {"$set": {"analysis": analysis, "updated_at": utcnow().isoformat()}},
-        upsert=True,
+    await _write_tenant_settings_patch(
+        ctx.tenant_id,
+        {"analysis": analysis, "updated_at": utcnow().isoformat()},
+        reason="ai_territory_settings_put",
     )
     return {"ok": True}
 
@@ -1293,8 +1453,8 @@ async def ai_territory_history(client_id: str, limit: int = 30, ctx=Depends(get_
 @api.post("/ai-territory/{client_id}/run")
 async def ai_territory_run_now(client_id: str, ctx=Depends(get_current_context)):
     c_doc = await _require_client_access(ctx, client_id)
-    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
     cfg = _ai_territory_settings(settings)
     res = await ai_territory_intelligence.run_ai_territory_scan_for_client(
         tenant_id=ctx.tenant_id,
@@ -1314,11 +1474,16 @@ async def ai_territory_run_now(client_id: str, ctx=Depends(get_current_context))
 async def list_white_label_domains(ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
+    bridge = get_runtime_bridge()
+    tdoc = await bridge.get_tenant(ctx.tenant_id)
+    if not tdoc:
+        tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
     slug = (tdoc or {}).get("slug") or ""
     base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
     default_subdomain = f"{slug}.{base_domain}" if slug and base_domain else ""
-    docs = await db.tenant_domains.find({"tenant_id": ctx.tenant_id}).to_list(200)
+    mongo_docs = await db.tenant_domains.find({"tenant_id": ctx.tenant_id}).to_list(200)
+    bridge_docs = await bridge.list_tenant_domains(ctx.tenant_id, limit=200)
+    docs = merge_prefer_bridge(mongo_docs, bridge_docs, key_field="domain", include_bridge_only=True)
     custom_domains = sorted({str(d.get("domain") or "").strip().lower() for d in (docs or []) if d.get("domain")})
     return {"ok": True, "default_subdomain": default_subdomain, "custom_domains": custom_domains}
 
@@ -1444,8 +1609,8 @@ async def analyze_white_label(ctx=Depends(get_current_context)):
     if not corpus.strip():
         raise HTTPException(400, "No extractable text found in uploads")
 
-    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
     model_key = ((settings.analysis or {}).get("ai_default_model") or ai.DEFAULT_MODEL)
 
     system = "You analyze agency SOPs and produce a strict JSON configuration for a white-label account management dashboard. Output JSON only."
@@ -1472,8 +1637,8 @@ async def analyze_white_label(ctx=Depends(get_current_context)):
         "analysis": {**(settings.analysis or {}), **(parsed.get("analysis") or {})},
         "updated_at": utcnow().isoformat(),
     }
-    await db.tenant_settings.update_one({"tenant_id": ctx.tenant_id}, {"$set": next_doc}, upsert=True)
-    doc2 = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
+    result = await _write_tenant_settings_patch(ctx.tenant_id, next_doc, reason="white_label_ai_generate")
+    doc2 = result["doc"]
     return {"ok": True, "settings": TenantSettings.from_mongo(doc2).model_dump()}
 
 
@@ -1634,8 +1799,25 @@ async def delete_client(client_id: str, ctx=Depends(get_current_context)):
 
 @api.get("/clients/{client_id}/bindings")
 async def list_client_bindings(client_id: str, ctx=Depends(get_current_context)):
-    docs = await db.client_bindings.find({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]}).to_list(100)
+    mongo_docs = await db.client_bindings.find({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]}).to_list(100)
+    bridge_docs = await get_runtime_bridge().list_client_bindings(ctx.tenant_id, client_id, limit=100)
+    docs = merge_prefer_bridge(mongo_docs, bridge_docs, key_field="platform", include_bridge_only=True)
     return [ClientIntegrationBinding.from_mongo(d).model_dump() for d in docs]
+
+
+@api.get("/admin/runtime-bridge/smoke")
+async def runtime_bridge_smoke(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    bridge = get_runtime_bridge()
+    return {
+        "ok": True,
+        "bridge_ready": bridge.service_configured,
+        "config": get_runtime_bridge_env_summary(),
+        "smoke": await bridge.smoke_check(ctx.tenant_id),
+        "mongo_fallback_preserved": True,
+        "auth_cutover": "disabled",
+    }
 
 
 @api.put("/clients/{client_id}/bindings/{platform}")
@@ -3937,17 +4119,17 @@ async def integrations_status(ctx=Depends(get_current_context)):
         plat = cat["platform"]
         stored = by_platform.get(plat)
         user_tok = None
+        has_refresh_token = False
         if plat in GOOGLE_OAUTH_PLATFORMS:
-            user_tok = await db.user_oauth_tokens.find_one(
-                {"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": plat}
-            )
+            user_tok = await _get_user_oauth_runtime_doc(ctx.tenant_id, ctx.user.id, "google", plat)
+            has_refresh_token = bool(await connectors.get_google_refresh_token(ctx.tenant_id, ctx.user.id, plat))
         stored_status = (stored or {}).get("status", "not_connected")
         if plat in GOOGLE_OAUTH_PLATFORMS:
             if plat == "google_ads":
                 has_dev = bool(((stored or {}).get("credentials_encrypted") or {}).get("developer_token"))
-                stored_status = "connected" if (has_dev and user_tok) else "not_connected"
+                stored_status = "connected" if (has_dev and has_refresh_token) else "not_connected"
             else:
-                stored_status = "connected" if user_tok else "not_connected"
+                stored_status = "connected" if has_refresh_token else "not_connected"
         out.append({
             **cat,
             "status": stored_status,
@@ -3961,26 +4143,48 @@ async def integrations_status(ctx=Depends(get_current_context)):
 
 @api.get("/diagnostics/integrations")
 async def diagnostics_integrations(ctx=Depends(get_current_context)):
-    docs = await db.integrations.find(tenant_scope(ctx.tenant_id)).to_list(200)
+    mongo_docs = await db.integrations.find(tenant_scope(ctx.tenant_id)).to_list(200)
+    bridge_docs = await get_runtime_bridge().list_tenant_integrations(ctx.tenant_id, limit=200)
     safe = []
-    for d in docs:
-        dd = {k: v for k, v in (d or {}).items() if k not in ("credentials_encrypted",)}
+    seen_platforms: set[str] = set()
+    bridge_by_platform = {
+        str(doc.get("platform") or "").strip(): dict(doc or {})
+        for doc in bridge_docs
+        if str(doc.get("platform") or "").strip()
+    }
+    for mongo_doc in mongo_docs:
+        merged = _merge_runtime_integration_docs(mongo_doc, bridge_by_platform.get(str((mongo_doc or {}).get("platform") or "").strip()))
+        dd = {k: v for k, v in (merged or {}).items() if k not in ("credentials_encrypted",)}
         if isinstance(dd.get("_id"), ObjectId):
             dd["_id"] = str(dd["_id"])
+        if dd.get("platform"):
+            seen_platforms.add(str(dd["platform"]))
         safe.append(dd)
-    user_google = await db.user_oauth_tokens.find({"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google"}).to_list(200)
+    for platform, bridge_doc in bridge_by_platform.items():
+        if platform in seen_platforms:
+            continue
+        safe.append({k: v for k, v in dict(bridge_doc or {}).items() if k not in ("credentials_encrypted",)})
+
     safe_user_google = []
-    for t in user_google:
-        tt = {k: v for k, v in (t or {}).items() if k not in ("refresh_token_encrypted", "access_token_encrypted")}
-        if isinstance(tt.get("_id"), ObjectId):
-            tt["_id"] = str(tt["_id"])
-        safe_user_google.append(tt)
+    for plat in sorted(GOOGLE_OAUTH_PLATFORMS):
+        runtime_doc = await _get_user_oauth_runtime_doc(ctx.tenant_id, ctx.user.id, "google", plat)
+        if runtime_doc:
+            safe_user_google.append(
+                {
+                    "provider": "google",
+                    "platform": plat,
+                    "scopes": runtime_doc.get("scopes") or [],
+                    "account_email": runtime_doc.get("account_email"),
+                    "updated_at": runtime_doc.get("updated_at"),
+                    "last_synced_at": runtime_doc.get("last_synced_at"),
+                }
+            )
     return {"ok": True, "tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "integrations": safe, "user_google_tokens": safe_user_google}
 
 
 @api.get("/diagnostics/google-oauth")
 async def diagnostics_google_oauth(ctx=Depends(get_current_context)):
-    doc = await db.integrations.find_one({"tenant_id": ctx.tenant_id, "platform": "google_oauth"})
+    doc = await _get_integration_runtime_doc(ctx.tenant_id, "google_oauth")
     meta = (doc or {}).get("metadata") or {}
     enc = (doc or {}).get("credentials_encrypted") or {}
     secret_decrypt_ok = False
@@ -4088,19 +4292,30 @@ async def configure_integration(platform: str, data: IntegrationConfigureIn, ctx
     else:
         creds = data.credentials or {}
     enc = {k: encrypt_secret(v) for k, v in creds.items() if v}
+    now = utcnow().isoformat()
     existing = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
     if existing:
         merged_creds = {**(existing.get("credentials_encrypted") or {}), **enc}
+        merged_metadata = {**(existing.get("metadata") or {}), **(data.metadata or {})}
+        status_value = "connected" if merged_creds else "not_connected"
         await db.integrations.update_one(
             {"_id": existing["_id"]},
             {"$set": {
                 "credentials_encrypted": merged_creds,
-                "metadata": {**(existing.get("metadata") or {}), **(data.metadata or {})},
+                "metadata": merged_metadata,
                 "tenant_id": ctx.tenant_id,
-                "status": "connected" if merged_creds else "not_connected",
-                "updated_at": utcnow().isoformat(),
+                "status": status_value,
+                "updated_at": now,
             }},
         )
+        mirror_doc = {
+            "platform": platform,
+            "label": existing.get("label") or INTEGRATIONS[platform]["label"],
+            "status": status_value,
+            "last_synced_at": existing.get("last_synced_at"),
+            "last_error": existing.get("last_error"),
+            "metadata": merged_metadata,
+        }
     else:
         i = Integration(
             tenant_id=ctx.tenant_id,
@@ -4111,7 +4326,16 @@ async def configure_integration(platform: str, data: IntegrationConfigureIn, ctx
             metadata=data.metadata or {},
         )
         await db.integrations.insert_one(i.to_mongo())
-    return {"ok": True, "platform": platform, "status": "connected" if enc else "not_connected"}
+        mirror_doc = {
+            "platform": platform,
+            "label": i.label,
+            "status": i.status,
+            "last_synced_at": i.last_synced_at,
+            "last_error": i.last_error,
+            "metadata": i.metadata,
+        }
+    await _mirror_tenant_integration_doc(ctx.tenant_id, mirror_doc, reason="configure_integration")
+    return {"ok": True, "platform": platform, "status": mirror_doc["status"]}
 
 
 @api.post("/integrations/{platform}/test")
@@ -4120,7 +4344,7 @@ async def test_integration(platform: str, ctx=Depends(get_current_context)):
         raise HTTPException(403, "Admin only")
     if platform not in INTEGRATIONS:
         raise HTTPException(404, "Unknown integration")
-    doc = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
+    doc = await _get_integration_runtime_doc(ctx.tenant_id, platform)
     if not doc or not doc.get("credentials_encrypted"):
         raise HTTPException(400, "No credentials configured")
     creds = {k: decrypt_secret(v) for k, v in (doc.get("credentials_encrypted", {}) or {}).items() if v}
@@ -4130,9 +4354,23 @@ async def test_integration(platform: str, ctx=Depends(get_current_context)):
         for k, v in creds.items():
             if str(v or "").strip() == "" and str(enc_map.get(k) or "").strip() != "":
                 bad_keys.append(k)
-        await db.integrations.update_one(
-            {"_id": doc["_id"]},
-            {"$set": {"status": "error", "last_error": "Credential decryption failed", "updated_at": utcnow().isoformat()}},
+        mongo_doc = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
+        if mongo_doc:
+            await db.integrations.update_one(
+                {"_id": mongo_doc["_id"]},
+                {"$set": {"status": "error", "last_error": "Credential decryption failed", "updated_at": utcnow().isoformat()}},
+            )
+        await _mirror_tenant_integration_doc(
+            ctx.tenant_id,
+            {
+                "platform": platform,
+                "label": (doc or {}).get("label") or INTEGRATIONS[platform]["label"],
+                "status": "error",
+                "last_synced_at": (doc or {}).get("last_synced_at"),
+                "last_error": "Credential decryption failed",
+                "metadata": dict((doc or {}).get("metadata") or {}),
+            },
+            reason="test_integration_decrypt_failed",
         )
         detail = "Credential decryption failed. Re-enter all encrypted fields and save again."
         if bad_keys:
@@ -4148,21 +4386,50 @@ async def test_integration(platform: str, ctx=Depends(get_current_context)):
     elif platform == "google_meet":
         res = await connectors.test_google_meet_for_user(ctx.tenant_id, ctx.user.id)
     elif platform == "google_calendar":
-        doc = await db.user_oauth_tokens.find_one({"tenant_id": ctx.tenant_id, "user_id": ctx.user.id, "provider": "google", "platform": "google_calendar"})
-        res = {"ok": True} if doc else {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Calendar first."}
+        google_doc = await _get_user_oauth_runtime_doc(ctx.tenant_id, ctx.user.id, "google", "google_calendar")
+        res = {"ok": True} if google_doc else {"ok": False, "error": "missing_google_connection", "error_detail": "Connect Google for Google Calendar first."}
     else:
         res = {"ok": True, "note": "Credentials stored & verified. Live API sync runs on next scheduled job."}
 
     if not res.get("ok"):
-        await db.integrations.update_one(
-            {"_id": doc["_id"]},
-            {"$set": {"status": "error", "last_error": res.get("error_detail") or res.get("error") or "Integration test failed", "updated_at": utcnow().isoformat()}},
+        mongo_doc = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
+        if mongo_doc:
+            await db.integrations.update_one(
+                {"_id": mongo_doc["_id"]},
+                {"$set": {"status": "error", "last_error": res.get("error_detail") or res.get("error") or "Integration test failed", "updated_at": utcnow().isoformat()}},
+            )
+        await _mirror_tenant_integration_doc(
+            ctx.tenant_id,
+            {
+                "platform": platform,
+                "label": (doc or {}).get("label") or INTEGRATIONS[platform]["label"],
+                "status": "error",
+                "last_synced_at": (doc or {}).get("last_synced_at"),
+                "last_error": res.get("error_detail") or res.get("error") or "Integration test failed",
+                "metadata": dict((doc or {}).get("metadata") or {}),
+            },
+            reason="test_integration_failed",
         )
         raise HTTPException(400, res.get("error_detail") or res.get("error") or "Integration test failed")
 
-    await db.integrations.update_one(
-        {"_id": doc["_id"]},
-        {"$set": {"status": "connected", "last_synced_at": utcnow().isoformat(), "last_error": None, "updated_at": utcnow().isoformat()}},
+    mongo_doc = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
+    if mongo_doc:
+        await db.integrations.update_one(
+            {"_id": mongo_doc["_id"]},
+            {"$set": {"status": "connected", "last_synced_at": utcnow().isoformat(), "last_error": None, "updated_at": utcnow().isoformat()}},
+        )
+    synced_at = utcnow().isoformat()
+    await _mirror_tenant_integration_doc(
+        ctx.tenant_id,
+        {
+            "platform": platform,
+            "label": (doc or {}).get("label") or INTEGRATIONS[platform]["label"],
+            "status": "connected",
+            "last_synced_at": synced_at,
+            "last_error": None,
+            "metadata": dict((doc or {}).get("metadata") or {}),
+        },
+        reason="test_integration_success",
     )
     return {"ok": True, "platform": platform, "status": "connected", **res}
 
@@ -4172,6 +4439,7 @@ async def disconnect_integration(platform: str, ctx=Depends(get_current_context)
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
     await db.integrations.delete_one({"$and": [{"platform": platform}, tenant_scope(ctx.tenant_id)]})
+    await _soft_delete_tenant_integration_doc(ctx.tenant_id, platform, reason="disconnect_integration")
     return {"ok": True}
 
 
@@ -4215,7 +4483,7 @@ async def clickup_lists(team_id: Optional[str] = Query(default=None), ctx=Depend
     if str(ctx.tenant_role or "") == "viewer":
         raise HTTPException(403, "Forbidden")
     if not team_id:
-        doc = await db.integrations.find_one({"$and": [{"platform": "clickup"}, tenant_scope(ctx.tenant_id)]})
+        doc = await _get_integration_runtime_doc(ctx.tenant_id, "clickup")
         team_id = ((doc or {}).get("metadata") or {}).get("team_id")
     if not team_id:
         res = await connectors.list_clickup_workspaces(ctx.tenant_id)
@@ -4236,7 +4504,7 @@ async def clickup_folders(team_id: Optional[str] = Query(default=None), ctx=Depe
     if str(ctx.tenant_role or "") == "viewer":
         raise HTTPException(403, "Forbidden")
     if not team_id:
-        doc = await db.integrations.find_one({"$and": [{"platform": "clickup"}, tenant_scope(ctx.tenant_id)]})
+        doc = await _get_integration_runtime_doc(ctx.tenant_id, "clickup")
         team_id = ((doc or {}).get("metadata") or {}).get("team_id")
     if not team_id:
         res = await connectors.list_clickup_workspaces(ctx.tenant_id)
@@ -4304,8 +4572,8 @@ async def docs_list(ctx=Depends(get_current_context)):
     internal_slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
     is_internal_tenant = bool(tslug and internal_slug and tslug == internal_slug)
     is_admin_view = ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")
-    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
 
     def apply_template(doc: dict) -> dict:
         brand_name = str((settings.branding or {}).get("product_name") or "")
@@ -4365,8 +4633,8 @@ async def docs_detail(slug: str, ctx=Depends(get_current_context)):
     if min_role == "admin" and not is_admin_view:
         raise HTTPException(404, "Doc not found")
 
-    sdoc = await db.tenant_settings.find_one({"tenant_id": ctx.tenant_id})
-    settings = TenantSettings.from_mongo(sdoc) if sdoc else TenantSettings(tenant_id=ctx.tenant_id)
+    sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
+    settings = TenantSettings.from_mongo(sdoc)
     brand_name = str((settings.branding or {}).get("product_name") or "")
     monthly_touch = str((settings.terminology or {}).get("monthly_touch") or "Monthly Touch")
     account_manager = str((settings.terminology or {}).get("account_manager") or "Account Manager")
