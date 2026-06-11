@@ -126,8 +126,9 @@ async def _google_login_client_id() -> str:
     return ""
 FRONTEND_BASE_URL = os.environ.get("FRONTEND_BASE_URL", "").strip()
 
-from db import db, decrypt_secret, encrypt_secret, new_id, utcnow  # noqa: E402
+from db import db, decrypt_secret, encrypt_secret, is_mongo_configured, new_id, utcnow  # noqa: E402
 from auth import (  # noqa: E402
+    authenticate_password_user,
     bootstrap_admin,
     create_token,
     ensure_membership,
@@ -135,8 +136,11 @@ from auth import (  # noqa: E402
     get_current_context,
     get_current_user,
     hash_password,
+    list_runtime_users,
+    register_identity,
     require_admin,
     resolve_tenant_id_from_host,
+    sync_google_identity,
     to_public,
     verify_password,
 )
@@ -200,7 +204,7 @@ from oauth_runtime import (
     write_google_oauth_token,
 )
 from runtime_bridge import get_runtime_bridge, merge_prefer_bridge
-from supabase_config import get_runtime_bridge_env_summary
+from supabase_config import get_runtime_bridge_env_summary, is_supabase_service_configured
 import ai
 import ai_visibility
 import ai_territory_intelligence
@@ -275,14 +279,16 @@ def _normalize_tenant_settings_doc(tenant_id: str, doc: Optional[dict[str, Any]]
 
 
 async def _get_tenant_settings_doc(tenant_id: str, *, ensure_exists: bool = False) -> dict[str, Any]:
-    doc = await db.tenant_settings.find_one({"tenant_id": tenant_id})
-    if doc:
-        return _normalize_tenant_settings_doc(tenant_id, doc)
+    if is_mongo_configured():
+        doc = await db.tenant_settings.find_one({"tenant_id": tenant_id})
+        if doc:
+            return _normalize_tenant_settings_doc(tenant_id, doc)
 
-    bridge_doc = await get_runtime_bridge().get_tenant_settings(tenant_id)
+    bridge = get_runtime_bridge()
+    bridge_doc = await bridge.get_tenant_settings(tenant_id)
     if bridge_doc:
         normalized_bridge = _normalize_tenant_settings_doc(tenant_id, bridge_doc)
-        if ensure_exists:
+        if ensure_exists and is_mongo_configured():
             await db.tenant_settings.update_one(
                 {"tenant_id": tenant_id},
                 {"$set": normalized_bridge},
@@ -294,15 +300,20 @@ async def _get_tenant_settings_doc(tenant_id: str, *, ensure_exists: bool = Fals
 
     default_doc = _tenant_settings_default_doc(tenant_id)
     if ensure_exists:
-        await db.tenant_settings.update_one(
-            {"tenant_id": tenant_id},
-            {"$setOnInsert": default_doc},
-            upsert=True,
-        )
-        return _normalize_tenant_settings_doc(
-            tenant_id,
-            await db.tenant_settings.find_one({"tenant_id": tenant_id}),
-        )
+        if is_mongo_configured():
+            await db.tenant_settings.update_one(
+                {"tenant_id": tenant_id},
+                {"$setOnInsert": default_doc},
+                upsert=True,
+            )
+            return _normalize_tenant_settings_doc(
+                tenant_id,
+                await db.tenant_settings.find_one({"tenant_id": tenant_id}),
+            )
+        if bridge.service_configured:
+            upserted = await bridge.upsert_tenant_settings(tenant_id, default_doc)
+            if upserted:
+                return _normalize_tenant_settings_doc(tenant_id, upserted)
     return _normalize_tenant_settings_doc(tenant_id, default_doc)
 
 
@@ -324,11 +335,20 @@ async def _write_tenant_settings_patch(
 ) -> dict[str, Any]:
     baseline = await _get_tenant_settings_doc(tenant_id)
     next_doc = _normalize_tenant_settings_doc(tenant_id, {**baseline, **dict(patch or {})})
-    await db.tenant_settings.update_one({"tenant_id": tenant_id}, {"$set": next_doc}, upsert=upsert)
-    stored = await db.tenant_settings.find_one({"tenant_id": tenant_id})
-    final_doc = _normalize_tenant_settings_doc(tenant_id, stored or next_doc)
-    mirror_status = {"attempted": False, "ok": False, "reason": "disabled"}
     bridge = get_runtime_bridge()
+    if is_mongo_configured():
+        await db.tenant_settings.update_one({"tenant_id": tenant_id}, {"$set": next_doc}, upsert=upsert)
+        stored = await db.tenant_settings.find_one({"tenant_id": tenant_id})
+        final_doc = _normalize_tenant_settings_doc(tenant_id, stored or next_doc)
+        mirror_status = {"attempted": False, "ok": False, "reason": "disabled"}
+        if bridge.is_mirror_enabled_for("settings"):
+            mirror_status = await bridge.safe_mirror_tenant_settings(tenant_id, final_doc, reason=reason)
+        return {"doc": final_doc, "mirror": mirror_status}
+    final_doc = _normalize_tenant_settings_doc(tenant_id, next_doc)
+    upserted = await bridge.upsert_tenant_settings(tenant_id, final_doc)
+    if upserted:
+        final_doc = _normalize_tenant_settings_doc(tenant_id, upserted)
+    mirror_status = {"attempted": bool(upserted), "ok": bool(upserted), "reason": reason, "mode": "supabase_primary"}
     if bridge.is_mirror_enabled_for("settings"):
         mirror_status = await bridge.safe_mirror_tenant_settings(tenant_id, final_doc, reason=reason)
     return {"doc": final_doc, "mirror": mirror_status}
@@ -579,6 +599,16 @@ async def _ensure_db_ready() -> bool:
     global DB_READY
     if DB_READY:
         return True
+    if is_supabase_service_configured():
+        bridge_rows = await get_runtime_bridge()._safe_select("tenants", select="id", limit=1)
+        if bridge_rows is not None:
+            DB_READY = True
+            return True
+        logger.error("Supabase runtime bridge check failed")
+        return False
+    if not is_mongo_configured():
+        logger.error("No configured database backend")
+        return False
     try:
         await db.command("ping")
         DB_READY = True
@@ -591,7 +621,7 @@ async def _ensure_db_ready() -> bool:
 async def require_db_ready():
     ok = await _ensure_db_ready()
     if not ok:
-        raise HTTPException(503, "Database unavailable. Check MONGO_URL/DB_NAME and Atlas IP allowlist.")
+        raise HTTPException(503, "Database unavailable. Check Supabase service settings or Mongo connection configuration.")
 
 # ===================== CORS MIDDLEWARE =====================
 # Allows your independent Vercel frontend to safely communicate with this Render backend.
@@ -632,25 +662,38 @@ async def root():
 async def register(request: Request, data: RegisterIn, _: None = Depends(require_db_ready)):
     # First user becomes admin if no users exist; otherwise role is forced to manager
     try:
-        user_count = await db.users.count_documents({})
-        role = "admin" if user_count == 0 else "manager"
-        if await db.users.find_one({"email": data.email}):
-            raise HTTPException(409, "Email already registered")
-        user = User(
-            email=data.email,
-            name=data.name,
-            role=role,
-            password_hash=hash_password(data.password),
-        )
-        await db.users.insert_one(user.to_mongo())
+        if is_supabase_service_configured():
+            role = "admin" if not await get_runtime_bridge().has_user_profiles() else "manager"
+            user = await register_identity(data.email, data.name, data.password, app_role=role)
+        else:
+            user_count = await db.users.count_documents({})
+            role = "admin" if user_count == 0 else "manager"
+            if await db.users.find_one({"email": data.email}):
+                raise HTTPException(409, "Email already registered")
+            user = User(
+                email=data.email,
+                name=data.name,
+                role=role,
+                password_hash=hash_password(data.password),
+            )
+            await db.users.insert_one(user.to_mongo())
         host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
         if host_tenant_id:
-            existing_count = await db.tenant_memberships.count_documents({"tenant_id": str(host_tenant_id), "status": "active"})
+            existing_count = (
+                await get_runtime_bridge().count_active_members_for_tenant(str(host_tenant_id))
+                if is_supabase_service_configured()
+                else await db.tenant_memberships.count_documents({"tenant_id": str(host_tenant_id), "status": "active"})
+            )
             role_if_create = "owner" if existing_count == 0 else "member"
             membership = await ensure_membership_for_tenant(user, str(host_tenant_id), role_if_create=role_if_create)
         else:
             membership = await ensure_membership(user)
-        if not await db.tenant_settings.find_one({"tenant_id": membership.tenant_id}):
+        settings_doc = (
+            await get_runtime_bridge().get_tenant_settings(membership.tenant_id)
+            if is_supabase_service_configured()
+            else await db.tenant_settings.find_one({"tenant_id": membership.tenant_id})
+        )
+        if not settings_doc:
             await _write_tenant_settings_patch(
                 membership.tenant_id,
                 _tenant_settings_default_doc(membership.tenant_id),
@@ -662,26 +705,35 @@ async def register(request: Request, data: RegisterIn, _: None = Depends(require
         raise
     except Exception as exc:
         logger.error("register failed: %s", exc)
-        raise HTTPException(503, "Database unavailable. Check Atlas Network Access / connection string.") from exc
+        raise HTTPException(503, "Registration failed. Check Supabase auth configuration or database connectivity.") from exc
 
 
 @api.post("/auth/login")
 async def login(request: Request, data: LoginIn, _: None = Depends(require_db_ready)):
     try:
-        doc = await db.users.find_one({"email": data.email})
-        if not doc:
-            raise HTTPException(401, "Invalid credentials")
-        user = User.from_mongo(doc)
-        if (user.auth_provider or "local") == "google":
-            raise HTTPException(400, "This account uses Google sign-in. Use “Continue with Google”.")
-        if not user.active or not verify_password(data.password, user.password_hash):
-            raise HTTPException(401, "Invalid credentials")
+        if is_supabase_service_configured():
+            user = await authenticate_password_user(data.email, data.password)
+            if not user:
+                raise HTTPException(401, "Invalid credentials")
+        else:
+            doc = await db.users.find_one({"email": data.email})
+            if not doc:
+                raise HTTPException(401, "Invalid credentials")
+            user = User.from_mongo(doc)
+            if (user.auth_provider or "local") == "google":
+                raise HTTPException(400, "This account uses Google sign-in. Use “Continue with Google”.")
+            if not user.active or not verify_password(data.password, user.password_hash):
+                raise HTTPException(401, "Invalid credentials")
         host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
         if host_tenant_id:
-            mdoc = await db.tenant_memberships.find_one({"tenant_id": str(host_tenant_id), "user_id": user.id, "status": "active"})
-            if not mdoc:
+            membership_doc = (
+                await get_runtime_bridge().get_user_membership(str(host_tenant_id), user.id)
+                if is_supabase_service_configured()
+                else await db.tenant_memberships.find_one({"tenant_id": str(host_tenant_id), "user_id": user.id, "status": "active"})
+            )
+            if not membership_doc:
                 raise HTTPException(403, "Not a member of this tenant")
-            membership = TenantMembership.from_mongo(mdoc)
+            membership = TenantMembership.from_mongo(membership_doc)
         else:
             membership = await ensure_membership(user)
         token = create_token(user.id, user.role, membership.tenant_id, membership.role)
@@ -690,7 +742,7 @@ async def login(request: Request, data: LoginIn, _: None = Depends(require_db_re
         raise
     except Exception as exc:
         logger.error("login failed: %s", exc)
-        raise HTTPException(503, "Database unavailable. Check Atlas Network Access / connection string.") from exc
+        raise HTTPException(503, "Login failed. Check Supabase auth configuration or database connectivity.") from exc
 
 
 @api.post("/auth/google")
@@ -734,41 +786,52 @@ async def google_login(request: Request, data: GoogleLoginIn, _: None = Depends(
     sub = str(info.get("sub") or "").strip() or None
     picture = str(info.get("picture") or "").strip() or None
 
-    doc = await db.users.find_one({"email": email})
-    if doc:
-        user = User.from_mongo(doc)
-        patch = {"updated_at": utcnow().isoformat()}
-        if (user.auth_provider or "local") != "google":
-            patch["auth_provider"] = "google"
-        if sub and not user.google_sub:
-            patch["google_sub"] = sub
-        if picture and not user.avatar_url:
-            patch["avatar_url"] = picture
-        if patch.keys() != {"updated_at"}:
-            await db.users.update_one({"_id": user.id}, {"$set": patch})
-            doc = await db.users.find_one({"_id": user.id})
-            user = User.from_mongo(doc)
+    if is_supabase_service_configured():
+        user = await sync_google_identity(email, name, picture=picture, google_sub=sub)
     else:
-        user_count = await db.users.count_documents({})
-        role = "admin" if user_count == 0 else "manager"
-        user = User(
-            email=email,
-            name=name,
-            role=role,
-            password_hash="",
-            avatar_url=picture,
-            auth_provider="google",
-            google_sub=sub,
-        )
-        await db.users.insert_one(user.to_mongo())
+        doc = await db.users.find_one({"email": email})
+        if doc:
+            user = User.from_mongo(doc)
+            patch = {"updated_at": utcnow().isoformat()}
+            if (user.auth_provider or "local") != "google":
+                patch["auth_provider"] = "google"
+            if sub and not user.google_sub:
+                patch["google_sub"] = sub
+            if picture and not user.avatar_url:
+                patch["avatar_url"] = picture
+            if patch.keys() != {"updated_at"}:
+                await db.users.update_one({"_id": user.id}, {"$set": patch})
+                doc = await db.users.find_one({"_id": user.id})
+                user = User.from_mongo(doc)
+        else:
+            user_count = await db.users.count_documents({})
+            role = "admin" if user_count == 0 else "manager"
+            user = User(
+                email=email,
+                name=name,
+                role=role,
+                password_hash="",
+                avatar_url=picture,
+                auth_provider="google",
+                google_sub=sub,
+            )
+            await db.users.insert_one(user.to_mongo())
 
     host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
     if host_tenant_id:
-        mdoc = await db.tenant_memberships.find_one({"tenant_id": str(host_tenant_id), "user_id": user.id, "status": "active"})
+        mdoc = (
+            await get_runtime_bridge().get_user_membership(str(host_tenant_id), user.id)
+            if is_supabase_service_configured()
+            else await db.tenant_memberships.find_one({"tenant_id": str(host_tenant_id), "user_id": user.id, "status": "active"})
+        )
         if mdoc:
             membership = TenantMembership.from_mongo(mdoc)
         else:
-            existing_count = await db.tenant_memberships.count_documents({"tenant_id": str(host_tenant_id), "status": "active"})
+            existing_count = (
+                await get_runtime_bridge().count_active_members_for_tenant(str(host_tenant_id))
+                if is_supabase_service_configured()
+                else await db.tenant_memberships.count_documents({"tenant_id": str(host_tenant_id), "status": "active"})
+            )
             role_if_create = "owner" if existing_count == 0 else "member"
             membership = await ensure_membership_for_tenant(user, str(host_tenant_id), role_if_create=role_if_create)
     else:
@@ -800,6 +863,8 @@ async def me(user: User = Depends(get_current_user)):
 
 @api.get("/users")
 async def list_users(_: User = Depends(require_admin)):
+    if is_supabase_service_configured():
+        return await list_runtime_users(limit=500)
     docs = await db.users.find({}, {"password_hash": 0}).to_list(500)
     return [
         {
@@ -1043,9 +1108,71 @@ def _default_prompt_text(key: str) -> str:
     return ""
 
 
+def _prompt_template_doc(tenant_id: str, key: str, text: str, *, updated_at: Optional[str] = None) -> dict[str, Any]:
+    return PromptTemplate(
+        tenant_id=tenant_id,
+        key=str(key),
+        text=str(text or ""),
+        updated_at=updated_at,
+    ).to_mongo()
+
+
+async def _get_prompt_template_doc(tenant_id: str, key: str) -> Optional[dict[str, Any]]:
+    normalized_key = str(key or "").strip()
+    settings_doc = await _get_tenant_settings_doc(tenant_id)
+    analysis = dict((settings_doc or {}).get("analysis") or {})
+    prompt_templates = dict(analysis.get("prompt_templates") or {})
+    if normalized_key in prompt_templates:
+        return _prompt_template_doc(
+            tenant_id,
+            normalized_key,
+            str(prompt_templates.get(normalized_key) or ""),
+            updated_at=str((settings_doc or {}).get("updated_at") or ""),
+        )
+    if is_mongo_configured():
+        doc = await db.prompt_templates.find_one({"tenant_id": tenant_id, "key": normalized_key})
+        if doc:
+            return doc
+    return None
+
+
+async def _write_prompt_template_doc(tenant_id: str, key: str, text: str) -> dict[str, Any]:
+    normalized_key = str(key or "").strip()
+    next_text = str(text or "")
+    settings_doc = await _get_tenant_settings_doc(tenant_id)
+    analysis = dict((settings_doc or {}).get("analysis") or {})
+    prompt_templates = dict(analysis.get("prompt_templates") or {})
+    prompt_templates[normalized_key] = next_text
+    analysis["prompt_templates"] = prompt_templates
+    result = await _write_tenant_settings_patch(
+        tenant_id,
+        {
+            "analysis": analysis,
+            "updated_at": utcnow().isoformat(),
+        },
+        reason=f"prompt_template:{normalized_key}",
+    )
+    final_doc = _prompt_template_doc(
+        tenant_id,
+        normalized_key,
+        next_text,
+        updated_at=str((result.get("doc") or {}).get("updated_at") or ""),
+    )
+    if is_mongo_configured():
+        await db.prompt_templates.update_one(
+            {"tenant_id": tenant_id, "key": normalized_key},
+            {"$set": {"tenant_id": tenant_id, "key": normalized_key, "text": next_text, "updated_at": final_doc.get("updated_at")}},
+            upsert=True,
+        )
+        mongo_doc = await db.prompt_templates.find_one({"tenant_id": tenant_id, "key": normalized_key})
+        if mongo_doc:
+            return mongo_doc
+    return final_doc
+
+
 @api.get("/prompts/{key}")
 async def get_prompt_template(key: str, ctx=Depends(get_current_context)):
-    doc = await db.prompt_templates.find_one({"tenant_id": ctx.tenant_id, "key": str(key)})
+    doc = await _get_prompt_template_doc(ctx.tenant_id, str(key))
     if not doc:
         return {"ok": True, "key": str(key), "text": _default_prompt_text(str(key))}
     return {"ok": True, **PromptTemplate.from_mongo(doc).model_dump()}
@@ -1055,10 +1182,7 @@ async def get_prompt_template(key: str, ctx=Depends(get_current_context)):
 async def put_prompt_template(key: str, data: PromptTemplateIn, ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    now = utcnow().isoformat()
-    patch = {"tenant_id": ctx.tenant_id, "key": str(key), "text": str(data.text or ""), "updated_at": now}
-    await db.prompt_templates.update_one({"tenant_id": ctx.tenant_id, "key": str(key)}, {"$set": patch}, upsert=True)
-    doc = await db.prompt_templates.find_one({"tenant_id": ctx.tenant_id, "key": str(key)})
+    doc = await _write_prompt_template_doc(ctx.tenant_id, str(key), str(data.text or ""))
     return {"ok": True, **PromptTemplate.from_mongo(doc).model_dump()}
 
 
@@ -1476,12 +1600,12 @@ async def list_white_label_domains(ctx=Depends(get_current_context)):
         raise HTTPException(403, "Admin only")
     bridge = get_runtime_bridge()
     tdoc = await bridge.get_tenant(ctx.tenant_id)
-    if not tdoc:
+    if not tdoc and is_mongo_configured():
         tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
     slug = (tdoc or {}).get("slug") or ""
     base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
     default_subdomain = f"{slug}.{base_domain}" if slug and base_domain else ""
-    mongo_docs = await db.tenant_domains.find({"tenant_id": ctx.tenant_id}).to_list(200)
+    mongo_docs = await db.tenant_domains.find({"tenant_id": ctx.tenant_id}).to_list(200) if is_mongo_configured() else []
     bridge_docs = await bridge.list_tenant_domains(ctx.tenant_id, limit=200)
     docs = merge_prefer_bridge(mongo_docs, bridge_docs, key_field="domain", include_bridge_only=True)
     custom_domains = sorted({str(d.get("domain") or "").strip().lower() for d in (docs or []) if d.get("domain")})
@@ -1497,14 +1621,24 @@ async def add_white_label_domain(domain: str = Query(...), ctx=Depends(get_curre
         raise HTTPException(400, "Invalid domain")
     if ":" in d or "/" in d:
         raise HTTPException(400, "Invalid domain")
-    existing = await db.tenant_domains.find_one({"domain": d})
-    if existing and str(existing.get("tenant_id")) != str(ctx.tenant_id):
+    bridge = get_runtime_bridge()
+    existing_bridge = await bridge.get_tenant_domain(d)
+    if existing_bridge and str(existing_bridge.get("tenant_id")) != str(ctx.tenant_id):
         raise HTTPException(409, "Domain already in use by another tenant")
-    await db.tenant_domains.update_one(
-        {"domain": d},
-        {"$set": {"domain": d, "tenant_id": ctx.tenant_id, "updated_at": utcnow().isoformat()}, "$setOnInsert": {"created_at": utcnow().isoformat()}},
-        upsert=True,
-    )
+    if not existing_bridge and is_mongo_configured():
+        existing = await db.tenant_domains.find_one({"domain": d})
+        if existing and str(existing.get("tenant_id")) != str(ctx.tenant_id):
+            raise HTTPException(409, "Domain already in use by another tenant")
+    if bridge.is_enabled_for("domains"):
+        bridged_doc = await bridge.upsert_tenant_domain(ctx.tenant_id, d)
+        if not bridged_doc:
+            raise HTTPException(503, "Unable to store domain in Supabase")
+    if is_mongo_configured():
+        await db.tenant_domains.update_one(
+            {"domain": d},
+            {"$set": {"domain": d, "tenant_id": ctx.tenant_id, "updated_at": utcnow().isoformat()}, "$setOnInsert": {"created_at": utcnow().isoformat()}},
+            upsert=True,
+        )
     return {"ok": True}
 
 
@@ -1515,7 +1649,13 @@ async def delete_white_label_domain(domain: str = Query(...), ctx=Depends(get_cu
     d = str(domain or "").strip().lower()
     if not d:
         raise HTTPException(400, "Invalid domain")
-    await db.tenant_domains.delete_one({"tenant_id": ctx.tenant_id, "domain": d})
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("domains"):
+        deleted = await bridge.delete_tenant_domain(ctx.tenant_id, d)
+        if not deleted:
+            raise HTTPException(503, "Unable to delete domain from Supabase")
+    if is_mongo_configured():
+        await db.tenant_domains.delete_one({"tenant_id": ctx.tenant_id, "domain": d})
     return {"ok": True}
 
 
@@ -2721,7 +2861,7 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
     c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.from_mongo(c_doc) if c_doc else None
 
-    pdoc = await db.prompt_templates.find_one({"tenant_id": ctx.tenant_id, "key": "monthly_touch_analysis"})
+    pdoc = await _get_prompt_template_doc(ctx.tenant_id, "monthly_touch_analysis")
     instructions = (PromptTemplate.from_mongo(pdoc).text if pdoc else _default_prompt_text("monthly_touch_analysis"))
 
     models = [m for m in (data.models or []) if str(m or "").strip()]
@@ -4532,8 +4672,7 @@ async def ghl_locations(ctx=Depends(get_current_context)):
 async def ghl_location_tokens(ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    docs = await db.integration_location_tokens.find({"tenant_id": ctx.tenant_id, "platform": "gohighlevel"}).to_list(2000)
-    ids = sorted({str(d.get("location_id") or "") for d in (docs or []) if d.get("location_id")})
+    ids = await connectors.list_gohighlevel_location_token_ids(ctx.tenant_id)
     return {"ok": True, "location_ids": ids}
 
 
@@ -4545,11 +4684,9 @@ async def upsert_ghl_location_token(data: GhlLocationTokenIn, ctx=Depends(get_cu
     tok = str(data.token or "").strip()
     if not lid or not tok:
         raise HTTPException(400, "Missing location_id or token")
-    await db.integration_location_tokens.update_one(
-        {"tenant_id": ctx.tenant_id, "platform": "gohighlevel", "location_id": lid},
-        {"$set": {"token_encrypted": encrypt_secret(tok), "updated_at": utcnow().isoformat()}},
-        upsert=True,
-    )
+    ok = await connectors.upsert_gohighlevel_location_token(ctx.tenant_id, lid, tok)
+    if not ok:
+        raise HTTPException(503, "Unable to store location token")
     return {"ok": True}
 
 
@@ -4560,7 +4697,9 @@ async def delete_ghl_location_token(location_id: str = Query(...), ctx=Depends(g
     lid = str(location_id or "").strip()
     if not lid:
         raise HTTPException(400, "Missing location_id")
-    await db.integration_location_tokens.delete_one({"tenant_id": ctx.tenant_id, "platform": "gohighlevel", "location_id": lid})
+    ok = await connectors.delete_gohighlevel_location_token(ctx.tenant_id, lid)
+    if not ok:
+        raise HTTPException(503, "Unable to delete location token")
     return {"ok": True}
 
 

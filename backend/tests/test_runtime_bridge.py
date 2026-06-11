@@ -253,6 +253,128 @@ def test_get_tenant_settings_preserves_legacy_shape():
     assert doc["branding"]["product_name"] == "Monthly Touch OS"
 
 
+def test_get_tenant_domain_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("domains",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_domains":
+            return [
+                {
+                    "id": "domain-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "domain": "acme.example.com",
+                    "is_primary": False,
+                }
+            ]
+        if relation == "tenants":
+            return [{"id": "supabase-tenant-id", "legacy_source_id": "mongo-tenant-id"}]
+        return []
+
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.get_tenant_domain("acme.example.com"))
+
+    assert doc is not None
+    assert doc["_id"] == "domain-row-id"
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["domain"] == "acme.example.com"
+
+
+def test_upsert_tenant_domain_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("domains",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_domains":
+            return []
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "domain-row-id",
+                "tenant_id": "supabase-tenant-id",
+                "domain": "acme.example.com",
+                "is_primary": True,
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.upsert_tenant_domain("mongo-tenant-id", "Acme.Example.com", is_primary=True))
+
+    assert doc is not None
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["domain"] == "acme.example.com"
+    assert captured[0]["relation"] == "tenant_domains"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["domain"] == "acme.example.com"
+    assert captured[0]["payload"]["is_primary"] is True
+
+
+def test_delete_tenant_domain_soft_deletes_row():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("domains",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_domains":
+            return [{"id": "domain-row-id"}]
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "params": kwargs.get("params"), "payload": kwargs.get("payload")})
+        return None
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    deleted = asyncio.run(bridge.delete_tenant_domain("mongo-tenant-id", "acme.example.com"))
+
+    assert deleted is True
+    assert captured[0]["relation"] == "tenant_domains"
+    assert captured[0]["params"] == {"id": "eq.domain-row-id"}
+    assert captured[0]["payload"] == {"is_deleted": True}
+
+
 def test_get_tenant_integration_preserves_legacy_shape():
     bridge = RuntimeBridge(
         {
@@ -295,6 +417,66 @@ def test_get_tenant_integration_preserves_legacy_shape():
     assert doc["metadata"]["client_id"] == "client-123"
 
 
+def test_upsert_tenant_integration_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("integrations",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_integrations":
+            return []
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "integration-row-id",
+                "tenant_id": "supabase-tenant-id",
+                "platform": "clickup",
+                "label": "ClickUp",
+                "status": "connected",
+                "metadata": {"team_id": "team_123"},
+                "credentials_encrypted": {},
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_tenant_integration(
+            "mongo-tenant-id",
+            {
+                "platform": "clickup",
+                "label": "ClickUp",
+                "status": "connected",
+                "metadata": {"team_id": "team_123"},
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["platform"] == "clickup"
+    assert captured[0]["relation"] == "tenant_integrations"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["metadata"]["team_id"] == "team_123"
+
+
 def test_get_user_profile_by_email_preserves_legacy_shape():
     bridge = RuntimeBridge(
         {
@@ -331,6 +513,304 @@ def test_get_user_profile_by_email_preserves_legacy_shape():
     assert profile["email"] == "owner@example.com"
     assert profile["name"] == "Owner User"
     assert profile["auth_provider"] == "google"
+
+
+def test_list_user_profiles_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("profiles",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "user_profiles":
+            return [
+                {
+                    "id": "supabase-user-id",
+                    "legacy_source_id": "mongo-user-id",
+                    "email": "owner@example.com",
+                    "full_name": "Owner User",
+                    "avatar_url": "https://example.com/avatar.png",
+                    "auth_provider": "email",
+                    "system_role": "customer",
+                }
+            ]
+        return []
+
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    profiles = asyncio.run(bridge.list_user_profiles(limit=10))
+
+    assert len(profiles) == 1
+    assert profiles[0]["id"] == "mongo-user-id"
+    assert profiles[0]["email"] == "owner@example.com"
+    assert profiles[0]["role"] == "customer"
+
+
+def test_get_user_membership_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tenants", "profiles"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_user_id(_: str):
+        return "supabase-user-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_members":
+            return [
+                {
+                    "id": "membership-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "user_id": "supabase-user-id",
+                    "role": "tenant_owner",
+                    "status": "active",
+                    "is_default": True,
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_user_id = fake_resolve_target_user_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    membership = asyncio.run(bridge.get_user_membership("mongo-tenant-id", "mongo-user-id"))
+
+    assert membership is not None
+    assert membership["tenant_id"] == "mongo-tenant-id"
+    assert membership["user_id"] == "mongo-user-id"
+    assert membership["role"] == "owner"
+    assert membership["status"] == "active"
+
+
+def test_get_client_binding_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("client_bindings",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "client_integration_bindings":
+            return [
+                {
+                    "id": "binding-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "platform": "clickup",
+                    "enabled": True,
+                    "external_ids": {"folder_id": "folder_123"},
+                    "config": {"team_id": "team_123"},
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.get_client_binding("mongo-tenant-id", "mongo-client-id", "clickup"))
+
+    assert doc is not None
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["client_id"] == "mongo-client-id"
+    assert doc["platform"] == "clickup"
+    assert doc["external_ids"]["folder_id"] == "folder_123"
+
+
+def test_list_user_memberships_maps_tenant_ids_back_to_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tenants", "profiles"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_user_id(_: str):
+        return "supabase-user-id"
+
+    async def fake_load_tenant_legacy_map(tenant_ids):
+        assert tenant_ids == ["supabase-tenant-id"]
+        return {"supabase-tenant-id": "mongo-tenant-id"}
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_members":
+            return [
+                {
+                    "id": "membership-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "user_id": "supabase-user-id",
+                    "role": "manager",
+                    "status": "active",
+                    "is_default": False,
+                }
+            ]
+        return []
+
+    bridge.resolve_target_user_id = fake_resolve_target_user_id  # type: ignore[method-assign]
+    bridge._load_tenant_legacy_map = fake_load_tenant_legacy_map  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    memberships = asyncio.run(bridge.list_user_memberships("mongo-user-id", limit=10))
+
+    assert len(memberships) == 1
+    assert memberships[0]["tenant_id"] == "mongo-tenant-id"
+    assert memberships[0]["role"] == "admin"
+
+
+def test_create_tenant_membership_maps_legacy_role_to_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tenants", "profiles"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_user_id(_: str):
+        return "supabase-user-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_members":
+            return []
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "membership-row-id",
+                "tenant_id": "supabase-tenant-id",
+                "user_id": "supabase-user-id",
+                "role": "tenant_owner",
+                "status": "active",
+                "is_default": True,
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_user_id = fake_resolve_target_user_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    membership = asyncio.run(
+        bridge.create_tenant_membership(
+            "mongo-tenant-id",
+            "mongo-user-id",
+            role="owner",
+            status="active",
+            is_default=True,
+        )
+    )
+
+    assert membership is not None
+    assert membership["role"] == "owner"
+    assert captured[0]["relation"] == "tenant_members"
+    assert captured[0]["payload"]["role"] == "tenant_owner"
+    assert captured[0]["payload"]["is_default"] is True
+
+
+def test_upsert_client_binding_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("client_bindings",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "client_integration_bindings":
+            return []
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "binding-row-id",
+                "tenant_id": "supabase-tenant-id",
+                "client_id": "supabase-client-id",
+                "platform": "clickup",
+                "enabled": True,
+                "external_ids": {"folder_id": "folder_123"},
+                "config": {"team_id": "team_123"},
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_client_binding(
+            "mongo-tenant-id",
+            "mongo-client-id",
+            {
+                "platform": "clickup",
+                "enabled": True,
+                "external_ids": {"folder_id": "folder_123"},
+                "config": {"team_id": "team_123"},
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["client_id"] == "mongo-client-id"
+    assert captured[0]["relation"] == "client_integration_bindings"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["client_id"] == "supabase-client-id"
+    assert captured[0]["payload"]["external_ids"]["folder_id"] == "folder_123"
 
 
 def test_get_user_oauth_account_preserves_legacy_shape():

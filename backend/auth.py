@@ -1,17 +1,20 @@
 """JWT auth helpers."""
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import bcrypt
+import httpx
 import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from db import db
+from db import db, is_mongo_configured
 from models import Tenant, TenantMembership, User, UserPublic
 from runtime_bridge import get_runtime_bridge
+from supabase_config import get_supabase_settings, is_supabase_service_configured
 
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALG = os.environ.get("JWT_ALG", "HS256")
@@ -35,6 +38,259 @@ def _norm_host(host: str) -> str:
     return h
 
 
+def _mongo_available() -> bool:
+    return is_mongo_configured()
+
+
+def _bridge_membership_to_model(doc: Optional[dict[str, Any]]) -> Optional[TenantMembership]:
+    if not doc:
+        return None
+    return TenantMembership.from_mongo(doc)
+
+
+def _system_role_to_app_role(system_role: Any) -> str:
+    return "admin" if str(system_role or "").strip().lower() == "platform_admin" else "manager"
+
+
+def _app_role_to_system_role(app_role: str) -> str:
+    return "platform_admin" if str(app_role or "").strip().lower() == "admin" else "customer"
+
+
+def _supabase_headers(*, include_auth: bool = True) -> dict[str, str]:
+    settings = get_supabase_settings()
+    api_key = str(settings.get("service_role_key") or "").strip()
+    headers = {
+        "apikey": api_key,
+        "Content-Type": "application/json",
+    }
+    if include_auth:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _supabase_auth_url(path: str) -> str:
+    settings = get_supabase_settings()
+    base = str(settings.get("url") or "").rstrip("/")
+    return f"{base}/{path.lstrip('/')}"
+
+
+async def _supabase_auth_request(
+    method: str,
+    path: str,
+    *,
+    payload: Optional[dict[str, Any]] = None,
+    params: Optional[dict[str, Any]] = None,
+    include_auth: bool = True,
+) -> Any:
+    if not is_supabase_service_configured():
+        raise RuntimeError("Supabase service role is not configured")
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.request(
+            method.upper(),
+            _supabase_auth_url(path),
+            json=payload,
+            params=params,
+            headers=_supabase_headers(include_auth=include_auth),
+        )
+    response.raise_for_status()
+    if not response.text.strip():
+        return None
+    return response.json()
+
+
+async def _supabase_admin_create_user(
+    *,
+    email: str,
+    password: str,
+    name: str,
+    app_role: str,
+    auth_provider: str,
+    avatar_url: Optional[str] = None,
+    google_sub: Optional[str] = None,
+) -> dict[str, Any]:
+    payload = {
+        "email": str(email or "").strip().lower(),
+        "password": password,
+        "email_confirm": True,
+        "user_metadata": {
+            "name": name,
+            "full_name": name,
+        },
+        "app_metadata": {
+            "provider": "google" if auth_provider == "google" else "email",
+            "system_role": _app_role_to_system_role(app_role),
+        },
+    }
+    if avatar_url:
+        payload["user_metadata"]["avatar_url"] = avatar_url
+        payload["user_metadata"]["picture"] = avatar_url
+    if google_sub:
+        payload["user_metadata"]["google_sub"] = google_sub
+    result = await _supabase_auth_request("POST", "/auth/v1/admin/users", payload=payload)
+    return dict(result.get("user") or result or {})
+
+
+async def _supabase_admin_update_user(
+    user_id: str,
+    *,
+    email: Optional[str] = None,
+    password: Optional[str] = None,
+    name: Optional[str] = None,
+    app_role: Optional[str] = None,
+    auth_provider: Optional[str] = None,
+    avatar_url: Optional[str] = None,
+    google_sub: Optional[str] = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if email:
+        payload["email"] = str(email).strip().lower()
+    if password:
+        payload["password"] = password
+    if name or avatar_url or google_sub:
+        payload["user_metadata"] = {}
+        if name:
+            payload["user_metadata"]["name"] = name
+            payload["user_metadata"]["full_name"] = name
+        if avatar_url:
+            payload["user_metadata"]["avatar_url"] = avatar_url
+            payload["user_metadata"]["picture"] = avatar_url
+        if google_sub:
+            payload["user_metadata"]["google_sub"] = google_sub
+    if app_role or auth_provider:
+        payload["app_metadata"] = {}
+        if auth_provider:
+            payload["app_metadata"]["provider"] = "google" if auth_provider == "google" else "email"
+        if app_role:
+            payload["app_metadata"]["system_role"] = _app_role_to_system_role(app_role)
+    result = await _supabase_auth_request("PUT", f"/auth/v1/admin/users/{user_id}", payload=payload)
+    return dict(result.get("user") or result or {})
+
+
+async def _supabase_password_login(email: str, password: str) -> Optional[dict[str, Any]]:
+    try:
+        result = await _supabase_auth_request(
+            "POST",
+            "/auth/v1/token",
+            payload={"email": str(email or "").strip().lower(), "password": password},
+            params={"grant_type": "password"},
+            include_auth=False,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (400, 401):
+            return None
+        raise
+    user = dict((result or {}).get("user") or {})
+    return user or None
+
+
+async def authenticate_password_user(email: str, password: str) -> Optional[User]:
+    if not is_supabase_service_configured():
+        return None
+    profile = await get_runtime_bridge().get_user_profile_by_email(email)
+    if profile and str(profile.get("auth_provider") or "").strip().lower() == "google":
+        raise HTTPException(status_code=400, detail="This account uses Google sign-in. Use “Continue with Google”.")
+    auth_user = await _supabase_password_login(email, password)
+    if not auth_user:
+        return None
+    bridged_user = _runtime_profile_to_user(
+        await get_runtime_bridge().get_user_profile(str(auth_user.get("id") or ""))
+        or await get_runtime_bridge().get_user_profile_by_email(email)
+    )
+    if bridged_user:
+        return bridged_user
+    normalized_email = str(auth_user.get("email") or email or "").strip().lower()
+    return User(
+        _id=str(auth_user.get("id") or ""),
+        email=normalized_email,
+        name=str((((auth_user.get("user_metadata") or {}).get("name")) or normalized_email.split("@", 1)[0] or "User")).strip(),
+        role=_system_role_to_app_role(((auth_user.get("app_metadata") or {}).get("system_role"))),
+        password_hash="",
+        avatar_url=((auth_user.get("user_metadata") or {}).get("avatar_url")),
+        active=True,
+        auth_provider="local",
+    )
+
+
+async def register_identity(email: str, name: str, password: str, *, app_role: str) -> User:
+    normalized_email = str(email or "").strip().lower()
+    existing = await get_runtime_bridge().get_user_profile_by_email(normalized_email)
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already registered")
+    auth_user = await _supabase_admin_create_user(
+        email=normalized_email,
+        password=password,
+        name=name,
+        app_role=app_role,
+        auth_provider="local",
+    )
+    bridged_user = _runtime_profile_to_user(
+        await get_runtime_bridge().get_user_profile(str(auth_user.get("id") or ""))
+        or await get_runtime_bridge().get_user_profile_by_email(normalized_email)
+    )
+    if bridged_user:
+        return bridged_user
+    return User(
+        _id=str(auth_user.get("id") or ""),
+        email=normalized_email,
+        name=name,
+        role=app_role,
+        password_hash="",
+        avatar_url=None,
+        active=True,
+        auth_provider="local",
+    )
+
+
+async def sync_google_identity(email: str, name: str, *, picture: Optional[str] = None, google_sub: Optional[str] = None) -> User:
+    normalized_email = str(email or "").strip().lower()
+    bridge = get_runtime_bridge()
+    existing = await bridge.get_user_profile_by_email(normalized_email)
+    if existing:
+        app_role = _system_role_to_app_role(existing.get("role"))
+        await _supabase_admin_update_user(
+            str(existing.get("_id") or existing.get("id") or ""),
+            email=normalized_email,
+            name=name,
+            app_role=app_role,
+            auth_provider="google",
+            avatar_url=picture,
+            google_sub=google_sub,
+        )
+    else:
+        is_first_user = not await bridge.has_user_profiles()
+        app_role = "admin" if is_first_user else "manager"
+        await _supabase_admin_create_user(
+            email=normalized_email,
+            password=secrets.token_urlsafe(24),
+            name=name,
+            app_role=app_role,
+            auth_provider="google",
+            avatar_url=picture,
+            google_sub=google_sub,
+        )
+    bridged_user = _runtime_profile_to_user(await bridge.get_user_profile_by_email(normalized_email))
+    if not bridged_user:
+        raise HTTPException(status_code=500, detail="Google sign-in profile sync failed")
+    return bridged_user
+
+
+async def list_runtime_users(*, limit: int = 500) -> list[dict[str, Any]]:
+    if is_supabase_service_configured():
+        profiles = await get_runtime_bridge().list_user_profiles(limit=limit)
+        return [
+            {
+                "id": item.get("id"),
+                "email": item.get("email"),
+                "name": item.get("name"),
+                "role": _system_role_to_app_role(item.get("role")),
+                "avatar_url": item.get("avatar_url"),
+                "active": True,
+            }
+            for item in profiles
+        ]
+    return []
+
+
 async def resolve_tenant_id_from_host(host: str) -> Optional[str]:
     h = _norm_host(host)
     if not h:
@@ -45,16 +301,17 @@ async def resolve_tenant_id_from_host(host: str) -> Optional[str]:
         return bridge_tenant_id
 
     base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
-    if base_domain and h.endswith("." + base_domain):
+    if _mongo_available() and base_domain and h.endswith("." + base_domain):
         slug = h[: -(len(base_domain) + 1)].split(".", 1)[0].strip()
         if slug:
             doc = await db.tenants.find_one({"slug": slug, "status": "active"})
             if doc:
                 return str(doc.get("_id"))
 
-    doc = await db.tenant_domains.find_one({"domain": h})
-    if doc:
-        return str(doc.get("tenant_id"))
+    if _mongo_available():
+        doc = await db.tenant_domains.find_one({"domain": h})
+        if doc:
+            return str(doc.get("tenant_id"))
     return None
 
 
@@ -90,8 +347,7 @@ def decode_token(token: str) -> dict:
 def _runtime_profile_to_user(profile: Optional[dict]) -> Optional[User]:
     if not profile:
         return None
-    system_role = str(profile.get("role") or "").strip().lower()
-    app_role = "admin" if system_role == "platform_admin" else "manager"
+    app_role = _system_role_to_app_role(profile.get("role"))
     auth_provider = str(profile.get("auth_provider") or "local").strip().lower() or "local"
     return User(
         _id=str(profile.get("id") or profile.get("_id") or ""),
@@ -113,13 +369,14 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
         user_id = payload.get("sub")
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    doc = await db.users.find_one({"_id": user_id})
-    if not doc:
-        bridged_user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
-        if not bridged_user:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    bridged_user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
+    if bridged_user:
         return bridged_user
-    return User.from_mongo(doc)
+    if _mongo_available():
+        doc = await db.users.find_one({"_id": user_id})
+        if doc:
+            return User.from_mongo(doc)
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
 
 class RequestContext(BaseModel):
@@ -132,6 +389,14 @@ async def ensure_default_tenant() -> str:
     global _DEFAULT_TENANT_ID
     if _DEFAULT_TENANT_ID:
         return _DEFAULT_TENANT_ID
+    bridge = get_runtime_bridge()
+    if is_supabase_service_configured():
+        doc = await bridge.get_tenant_by_slug("default")
+        if not doc:
+            doc = await bridge.create_tenant(slug="default", name="Default")
+        if doc:
+            _DEFAULT_TENANT_ID = str(doc.get("_id") or doc.get("id") or "default")
+            return _DEFAULT_TENANT_ID
     doc = await db.tenants.find_one({"slug": "default"})
     if not doc:
         t = Tenant(slug="default", name="Default")
@@ -147,6 +412,14 @@ async def ensure_internal_wiki_tenant_id() -> str:
     if _INTERNAL_WIKI_TENANT_ID:
         return _INTERNAL_WIKI_TENANT_ID
     slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
+    bridge = get_runtime_bridge()
+    if is_supabase_service_configured():
+        doc = await bridge.get_tenant_by_slug(slug)
+        if not doc:
+            doc = await bridge.create_tenant(slug=slug, name="Internal")
+        if doc:
+            _INTERNAL_WIKI_TENANT_ID = str(doc.get("_id") or doc.get("id") or slug)
+            return _INTERNAL_WIKI_TENANT_ID
     doc = await db.tenants.find_one({"slug": slug})
     if not doc:
         t = Tenant(slug=slug, name="Internal")
@@ -158,6 +431,17 @@ async def ensure_internal_wiki_tenant_id() -> str:
 
 
 async def ensure_membership_for_tenant(user: User, tenant_id: str, role_if_create: Optional[str] = None) -> TenantMembership:
+    bridge = get_runtime_bridge()
+    if is_supabase_service_configured():
+        doc = await bridge.get_user_membership(str(tenant_id), user.id)
+        membership = _bridge_membership_to_model(doc)
+        if membership and membership.status == "active":
+            return membership
+        role = role_if_create or ("owner" if user.role == "admin" else "member")
+        created = await bridge.create_tenant_membership(str(tenant_id), user.id, role=role, status="active")
+        membership = _bridge_membership_to_model(created)
+        if membership:
+            return membership
     doc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(tenant_id), "status": "active"})
     if doc:
         return TenantMembership.from_mongo(doc)
@@ -168,6 +452,25 @@ async def ensure_membership_for_tenant(user: User, tenant_id: str, role_if_creat
 
 
 async def ensure_membership(user: User) -> TenantMembership:
+    bridge = get_runtime_bridge()
+    if is_supabase_service_configured():
+        memberships = [item for item in await bridge.list_user_memberships(user.id, limit=50) if str((item or {}).get("status") or "") == "active"]
+        if memberships:
+            default_doc = next((item for item in memberships if bool((item or {}).get("is_default"))), memberships[0])
+            membership = _bridge_membership_to_model(default_doc)
+            if membership:
+                return membership
+        tenant_id = await ensure_default_tenant()
+        created = await bridge.create_tenant_membership(
+            tenant_id,
+            user.id,
+            role="owner" if user.role == "admin" else "member",
+            status="active",
+            is_default=True,
+        )
+        membership = _bridge_membership_to_model(created)
+        if membership:
+            return membership
     doc = await db.tenant_memberships.find_one({"user_id": user.id, "status": "active"})
     if doc:
         return TenantMembership.from_mongo(doc)
@@ -186,18 +489,24 @@ async def get_current_context(request: Request, creds: Optional[HTTPAuthorizatio
         user_id = payload.get("sub")
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    doc = await db.users.find_one({"_id": user_id})
-    user = User.from_mongo(doc) if doc else _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
+    user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
+    if not user and _mongo_available():
+        doc = await db.users.find_one({"_id": user_id})
+        user = User.from_mongo(doc) if doc else None
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     tenant_id = payload.get("tenant_id")
     tenant_role = payload.get("trole")
     host_tenant_id = await resolve_tenant_id_from_host(request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
     if host_tenant_id and str(host_tenant_id) != str(tenant_id or ""):
-        mdoc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(host_tenant_id), "status": "active"})
-        if not mdoc:
+        m = None
+        if is_supabase_service_configured():
+            m = _bridge_membership_to_model(await get_runtime_bridge().get_user_membership(str(host_tenant_id), user.id))
+        if not m and _mongo_available():
+            mdoc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(host_tenant_id), "status": "active"})
+            m = TenantMembership.from_mongo(mdoc) if mdoc else None
+        if not m:
             raise HTTPException(status_code=403, detail="Not a member of this tenant")
-        m = TenantMembership.from_mongo(mdoc)
         tenant_id = m.tenant_id
         tenant_role = m.role
     if not tenant_id or not tenant_role:
@@ -223,11 +532,24 @@ async def bootstrap_admin():
     pw = os.environ.get("ADMIN_BOOTSTRAP_PASSWORD")
     if not email or not pw:
         return
-    existing = await db.users.find_one({"email": email})
+    normalized_email = str(email).strip().lower()
+    if is_supabase_service_configured():
+        existing = await get_runtime_bridge().get_user_profile_by_email(normalized_email)
+        if existing:
+            return
+        await _supabase_admin_create_user(
+            email=normalized_email,
+            password=pw,
+            name="System Admin",
+            app_role="admin",
+            auth_provider="local",
+        )
+        return
+    existing = await db.users.find_one({"email": normalized_email})
     if existing:
         return
     user = User(
-        email=email,
+        email=normalized_email,
         name="System Admin",
         role="admin",
         password_hash=hash_password(pw),

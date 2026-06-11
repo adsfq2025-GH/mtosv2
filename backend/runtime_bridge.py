@@ -435,6 +435,346 @@ class RuntimeBridge:
             "auth_provider": row.get("auth_provider"),
         }
 
+    async def list_user_profiles(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("profiles"):
+            return []
+        rows = await self._safe_select(
+            "user_profiles",
+            select="id,email,full_name,avatar_url,auth_provider,system_role,legacy_source_id",
+            filters={"email": "not.is.null"},
+            order="created_at.asc",
+            limit=limit,
+        )
+        return [
+            {
+                "_id": str((row or {}).get("legacy_source_id") or (row or {}).get("id") or ""),
+                "id": str((row or {}).get("legacy_source_id") or (row or {}).get("id") or ""),
+                "email": (row or {}).get("email"),
+                "name": str((row or {}).get("full_name") or "").strip()
+                or str((row or {}).get("email") or "").split("@", 1)[0]
+                or None,
+                "avatar_url": (row or {}).get("avatar_url"),
+                "role": (row or {}).get("system_role"),
+                "auth_provider": (row or {}).get("auth_provider"),
+            }
+            for row in (rows or [])
+        ]
+
+    async def has_user_profiles(self) -> bool:
+        if not self.is_enabled_for("profiles"):
+            return False
+        rows = await self._safe_select(
+            "user_profiles",
+            select="id",
+            filters={"email": "not.is.null"},
+            limit=1,
+        )
+        return bool(rows)
+
+    def _legacy_membership_role(self, role: Any) -> str:
+        normalized = str(role or "").strip().lower()
+        return {
+            "tenant_owner": "owner",
+            "manager": "admin",
+            "staff": "member",
+            "customer": "viewer",
+            "owner": "owner",
+            "admin": "admin",
+            "member": "member",
+            "viewer": "viewer",
+        }.get(normalized, "member")
+
+    def _supabase_membership_role(self, role: Any) -> str:
+        normalized = str(role or "").strip().lower()
+        return {
+            "owner": "tenant_owner",
+            "admin": "manager",
+            "member": "staff",
+            "viewer": "customer",
+            "tenant_owner": "tenant_owner",
+            "manager": "manager",
+            "staff": "staff",
+            "customer": "customer",
+        }.get(normalized, "staff")
+
+    def _legacy_membership_status(self, status: Any) -> str:
+        normalized = str(status or "").strip().lower()
+        return {
+            "active": "active",
+            "invited": "invited",
+            "disabled": "disabled",
+            "inactive": "disabled",
+            "suspended": "disabled",
+        }.get(normalized, "active")
+
+    def _tenant_member_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(
+            doc.get("legacy_membership_id")
+            or doc.get("legacy_source_id")
+            or doc.get("id")
+            or f"{tenant_legacy_id}:{user_legacy_id}"
+        )
+        doc["tenant_id"] = tenant_legacy_id
+        doc["user_id"] = user_legacy_id
+        doc["role"] = self._legacy_membership_role(doc.get("role"))
+        doc["status"] = self._legacy_membership_status(doc.get("status"))
+        doc["is_default"] = bool(doc.get("is_default"))
+        for key in ("id", "legacy_membership_id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def _load_tenant_legacy_map(self, tenant_ids: Sequence[str]) -> dict[str, str]:
+        clean_ids = [str(tenant_id).strip() for tenant_id in tenant_ids if str(tenant_id).strip()]
+        if not clean_ids:
+            return {}
+        rows = await self._safe_select(
+            "tenants",
+            select="id,legacy_source_id",
+            filters={"id": f"in.({','.join(clean_ids)})"},
+            limit=len(clean_ids),
+        )
+        if not rows:
+            return {}
+        return {
+            str(row.get("id") or ""): str(row.get("legacy_source_id") or row.get("id") or "")
+            for row in rows
+            if str(row.get("id") or "").strip()
+        }
+
+    async def get_tenant_by_slug(self, slug: str) -> Optional[dict[str, Any]]:
+        normalized_slug = str(slug or "").strip().lower()
+        if not self.is_enabled_for("tenants") or not normalized_slug:
+            return None
+        rows = await self._safe_select(
+            "tenants",
+            select="id,legacy_source_id,slug,name,status,subscription_status,subscription_expires_at,trial_ends_at,metadata",
+            filters={"slug": f"eq.{normalized_slug}", "is_deleted": "eq.false"},
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = dict(rows[0] or {})
+        row["_id"] = str(row.get("legacy_source_id") or row.get("id") or normalized_slug)
+        row["id"] = row["_id"]
+        row["metadata"] = dict(row.get("metadata") or {})
+        return row
+
+    async def create_tenant(
+        self,
+        *,
+        slug: str,
+        name: str,
+        owner_user_legacy_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        status: str = "active",
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        normalized_slug = str(slug or "").strip().lower()
+        normalized_name = str(name or "").strip()
+        if not normalized_slug or not normalized_name:
+            return None
+        owner_user_id = await self.resolve_target_user_id(str(owner_user_legacy_id or "").strip()) if owner_user_legacy_id else None
+        payload = {
+            "slug": normalized_slug,
+            "name": normalized_name,
+            "status": str(status or "active").strip().lower() or "active",
+            "owner_user_id": owner_user_id,
+            "metadata": dict(metadata or {}),
+            "is_deleted": False,
+        }
+        result = await self._request(
+            "POST",
+            "tenants",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        row = dict(rows[0] or {})
+        row["_id"] = str(row.get("legacy_source_id") or row.get("id") or normalized_slug)
+        row["id"] = row["_id"]
+        row["metadata"] = dict(row.get("metadata") or {})
+        return row
+
+    async def get_user_membership(self, tenant_legacy_id: str, user_legacy_id: str) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        if not target_tenant_id or not target_user_id:
+            return None
+        rows = await self._safe_select(
+            "tenant_members",
+            select="id,tenant_id,user_id,role,status,is_default,joined_at,legacy_membership_id,legacy_source_id,created_at,updated_at",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._tenant_member_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
+
+    async def list_user_memberships(self, user_legacy_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        if not self.service_configured:
+            return []
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        if not target_user_id:
+            return []
+        rows = await self._safe_select(
+            "tenant_members",
+            select="id,tenant_id,user_id,role,status,is_default,joined_at,legacy_membership_id,legacy_source_id,created_at,updated_at",
+            filters={"user_id": f"eq.{target_user_id}", "is_deleted": "eq.false"},
+            order="is_default.desc,created_at.asc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        tenant_ids = [
+            str((row or {}).get("tenant_id") or "").strip()
+            for row in rows
+            if str((row or {}).get("tenant_id") or "").strip()
+        ]
+        legacy_tenant_by_id = await self._load_tenant_legacy_map(tenant_ids)
+        return [
+            self._tenant_member_row_to_doc(
+                row,
+                legacy_tenant_by_id.get(str((row or {}).get("tenant_id") or "").strip())
+                or str((row or {}).get("tenant_id") or "").strip(),
+                user_legacy_id,
+            )
+            for row in rows
+        ]
+
+    async def count_active_members_for_tenant(self, tenant_legacy_id: str) -> int:
+        if not self.service_configured:
+            return 0
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return 0
+        rows = await self._safe_select(
+            "tenant_members",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "status": "eq.active",
+                "is_deleted": "eq.false",
+            },
+            limit=1000,
+        )
+        return len(rows or [])
+
+    async def create_tenant_membership(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        *,
+        role: str,
+        status: str = "active",
+        is_default: bool = False,
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        if not target_tenant_id or not target_user_id:
+            return None
+        existing = await self._safe_select(
+            "tenant_members",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        payload = {
+            "tenant_id": target_tenant_id,
+            "user_id": target_user_id,
+            "role": self._supabase_membership_role(role),
+            "status": self._legacy_membership_status(status),
+            "is_default": bool(is_default),
+            "is_deleted": False,
+        }
+        if existing:
+            row_id = str((existing[0] or {}).get("id") or "").strip()
+            if not row_id:
+                return None
+            result = await self._request(
+                "PATCH",
+                "tenant_members",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "tenant_members",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._tenant_member_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
+
+    async def upsert_tenant_settings(self, tenant_legacy_id: str, doc: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "branding": dict((doc or {}).get("branding") or {}),
+            "terminology": dict((doc or {}).get("terminology") or {}),
+            "workflows": dict((doc or {}).get("workflows") or {}),
+            "analysis": dict((doc or {}).get("analysis") or {}),
+            "created_at": (doc or {}).get("created_at"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "tenant_settings",
+            select="id",
+            filters={"tenant_id": f"eq.{target_tenant_id}", "is_deleted": "eq.false"},
+            limit=1,
+        )
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            if not row_id:
+                return None
+            result = await self._request(
+                "PATCH",
+                "tenant_settings",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "tenant_settings",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._settings_row_to_doc(rows[0], tenant_legacy_id)
+
     def _settings_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})
         doc["_id"] = str(doc.get("id") or "")
@@ -485,6 +825,113 @@ class RuntimeBridge:
             limit=limit,
         )
         return [self._tenant_domain_row_to_doc(row, tenant_legacy_id) for row in (rows or [])]
+
+    async def get_tenant_domain(self, domain: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("domains"):
+            return None
+        normalized_domain = _norm_host(domain)
+        if not normalized_domain:
+            return None
+        rows = await self._safe_select(
+            "tenant_domains",
+            select="id,tenant_id,domain,is_primary,verified_at,created_at,updated_at",
+            filters={"domain": f"eq.{normalized_domain}", "is_deleted": "eq.false"},
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = rows[0] or {}
+        tenant_id = str(row.get("tenant_id") or "").strip()
+        tenant_legacy_id = tenant_id
+        if tenant_id:
+            tenant_rows = await self._safe_select(
+                "tenants",
+                select="id,legacy_source_id",
+                filters={"id": f"eq.{tenant_id}", "is_deleted": "eq.false"},
+                limit=1,
+            )
+            if tenant_rows:
+                tenant_legacy_id = str((tenant_rows[0] or {}).get("legacy_source_id") or tenant_id)
+        return self._tenant_domain_row_to_doc(row, tenant_legacy_id)
+
+    async def upsert_tenant_domain(
+        self,
+        tenant_legacy_id: str,
+        domain: str,
+        *,
+        is_primary: bool = False,
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        normalized_domain = _norm_host(domain)
+        if not target_tenant_id or not normalized_domain:
+            return None
+        existing_rows = await self._safe_select(
+            "tenant_domains",
+            select="id,tenant_id,domain,is_primary,verified_at,created_at,updated_at",
+            filters={"domain": f"eq.{normalized_domain}", "is_deleted": "eq.false"},
+            limit=1,
+        )
+        payload = {
+            "tenant_id": target_tenant_id,
+            "domain": normalized_domain,
+            "is_primary": bool(is_primary),
+            "is_deleted": False,
+        }
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            if not row_id:
+                return None
+            result = await self._request(
+                "PATCH",
+                "tenant_domains",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "tenant_domains",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._tenant_domain_row_to_doc(rows[0], tenant_legacy_id)
+
+    async def delete_tenant_domain(self, tenant_legacy_id: str, domain: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        normalized_domain = _norm_host(domain)
+        if not target_tenant_id or not normalized_domain:
+            return False
+        existing_rows = await self._safe_select(
+            "tenant_domains",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "domain": f"eq.{normalized_domain}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not existing_rows:
+            return True
+        row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+        if not row_id:
+            return False
+        await self._request(
+            "PATCH",
+            "tenant_domains",
+            params={"id": f"eq.{row_id}"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
 
     async def _load_user_legacy_map(self, user_ids: Sequence[str]) -> dict[str, str]:
         clean_ids = [str(user_id).strip() for user_id in user_ids if str(user_id).strip()]
@@ -767,6 +1214,64 @@ class RuntimeBridge:
             return None
         return self._integration_row_to_doc(rows[0], tenant_legacy_id)
 
+    async def upsert_tenant_integration(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        platform = str((doc or {}).get("platform") or "").strip().lower()
+        if not target_tenant_id or not platform:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "platform": platform,
+            "label": str((doc or {}).get("label") or platform).strip() or platform,
+            "status": str((doc or {}).get("status") or "not_connected").strip() or "not_connected",
+            "last_synced_at": (doc or {}).get("last_synced_at"),
+            "last_error": (doc or {}).get("last_error"),
+            "metadata": dict((doc or {}).get("metadata") or {}),
+            "vault_secret_ref": (doc or {}).get("vault_secret_ref"),
+            "oauth_connection_ref": (doc or {}).get("oauth_connection_ref"),
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "tenant_integrations",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "platform": f"eq.{platform}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows is None:
+            return None
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            if not row_id:
+                return None
+            result = await self._request(
+                "PATCH",
+                "tenant_integrations",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "tenant_integrations",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._integration_row_to_doc(rows[0], tenant_legacy_id)
+
     async def mirror_tenant_integration(
         self,
         tenant_legacy_id: str,
@@ -956,6 +1461,92 @@ class RuntimeBridge:
             limit=limit,
         )
         return [self._client_binding_row_to_doc(row, tenant_legacy_id, client_legacy_id) for row in (rows or [])]
+
+    async def get_client_binding(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        platform: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("client_bindings"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        normalized_platform = str(platform or "").strip().lower()
+        if not target_tenant_id or not target_client_id or not normalized_platform:
+            return None
+        rows = await self._safe_select(
+            "client_integration_bindings",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "platform": f"eq.{normalized_platform}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._client_binding_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    async def upsert_client_binding(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        platform = str((doc or {}).get("platform") or "").strip().lower()
+        if not target_tenant_id or not target_client_id or not platform:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "platform": platform,
+            "enabled": bool((doc or {}).get("enabled", True)),
+            "external_ids": dict((doc or {}).get("external_ids") or {}),
+            "config": dict((doc or {}).get("config") or {}),
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "client_integration_bindings",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "platform": f"eq.{platform}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows is None:
+            return None
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            if not row_id:
+                return None
+            result = await self._request(
+                "PATCH",
+                "client_integration_bindings",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "client_integration_bindings",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._client_binding_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
 
     def _user_oauth_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, user_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})

@@ -28,6 +28,10 @@ else:
     db = _MissingDB()
 
 
+def is_mongo_configured() -> bool:
+    return bool(_mongo_url and _db_name)
+
+
 # ---------- ObjectId support ----------
 def _to_str(v: Any) -> str:
     if isinstance(v, ObjectId):
