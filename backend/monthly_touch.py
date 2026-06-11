@@ -82,8 +82,31 @@ async def _ensure_meeting_for_client(tenant_id: str, client: Client, user: Optio
 
 
 async def _upsert_action_item(tenant_id: str, client_id: str, meeting_id: str, title: str, description: str, owner: Optional[str]) -> ActionItem:
+    bridge = get_runtime_bridge()
+    due = (utcnow() + timedelta(days=14)).date().isoformat()
+    if bridge.is_enabled_for("action_items"):
+        existing_items = await bridge.list_action_items(tenant_id, client_legacy_id=client_id, meeting_legacy_id=meeting_id, limit=500)
+        existing = next((doc for doc in existing_items if str((doc or {}).get("title") or "") == title), None)
+        if existing:
+            return ActionItem.from_mongo(existing)
+        item = ActionItem(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            meeting_id=meeting_id,
+            title=title,
+            description=description,
+            owner=owner,
+            due_date=due,
+            priority="medium",
+            status="open",
+        )
+        stored = await bridge.upsert_action_item(tenant_id, item.to_mongo())
+        if stored:
+            if is_mongo_configured():
+                await db.action_items.insert_one(item.to_mongo())
+            return ActionItem.from_mongo(stored)
+        raise RuntimeError("Unable to create action item in Supabase")
     if not is_mongo_configured():
-        due = (utcnow() + timedelta(days=14)).date().isoformat()
         return ActionItem(
             tenant_id=tenant_id,
             client_id=client_id,
@@ -100,7 +123,6 @@ async def _upsert_action_item(tenant_id: str, client_id: str, meeting_id: str, t
     )
     if existing:
         return ActionItem.from_mongo(existing)
-    due = (utcnow() + timedelta(days=14)).date().isoformat()
     item = ActionItem(
         tenant_id=tenant_id,
         client_id=client_id,
@@ -177,6 +199,13 @@ async def _push_action_item_to_clickup(tenant_id: str, item: ActionItem, client_
     external_id = data.get("id")
     external_url = data.get("url")
     update: Dict[str, Any] = {"pushed_to": "clickup", "external_id": external_id, "external_url": external_url, "updated_at": utcnow().isoformat()}
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("action_items"):
+        stored = await bridge.upsert_action_item(tenant_id, {**item.to_mongo(), **update})
+        if stored:
+            if is_mongo_configured():
+                await db.action_items.update_one({"_id": item.id, **_tenant_scope(tenant_id)}, {"$set": update})
+            return ActionItem.from_mongo(stored)
     if not is_mongo_configured():
         return item.model_copy(update=update)
     await db.action_items.update_one({"_id": item.id, **_tenant_scope(tenant_id)}, {"$set": update})

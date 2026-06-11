@@ -1051,6 +1051,212 @@ def test_soft_delete_meeting_marks_row_deleted():
     assert captured[0]["payload"] == {"is_deleted": True}
 
 
+def test_get_action_item_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("action_items", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "action_items":
+            return [
+                {
+                    "id": "supabase-action-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "legacy_source_id": "mongo-action-id",
+                    "client_id": "supabase-client-id",
+                    "meeting_id": "supabase-meeting-id",
+                    "title": "Follow up",
+                    "status": "open",
+                    "priority": "medium",
+                    "reminder_count": 2,
+                }
+            ]
+        if relation == "clients":
+            return [{"id": "supabase-client-id", "legacy_source_id": "mongo-client-id"}]
+        if relation == "meetings":
+            return [{"id": "supabase-meeting-id", "legacy_source_id": "mongo-meeting-id"}]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.get_action_item("mongo-tenant-id", "mongo-action-id"))
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-action-id"
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["client_id"] == "mongo-client-id"
+    assert doc["meeting_id"] == "mongo-meeting-id"
+    assert doc["reminder_count"] == 2
+
+
+def test_upsert_action_item_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("action_items", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_resolve_target_meeting_id(_: str, __: str):
+        return "supabase-meeting-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "action_items":
+            return []
+        if relation == "clients":
+            return [{"id": "supabase-client-id", "legacy_source_id": "mongo-client-id"}]
+        if relation == "meetings":
+            return [{"id": "supabase-meeting-id", "legacy_source_id": "mongo-meeting-id"}]
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "supabase-action-id",
+                "tenant_id": "supabase-tenant-id",
+                "legacy_source_id": "mongo-action-id",
+                "client_id": "supabase-client-id",
+                "meeting_id": "supabase-meeting-id",
+                "title": "Follow up",
+                "status": "open",
+                "priority": "medium",
+                "owner_type": "agency",
+                "reminder_count": 0,
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge.resolve_target_meeting_id = fake_resolve_target_meeting_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_action_item(
+            "mongo-tenant-id",
+            {
+                "_id": "mongo-action-id",
+                "client_id": "mongo-client-id",
+                "meeting_id": "mongo-meeting-id",
+                "title": "Follow up",
+                "status": "open",
+                "priority": "medium",
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-action-id"
+    assert captured[0]["relation"] == "action_items"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["client_id"] == "supabase-client-id"
+    assert captured[0]["payload"]["meeting_id"] == "supabase-meeting-id"
+    assert captured[0]["payload"]["legacy_source_id"] == "mongo-action-id"
+
+
+def test_soft_delete_action_item_marks_row_deleted():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("action_items",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_action_item_id(_: str, __: str):
+        return "supabase-action-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "params": kwargs.get("params"), "payload": kwargs.get("payload")})
+        return None
+
+    bridge.resolve_target_action_item_id = fake_resolve_target_action_item_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    deleted = asyncio.run(bridge.soft_delete_action_item("mongo-tenant-id", "mongo-action-id"))
+
+    assert deleted is True
+    assert captured[0]["relation"] == "action_items"
+    assert captured[0]["params"] == {"id": "eq.supabase-action-id"}
+    assert captured[0]["payload"] == {"is_deleted": True}
+
+
+def test_list_action_items_maps_related_ids_back_to_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("action_items", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "action_items":
+            return [
+                {
+                    "id": "supabase-action-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "legacy_source_id": "mongo-action-id",
+                    "client_id": "supabase-client-id",
+                    "meeting_id": "supabase-meeting-id",
+                    "title": "Follow up",
+                    "status": "open",
+                    "priority": "medium",
+                    "owner_type": "agency",
+                }
+            ]
+        if relation == "clients":
+            return [{"id": "supabase-client-id", "legacy_source_id": "mongo-client-id"}]
+        if relation == "meetings":
+            return [{"id": "supabase-meeting-id", "legacy_source_id": "mongo-meeting-id"}]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_action_items("mongo-tenant-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-action-id"
+    assert docs[0]["client_id"] == "mongo-client-id"
+    assert docs[0]["meeting_id"] == "mongo-meeting-id"
+
+
 def test_get_user_oauth_account_preserves_legacy_shape():
     bridge = RuntimeBridge(
         {

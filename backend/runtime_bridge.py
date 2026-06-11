@@ -1395,6 +1395,273 @@ class RuntimeBridge:
         )
         return True
 
+    async def _load_meeting_legacy_map(self, meeting_ids: Sequence[str]) -> dict[str, str]:
+        clean_ids = [str(meeting_id).strip() for meeting_id in meeting_ids if str(meeting_id).strip()]
+        if not clean_ids:
+            return {}
+        rows = await self._safe_select(
+            "meetings",
+            select="id,legacy_source_id",
+            filters={"id": f"in.({','.join(clean_ids)})"},
+            limit=len(clean_ids),
+        )
+        if not rows:
+            return {}
+        return {
+            str(row.get("id") or ""): str(row.get("legacy_source_id") or row.get("id") or "")
+            for row in rows
+            if str(row.get("id") or "").strip()
+        }
+
+    def _action_item_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_by_id: dict[str, str],
+        meeting_legacy_by_id: Optional[dict[str, str]] = None,
+    ) -> Optional[dict[str, Any]]:
+        doc = dict(row or {})
+        client_id = str(doc.get("client_id") or "").strip()
+        legacy_client_id = client_legacy_by_id.get(client_id) or (client_id if _is_uuid(client_id) else "")
+        if not legacy_client_id:
+            return None
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = legacy_client_id
+        meeting_id = str(doc.get("meeting_id") or "").strip()
+        doc["meeting_id"] = (meeting_legacy_by_id or {}).get(meeting_id) or (meeting_id if _is_uuid(meeting_id) else None) or None
+        doc["reminder_count"] = _safe_int(doc.get("reminder_count"), 0)
+        for key in ("legacy_source_id", "legacy_source_kind", "id", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def list_action_items(
+        self,
+        tenant_legacy_id: str,
+        *,
+        client_legacy_id: Optional[str] = None,
+        meeting_legacy_id: Optional[str] = None,
+        status: Optional[str] = None,
+        owner_type: Optional[str] = None,
+        due_before: Optional[str] = None,
+        due_after: Optional[str] = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("action_items"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters: dict[str, str] = {"tenant_id": f"eq.{target_tenant_id}", "is_deleted": "eq.false"}
+        if client_legacy_id:
+            target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+            if not target_client_id:
+                return []
+            filters["client_id"] = f"eq.{target_client_id}"
+        if meeting_legacy_id:
+            target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+            if not target_meeting_id:
+                return []
+            filters["meeting_id"] = f"eq.{target_meeting_id}"
+        if status:
+            filters["status"] = f"eq.{status}"
+        if owner_type:
+            filters["owner_type"] = f"eq.{owner_type}"
+        if due_before:
+            filters["due_date"] = f"lte.{due_before}"
+        if due_after:
+            filters["due_date"] = f"gte.{due_after}" if "due_date" not in filters else filters["due_date"]
+        rows = await self._safe_select(
+            "action_items",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        client_legacy_by_id = await self._load_client_legacy_map(
+            [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+        )
+        meeting_legacy_by_id = await self._load_meeting_legacy_map(
+            [str(row.get("meeting_id") or "").strip() for row in rows if str(row.get("meeting_id") or "").strip()]
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            doc = self._action_item_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+            if doc:
+                out.append(doc)
+        if due_before and due_after:
+            out = [
+                doc
+                for doc in out
+                if (not doc.get("due_date") or (str(due_after) <= str(doc.get("due_date")) <= str(due_before)))
+            ]
+        return out
+
+    async def get_action_item(self, tenant_legacy_id: str, action_item_legacy_id: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("action_items"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "action_items",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "legacy_source_id": f"eq.{action_item_legacy_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows and _is_uuid(action_item_legacy_id):
+            rows = await self._safe_select(
+                "action_items",
+                select="*",
+                filters={"tenant_id": f"eq.{target_tenant_id}", "id": f"eq.{action_item_legacy_id}", "is_deleted": "eq.false"},
+                limit=1,
+            )
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        return self._action_item_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+
+    async def resolve_target_action_item_id(self, tenant_legacy_id: str, action_item_legacy_id: str) -> Optional[str]:
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "action_items",
+            select="id,legacy_source_id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{action_item_legacy_id},id.eq.{action_item_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return str((rows[0] or {}).get("id") or "").strip() or None
+
+    async def upsert_action_item(self, tenant_legacy_id: str, doc: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        action_item_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        target_action_item_id = (
+            await self.resolve_target_action_item_id(tenant_legacy_id, action_item_legacy_id) if action_item_legacy_id else None
+        )
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, str((doc or {}).get("client_id") or "").strip())
+        if not target_client_id:
+            return None
+        meeting_legacy_id = str((doc or {}).get("meeting_id") or "").strip()
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id) if meeting_legacy_id else None
+        if meeting_legacy_id and not target_meeting_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "meeting_id": target_meeting_id,
+            "client_id": target_client_id,
+            "title": str((doc or {}).get("title") or "").strip(),
+            "description": (doc or {}).get("description"),
+            "owner": (doc or {}).get("owner"),
+            "owner_type": str((doc or {}).get("owner_type") or "agency"),
+            "due_date": (doc or {}).get("due_date"),
+            "status": str((doc or {}).get("status") or "open"),
+            "priority": str((doc or {}).get("priority") or "medium"),
+            "pushed_to": (doc or {}).get("pushed_to"),
+            "external_id": (doc or {}).get("external_id"),
+            "external_url": (doc or {}).get("external_url"),
+            "last_reminded_at": (doc or {}).get("last_reminded_at"),
+            "reminder_count": _safe_int((doc or {}).get("reminder_count"), 0),
+            "legacy_source_id": action_item_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "mongo"),
+            "is_deleted": False,
+        }
+        if target_action_item_id:
+            result = await self._request(
+                "PATCH",
+                "action_items",
+                params={"id": f"eq.{target_action_item_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "action_items",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        return self._action_item_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+
+    async def soft_delete_action_item(self, tenant_legacy_id: str, action_item_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_action_item_id = await self.resolve_target_action_item_id(tenant_legacy_id, action_item_legacy_id)
+        if not target_action_item_id:
+            return False
+        await self._request(
+            "PATCH",
+            "action_items",
+            params={"id": f"eq.{target_action_item_id}"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def soft_delete_action_items_for_client(self, tenant_legacy_id: str, client_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return False
+        await self._request(
+            "PATCH",
+            "action_items",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def soft_delete_action_items_for_meeting(self, tenant_legacy_id: str, meeting_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+        if not target_tenant_id or not target_meeting_id:
+            return False
+        await self._request(
+            "PATCH",
+            "action_items",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "meeting_id": f"eq.{target_meeting_id}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
     def _integration_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})
         doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or doc.get("platform") or "")

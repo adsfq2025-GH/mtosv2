@@ -486,6 +486,45 @@ async def _allowed_client_ids(ctx) -> Optional[List[str]]:
     return [str(d.get("_id")) for d in (docs or []) if str(d.get("_id") or "").strip()]
 
 
+async def _list_action_item_docs(
+    tenant_id: str,
+    *,
+    client_id: Optional[str] = None,
+    meeting_id: Optional[str] = None,
+    status: Optional[str] = None,
+    owner_type: Optional[str] = None,
+    due_before: Optional[str] = None,
+    due_after: Optional[str] = None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("action_items"):
+        return await bridge.list_action_items(
+            tenant_id,
+            client_legacy_id=client_id,
+            meeting_legacy_id=meeting_id,
+            status=status,
+            owner_type=owner_type,
+            due_before=due_before,
+            due_after=due_after,
+            limit=limit,
+        )
+    q: dict = {"$and": [tenant_scope(tenant_id)]}
+    if client_id:
+        q["$and"].append({"client_id": client_id})
+    if meeting_id:
+        q["$and"].append({"meeting_id": meeting_id})
+    if status:
+        q["$and"].append({"status": status})
+    if owner_type:
+        q["$and"].append({"owner_type": owner_type})
+    if due_before:
+        q["$and"].append({"due_date": {"$lte": due_before}})
+    if due_after:
+        q["$and"].append({"due_date": {"$gte": due_after}})
+    return await db.action_items.find(q).sort("created_at", -1).to_list(limit)
+
+
 async def _bg_publish_clickup_brief(tenant_id: str, meeting_id: str) -> None:
     try:
         m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
@@ -1984,6 +2023,7 @@ async def delete_client(client_id: str, ctx=Depends(get_current_context)):
     if bridge.is_enabled_for("clients"):
         deleted = await bridge.soft_delete_client(ctx.tenant_id, client_id)
         await bridge.soft_delete_meetings_for_client(ctx.tenant_id, client_id)
+        await bridge.soft_delete_action_items_for_client(ctx.tenant_id, client_id)
         if is_mongo_configured():
             await db.clients.delete_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
             await db.meetings.delete_many({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
@@ -2790,11 +2830,24 @@ async def update_meeting(meeting_id: str, patch: MeetingPatch, ctx=Depends(get_c
 @api.delete("/meetings/{meeting_id}")
 async def delete_meeting(meeting_id: str, ctx=Depends(get_current_context)):
     await _require_meeting_access(ctx, meeting_id)
-    res = await db.meetings.delete_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if res.deleted_count == 0:
-        raise HTTPException(404, "Meeting not found")
-    await db.action_items.delete_many({"meeting_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    await db.content_captures.delete_many({"meeting_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("meetings"):
+        deleted = await bridge.soft_delete_meeting(ctx.tenant_id, meeting_id)
+        await bridge.soft_delete_action_items_for_meeting(ctx.tenant_id, meeting_id)
+        if is_mongo_configured():
+            res = await db.meetings.delete_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+            if res.deleted_count == 0 and not deleted:
+                raise HTTPException(404, "Meeting not found")
+            await db.action_items.delete_many({"meeting_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+        elif not deleted:
+            raise HTTPException(404, "Meeting not found")
+    else:
+        res = await db.meetings.delete_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+        if res.deleted_count == 0:
+            raise HTTPException(404, "Meeting not found")
+        await db.action_items.delete_many({"meeting_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    if is_mongo_configured():
+        await db.content_captures.delete_many({"meeting_id": meeting_id, **tenant_scope(ctx.tenant_id)})
     return {"ok": True}
 
 
@@ -3006,7 +3059,15 @@ async def analyze_transcript(meeting_id: str, data: AnalyzeTranscriptIn, ctx=Dep
             due_date=ai_item.get("due_date") if ai_item.get("due_date") not in ("null", None) else None,
             priority=ai_item.get("priority", "medium"),
         )
-        await db.action_items.insert_one(item.to_mongo())
+        bridge = get_runtime_bridge()
+        if bridge.is_enabled_for("action_items"):
+            stored = await bridge.upsert_action_item(ctx.tenant_id, item.to_mongo())
+            if is_mongo_configured():
+                await db.action_items.insert_one(item.to_mongo())
+            if stored:
+                item = ActionItem.from_mongo(stored)
+        else:
+            await db.action_items.insert_one(item.to_mongo())
         created_actions.append(item.model_dump())
     # create content captures
     created_content: List[dict] = []
@@ -3053,7 +3114,7 @@ async def generate_recap(meeting_id: str, data: GenerateRecapIn, ctx=Depends(get
         ok = all((k in fb and isinstance(fb.get(k), int) and 1 <= int(fb.get(k)) <= 5) for k in required)
         if not ok:
             raise HTTPException(400, "Client feedback (Lead Quality, Campaign Quality, Satisfaction, Results) is required for Ads clients before completing the meeting.")
-    actions = await db.action_items.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(ctx.tenant_id)]}).to_list(100)
+    actions = await _list_action_item_docs(ctx.tenant_id, meeting_id=meeting_id, limit=100)
     actions_p = [ActionItem.from_mongo(a).model_dump() for a in actions]
     try:
         recap = await ai.generate_recap(
@@ -3319,7 +3380,15 @@ async def approve_meeting_automation(meeting_id: str, ctx=Depends(get_current_co
             priority=a.get("priority") or "medium",
             owner=meeting.account_manager_name or meeting.account_manager_id,
         )
-        await db.action_items.insert_one(item.to_mongo())
+        bridge = get_runtime_bridge()
+        if bridge.is_enabled_for("action_items"):
+            stored = await bridge.upsert_action_item(ctx.tenant_id, item.to_mongo())
+            if is_mongo_configured():
+                await db.action_items.insert_one(item.to_mongo())
+            if stored:
+                item = ActionItem.from_mongo(stored)
+        else:
+            await db.action_items.insert_one(item.to_mongo())
         created_actions.append(item.model_dump())
 
     created_tickets = []
@@ -3403,24 +3472,21 @@ async def list_actions(
     due_after: Optional[str] = None,
     ctx=Depends(get_current_context),
 ):
-    q: dict = {"$and": [tenant_scope(ctx.tenant_id)]}
     allowed = await _allowed_client_ids(ctx)
-    if allowed is not None:
-        q["$and"].append({"client_id": {"$in": allowed}})
     if client_id:
         await _require_client_access(ctx, client_id)
-        q["$and"].append({"client_id": client_id})
-    if meeting_id:
-        q["$and"].append({"meeting_id": meeting_id})
-    if status:
-        q["$and"].append({"status": status})
-    if owner_type:
-        q["$and"].append({"owner_type": owner_type})
-    if due_before:
-        q["$and"].append({"due_date": {"$lte": due_before}})
-    if due_after:
-        q["$and"].append({"due_date": {"$gte": due_after}})
-    docs = await db.action_items.find(q).sort("created_at", -1).to_list(1000)
+    docs = await _list_action_item_docs(
+        ctx.tenant_id,
+        client_id=client_id,
+        meeting_id=meeting_id,
+        status=status,
+        owner_type=owner_type,
+        due_before=due_before,
+        due_after=due_after,
+        limit=1000,
+    )
+    if allowed is not None:
+        docs = [doc for doc in docs if str((doc or {}).get("client_id") or "") in set(allowed)]
     return [ActionItem.from_mongo(d).model_dump() for d in docs]
 
 
@@ -3435,26 +3501,30 @@ async def action_follow_up(
     upcoming_days = max(1, min(int(upcoming_days or 7), 60))
     upcoming_end = (utcnow().date() + timedelta(days=upcoming_days)).isoformat()
 
-    base: dict = {"$and": [tenant_scope(ctx.tenant_id)]}
     allowed = await _allowed_client_ids(ctx)
-    if allowed is not None:
-        base["$and"].append({"client_id": {"$in": allowed}})
     if client_id:
         await _require_client_access(ctx, client_id)
-        base["$and"].append({"client_id": client_id})
-    if meeting_id:
-        base["$and"].append({"meeting_id": meeting_id})
-
-    active_statuses = ["open", "in_progress", "blocked"]
-    q_open = {"$and": base["$and"] + [{"status": {"$in": active_statuses}}]}
-    docs = await db.action_items.find(q_open).sort("due_date", 1).sort("created_at", -1).to_list(2000)
+    active_statuses = {"open", "in_progress", "blocked"}
+    docs = await _list_action_item_docs(ctx.tenant_id, client_id=client_id, meeting_id=meeting_id, limit=2000)
+    docs = [doc for doc in docs if str((doc or {}).get("status") or "") in active_statuses]
+    docs.sort(key=lambda item: (str(item.get("due_date") or "9999-12-31"), str(item.get("created_at") or "")), reverse=False)
+    if allowed is not None:
+        allowed_set = set(allowed)
+        docs = [doc for doc in docs if str((doc or {}).get("client_id") or "") in allowed_set]
     items = [ActionItem.from_mongo(d).model_dump() for d in docs]
 
     client_ids = {it.get("client_id") for it in items if it.get("client_id")}
     meeting_ids = {it.get("meeting_id") for it in items if it.get("meeting_id")}
 
-    clients_docs = await db.clients.find({"$and": [{"_id": {"$in": list(client_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if client_ids else []
-    meetings_docs = await db.meetings.find({"$and": [{"_id": {"$in": list(meeting_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if meeting_ids else []
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("clients"):
+        clients_docs = [doc for doc in await bridge.list_clients(ctx.tenant_id, limit=5000) if str((doc or {}).get("_id") or "") in client_ids]
+    else:
+        clients_docs = await db.clients.find({"$and": [{"_id": {"$in": list(client_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if client_ids else []
+    if bridge.is_enabled_for("meetings"):
+        meetings_docs = [doc for doc in await bridge.list_meetings(ctx.tenant_id, limit=5000) if str((doc or {}).get("_id") or "") in meeting_ids]
+    else:
+        meetings_docs = await db.meetings.find({"$and": [{"_id": {"$in": list(meeting_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if meeting_ids else []
 
     client_name_by_id = {c.get("_id"): c.get("name") or c.get("company") or "Client" for c in clients_docs}
     meeting_title_by_id = {m.get("_id"): m.get("title") or "Meeting" for m in meetings_docs}
@@ -4084,7 +4154,11 @@ async def get_roadmap(client_id: str, ctx=Depends(get_current_context)):
     items = [it.model_dump() for it in (plan.items or [])]
     action_ids = [str(it.get("action_item_id") or "") for it in items if str(it.get("action_item_id") or "").strip()]
     if action_ids:
-        docs = await db.action_items.find({"$and": [{"_id": {"$in": action_ids}}, tenant_scope(ctx.tenant_id)]}).to_list(2000)
+        bridge = get_runtime_bridge()
+        if bridge.is_enabled_for("action_items"):
+            docs = [doc for doc in await bridge.list_action_items(ctx.tenant_id, limit=2000) if str((doc or {}).get("_id") or "") in set(action_ids)]
+        else:
+            docs = await db.action_items.find({"$and": [{"_id": {"$in": action_ids}}, tenant_scope(ctx.tenant_id)]}).to_list(2000)
         by_id = {d.get("_id"): ActionItem.from_mongo(d).model_dump() for d in docs}
         for it in items:
             aid = str(it.get("action_item_id") or "").strip()
@@ -4226,29 +4300,56 @@ async def patch_roadmap_item(client_id: str, item_id: str, payload: RoadmapItemP
 async def create_action(data: ActionItemIn, ctx=Depends(get_current_context)):
     await _require_client_access(ctx, data.client_id)
     item = ActionItem(tenant_id=ctx.tenant_id, **data.model_dump())
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("action_items"):
+        stored = await bridge.upsert_action_item(ctx.tenant_id, item.to_mongo())
+        if stored:
+            if is_mongo_configured():
+                await db.action_items.insert_one(item.to_mongo())
+            return ActionItem.from_mongo(stored).model_dump()
+        raise HTTPException(503, "Unable to create action item in Supabase")
     await db.action_items.insert_one(item.to_mongo())
     return item.model_dump()
 
 
 @api.patch("/action-items/{item_id}")
 async def update_action(item_id: str, patch: dict, ctx=Depends(get_current_context)):
-    doc0 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    bridge = get_runtime_bridge()
+    doc0 = await bridge.get_action_item(ctx.tenant_id, item_id) if bridge.is_enabled_for("action_items") else None
+    if not doc0 and is_mongo_configured():
+        doc0 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     if not doc0:
         raise HTTPException(404, "Not found")
     await _require_client_access(ctx, str(doc0.get("client_id") or ""))
     patch["updated_at"] = utcnow().isoformat()
-    await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-    doc = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    next_doc = {**dict(doc0 or {}), **dict(patch or {})}
+    if bridge.is_enabled_for("action_items"):
+        doc = await bridge.upsert_action_item(ctx.tenant_id, next_doc)
+        if is_mongo_configured():
+            await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+    else:
+        await db.action_items.update_one({"_id": item_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
+        doc = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     return ActionItem.from_mongo(doc).model_dump()
 
 
 @api.delete("/action-items/{item_id}")
 async def delete_action(item_id: str, ctx=Depends(get_current_context)):
-    doc0 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    bridge = get_runtime_bridge()
+    doc0 = await bridge.get_action_item(ctx.tenant_id, item_id) if bridge.is_enabled_for("action_items") else None
+    if not doc0 and is_mongo_configured():
+        doc0 = await db.action_items.find_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     if not doc0:
         raise HTTPException(404, "Not found")
     await _require_client_access(ctx, str(doc0.get("client_id") or ""))
-    await db.action_items.delete_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+    if bridge.is_enabled_for("action_items"):
+        deleted = await bridge.soft_delete_action_item(ctx.tenant_id, item_id)
+        if is_mongo_configured():
+            await db.action_items.delete_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
+        if not deleted and not is_mongo_configured():
+            raise HTTPException(404, "Not found")
+    else:
+        await db.action_items.delete_one({"_id": item_id, **tenant_scope(ctx.tenant_id)})
     return {"ok": True}
 
 
@@ -4886,12 +4987,23 @@ async def dashboard_overview(ctx=Depends(get_current_context)):
         {"$and": [tenant_scope(ctx.tenant_id), {"created_at": {"$gte": start_30_ts, "$lte": end_30_ts}}]}
     )
 
-    open_action_items = await db.action_items.count_documents(
-        {"$and": [tenant_scope(ctx.tenant_id), {"status": {"$in": ["open", "in_progress"]}}]}
-    )
-    overdue_action_items = await db.action_items.count_documents(
-        {"$and": [tenant_scope(ctx.tenant_id), {"status": {"$in": ["open", "in_progress"]}}, {"due_date": {"$lt": now.date().isoformat()}}]}
-    )
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("action_items"):
+        action_docs = await bridge.list_action_items(ctx.tenant_id, limit=5000)
+        open_action_items = sum(1 for doc in action_docs if str((doc or {}).get("status") or "") in {"open", "in_progress"})
+        overdue_action_items = sum(
+            1
+            for doc in action_docs
+            if str((doc or {}).get("status") or "") in {"open", "in_progress"}
+            and str((doc or {}).get("due_date") or "") < now.date().isoformat()
+        )
+    else:
+        open_action_items = await db.action_items.count_documents(
+            {"$and": [tenant_scope(ctx.tenant_id), {"status": {"$in": ["open", "in_progress"]}}]}
+        )
+        overdue_action_items = await db.action_items.count_documents(
+            {"$and": [tenant_scope(ctx.tenant_id), {"status": {"$in": ["open", "in_progress"]}}, {"due_date": {"$lt": now.date().isoformat()}}]}
+        )
 
     content_captures_total = await db.content_captures.count_documents(tenant_scope(ctx.tenant_id))
     content_pending_routing = await db.content_captures.count_documents(
