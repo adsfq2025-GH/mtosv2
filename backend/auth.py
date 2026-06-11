@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from db import db
 from models import Tenant, TenantMembership, User, UserPublic
+from runtime_bridge import get_runtime_bridge
 
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALG = os.environ.get("JWT_ALG", "HS256")
@@ -38,6 +39,10 @@ async def resolve_tenant_id_from_host(host: str) -> Optional[str]:
     h = _norm_host(host)
     if not h:
         return None
+
+    bridge_tenant_id = await get_runtime_bridge().resolve_tenant_legacy_id_from_host(h)
+    if bridge_tenant_id:
+        return bridge_tenant_id
 
     base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
     if base_domain and h.endswith("." + base_domain):

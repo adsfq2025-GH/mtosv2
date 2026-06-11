@@ -191,6 +191,7 @@ from models import (  # noqa: E402
 )
 from integrations_meta import INTEGRATIONS, list_integrations
 from docs_content import DOCS, get_categories, get_doc, get_docs_summary
+from runtime_bridge import get_runtime_bridge, merge_prefer_bridge
 import ai
 import ai_visibility
 import ai_territory_intelligence
@@ -236,7 +237,8 @@ def _day_bounds(start_date: str, end_date: str) -> tuple[str, str]:
 
 
 async def _require_client_access(ctx, client_id: str) -> dict:
-    doc = await db.clients.find_one({"_id": str(client_id), **tenant_scope(ctx.tenant_id)})
+    bridge_doc = await get_runtime_bridge().get_client(ctx.tenant_id, str(client_id))
+    doc = bridge_doc or await db.clients.find_one({"_id": str(client_id), **tenant_scope(ctx.tenant_id)})
     if not doc:
         raise HTTPException(404, "Client not found")
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
@@ -246,7 +248,8 @@ async def _require_client_access(ctx, client_id: str) -> dict:
 
 
 async def _require_meeting_access(ctx, meeting_id: str) -> dict:
-    doc = await db.meetings.find_one({"_id": str(meeting_id), **tenant_scope(ctx.tenant_id)})
+    bridge_doc = await get_runtime_bridge().get_meeting(ctx.tenant_id, str(meeting_id))
+    doc = bridge_doc or await db.meetings.find_one({"_id": str(meeting_id), **tenant_scope(ctx.tenant_id)})
     if not doc:
         raise HTTPException(404, "Meeting not found")
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
@@ -618,7 +621,13 @@ async def me(user: User = Depends(get_current_user)):
     # #region debug-point D:auth-me
     _dbg_emit("D", "server.py:/auth/me", "auth_me_ok", {"user_id": str(user.id), "email": user.email})
     # #endregion
-    return to_public(user).model_dump()
+    payload = to_public(user).model_dump()
+    profile = await get_runtime_bridge().get_user_profile(user.id)
+    if profile:
+        payload["email"] = profile.get("email") or payload.get("email")
+        payload["name"] = profile.get("name") or payload.get("name")
+        payload["avatar_url"] = profile.get("avatar_url") or payload.get("avatar_url")
+    return payload
 
 
 @api.get("/users")
@@ -1474,7 +1483,9 @@ async def list_clients(ctx=Depends(get_current_context)):
     q = tenant_scope(ctx.tenant_id)
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         q = {"$and": [q, {"account_manager_id": ctx.user.id, "status": "active"}]}
-    docs = await db.clients.find(q).sort("created_at", -1).to_list(1000)
+    mongo_docs = await db.clients.find(q).sort("created_at", -1).to_list(1000)
+    bridge_docs = await get_runtime_bridge().list_clients(ctx.tenant_id, limit=1000)
+    docs = merge_prefer_bridge(mongo_docs, bridge_docs)
     return [Client.from_mongo(d).model_dump() for d in docs]
 
 
@@ -1494,12 +1505,7 @@ async def create_client(data: ClientIn, ctx=Depends(get_current_context)):
 
 @api.get("/clients/{client_id}")
 async def get_client(client_id: str, ctx=Depends(get_current_context)):
-    doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
-    if not doc:
-        raise HTTPException(404, "Client not found")
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
-            raise HTTPException(403, "Forbidden")
+    doc = await _require_client_access(ctx, client_id)
     return Client.from_mongo(doc).model_dump()
 
 
@@ -2101,7 +2107,9 @@ async def list_meetings(client_id: Optional[str] = None, ctx=Depends(get_current
         q["$and"].append({"client_id": client_id})
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         q["$and"].append({"account_manager_id": ctx.user.id})
-    docs = await db.meetings.find(q).sort("created_at", -1).to_list(500)
+    mongo_docs = await db.meetings.find(q).sort("created_at", -1).to_list(500)
+    bridge_docs = await get_runtime_bridge().list_meetings(ctx.tenant_id, limit=500)
+    docs = merge_prefer_bridge(mongo_docs, bridge_docs)
     return [Meeting.from_mongo(d).model_dump() for d in docs]
 
 
@@ -2173,12 +2181,7 @@ async def run_monthly_touch_all(request: Request):
 
 @api.get("/meetings/{meeting_id}")
 async def get_meeting(meeting_id: str, ctx=Depends(get_current_context)):
-    doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not doc:
-        raise HTTPException(404, "Meeting not found")
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        if str(doc.get("account_manager_id") or "") != str(ctx.user.id):
-            raise HTTPException(403, "Forbidden")
+    doc = await _require_meeting_access(ctx, meeting_id)
     m = Meeting.from_mongo(doc)
     try:
         demo_enabled = str(os.environ.get("ENABLE_DEMO_KPI_SNAPSHOT", "") or "").strip().lower() in ("1", "true", "yes", "on")
@@ -3901,6 +3904,33 @@ async def integrations_catalog(_: User = Depends(get_current_user)):
 @api.get("/integrations")
 async def integrations_status(ctx=Depends(get_current_context)):
     docs = await db.integrations.find(tenant_scope(ctx.tenant_id)).to_list(100)
+    bridge_docs = await get_runtime_bridge().list_tenant_integrations(ctx.tenant_id, limit=100)
+    if bridge_docs:
+        bridge_by_platform = {
+            str(doc.get("platform") or "").strip(): dict(doc or {})
+            for doc in bridge_docs
+            if str(doc.get("platform") or "").strip()
+        }
+        merged_docs = []
+        seen_platforms: set[str] = set()
+        for mongo_doc in docs:
+            platform = str((mongo_doc or {}).get("platform") or "").strip()
+            seen_platforms.add(platform)
+            bridge_doc = bridge_by_platform.get(platform)
+            if bridge_doc:
+                merged_docs.append(
+                    {
+                        **dict(mongo_doc or {}),
+                        **bridge_doc,
+                        "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or {}),
+                    }
+                )
+            else:
+                merged_docs.append(mongo_doc)
+        for platform, bridge_doc in bridge_by_platform.items():
+            if platform not in seen_platforms:
+                merged_docs.append(bridge_doc)
+        docs = merged_docs
     by_platform = {d["platform"]: d for d in docs}
     out = []
     for cat in list_integrations():
