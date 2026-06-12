@@ -2244,15 +2244,20 @@ async def clickup_client_sync_status(user_id: str = Query(default=""), ctx=Depen
     if user_id and (ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")):
         target_user_id = user_id
     await _dbg_emit("H1", "status:begin", {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
-    doc = await db.clickup_client_sync_state.find_one({"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
-    if isinstance(doc, dict) and isinstance(doc.get("_id"), ObjectId):
-        doc = {k: v for k, v in doc.items() if k != "_id"}
+    bridge = get_runtime_bridge()
+    doc = await bridge.get_clickup_client_sync_state(ctx.tenant_id, str(target_user_id)) if bridge.is_enabled_for("clickup_sync") else None
+    if not doc and is_mongo_configured():
+        doc = await db.clickup_client_sync_state.find_one({"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
+        if isinstance(doc, dict) and isinstance(doc.get("_id"), ObjectId):
+            doc = {k: v for k, v in doc.items() if k != "_id"}
     state = doc or {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id), "last_success_at": None, "last_error": None}
     await _dbg_emit("H1", "status:ok", {"state": state})
     last_run_id = str((state or {}).get("last_run_id") or "").strip()
     last_run = None
     if last_run_id:
-        last_run = await db.clickup_client_sync_logs.find_one({"_id": last_run_id, "tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
+        last_run = await bridge.get_clickup_client_sync_log(ctx.tenant_id, str(target_user_id), last_run_id) if bridge.is_enabled_for("clickup_sync") else None
+        if not last_run and is_mongo_configured():
+            last_run = await db.clickup_client_sync_logs.find_one({"_id": last_run_id, "tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
         if last_run:
             last_run = {k: v for k, v in last_run.items() if k not in ("tenant_id", "user_id")}
     return {"ok": True, "state": state, "last_run": last_run}
@@ -2282,16 +2287,21 @@ async def clickup_client_sync_now(ctx=Depends(get_current_context)):
         )
         await _dbg_emit("H2", "sync:run:done", {"res": res})
         if res.get("ok"):
-            await db.integrations.update_one(
-                {"tenant_id": ctx.tenant_id, "platform": "clickup"},
-                {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_synced_at": utcnow().isoformat(), "last_error": None, "status": "connected", "updated_at": utcnow().isoformat()}},
-                upsert=True,
+            await clickup_client_sync._save_clickup_integration_metadata(
+                ctx.tenant_id,
+                {
+                    "last_synced_at": utcnow().isoformat(),
+                    "last_error": None,
+                    "status": "connected",
+                },
             )
         else:
-            await db.integrations.update_one(
-                {"tenant_id": ctx.tenant_id, "platform": "clickup"},
-                {"$set": {"tenant_id": ctx.tenant_id, "platform": "clickup", "last_error": res.get("error"), "updated_at": utcnow().isoformat()}},
-                upsert=True,
+            await clickup_client_sync._save_clickup_integration_metadata(
+                ctx.tenant_id,
+                {
+                    "last_error": res.get("error"),
+                    "status": "error",
+                },
             )
         return res
 

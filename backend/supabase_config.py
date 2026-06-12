@@ -5,7 +5,13 @@ from functools import lru_cache
 from typing import Any, Iterable
 
 DEFAULT_RUNTIME_BRIDGE_DOMAINS = ("tenants", "clients", "meetings", "integrations", "profiles")
-SUPPORTED_RUNTIME_BRIDGE_DOMAINS = DEFAULT_RUNTIME_BRIDGE_DOMAINS + ("settings", "domains", "client_bindings", "oauth_accounts")
+SUPPORTED_RUNTIME_BRIDGE_DOMAINS = DEFAULT_RUNTIME_BRIDGE_DOMAINS + (
+    "settings",
+    "domains",
+    "client_bindings",
+    "oauth_accounts",
+    "clickup_sync",
+)
 DEFAULT_RUNTIME_MIRROR_DOMAINS: tuple[str, ...] = ()
 SUPPORTED_RUNTIME_MIRROR_DOMAINS = ("settings", "integrations", "oauth_accounts")
 

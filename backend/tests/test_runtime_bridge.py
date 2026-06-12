@@ -1257,6 +1257,202 @@ def test_list_action_items_maps_related_ids_back_to_legacy_shape():
     assert docs[0]["meeting_id"] == "mongo-meeting-id"
 
 
+def test_list_tenant_client_bindings_maps_client_ids_back_to_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("client_bindings", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "client_integration_bindings":
+            return [
+                {
+                    "id": "binding-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "platform": "clickup_client_health_tracker",
+                    "enabled": True,
+                    "external_ids": {"task_id": "task_123"},
+                    "config": {},
+                }
+            ]
+        if relation == "clients":
+            return [{"id": "supabase-client-id", "legacy_source_id": "mongo-client-id"}]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_tenant_client_bindings("mongo-tenant-id", platform="clickup_client_health_tracker", enabled=True, limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["client_id"] == "mongo-client-id"
+    assert docs[0]["external_ids"]["task_id"] == "task_123"
+
+
+def test_get_clickup_client_sync_state_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("clickup_sync",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_user_id(_: str):
+        return "supabase-user-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "clickup_client_sync_state":
+            return [
+                {
+                    "id": "state-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "user_id": "supabase-user-id",
+                    "running": True,
+                    "last_run_id": "run_123",
+                    "metadata": {"list_id": "list_123"},
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_user_id = fake_resolve_target_user_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.get_clickup_client_sync_state("mongo-tenant-id", "mongo-user-id"))
+
+    assert doc is not None
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["user_id"] == "mongo-user-id"
+    assert doc["last_run_id"] == "run_123"
+    assert doc["metadata"]["list_id"] == "list_123"
+
+
+def test_list_tenants_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tenants",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenants":
+            return [
+                {
+                    "id": "supabase-tenant-id",
+                    "legacy_source_id": "mongo-tenant-id",
+                    "slug": "acme",
+                    "name": "Acme",
+                    "status": "active",
+                    "metadata": {"plan": "pro"},
+                }
+            ]
+        return []
+
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_tenants(status="active", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-tenant-id"
+    assert docs[0]["id"] == "mongo-tenant-id"
+    assert docs[0]["slug"] == "acme"
+    assert docs[0]["metadata"]["plan"] == "pro"
+
+
+def test_create_clickup_client_sync_log_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("clickup_sync",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_user_id(_: str):
+        return "supabase-user-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "clickup_client_sync_logs":
+            return []
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "log-row-id",
+                "tenant_id": "supabase-tenant-id",
+                "user_id": "supabase-user-id",
+                "legacy_source_id": "run_123",
+                "ok": True,
+                "created_count": 1,
+                "updated_count": 2,
+                "paused_count": 3,
+                "assigned_found": 4,
+                "details": {"debug_sample_account_managers": ["Jane"], "debug_sample_custom_field_names": ["Account Manager"]},
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_user_id = fake_resolve_target_user_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.create_clickup_client_sync_log(
+            "mongo-tenant-id",
+            "mongo-user-id",
+            {
+                "run_id": "run_123",
+                "ok": True,
+                "created": 1,
+                "updated": 2,
+                "paused": 3,
+                "assigned_found": 4,
+                "debug_sample_account_managers": ["Jane"],
+                "debug_sample_custom_field_names": ["Account Manager"],
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["run_id"] == "run_123"
+    assert doc["created"] == 1
+    assert doc["updated"] == 2
+    assert captured[0]["relation"] == "clickup_client_sync_logs"
+    assert captured[0]["payload"]["legacy_source_id"] == "run_123"
+
+
 def test_get_user_oauth_account_preserves_legacy_shape():
     bridge = RuntimeBridge(
         {

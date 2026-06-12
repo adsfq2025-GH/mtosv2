@@ -328,6 +328,34 @@ class RuntimeBridge:
         row["metadata"] = dict(row.get("metadata") or {})
         return row
 
+    async def list_tenants(
+        self,
+        *,
+        status: Optional[str] = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("tenants"):
+            return []
+        filters: dict[str, str] = {"is_deleted": "eq.false"}
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status:
+            filters["status"] = f"eq.{normalized_status}"
+        rows = await self._safe_select(
+            "tenants",
+            select="id,legacy_source_id,slug,name,status,subscription_status,subscription_expires_at,trial_ends_at,metadata",
+            filters=filters,
+            order="created_at.asc",
+            limit=limit,
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows or []:
+            doc = dict(row or {})
+            doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+            doc["id"] = doc["_id"]
+            doc["metadata"] = dict(doc.get("metadata") or {})
+            out.append(doc)
+        return out
+
     async def resolve_tenant_legacy_id_from_host(self, host: str) -> Optional[str]:
         if not self.is_enabled_for("tenants"):
             return None
@@ -1984,6 +2012,49 @@ class RuntimeBridge:
             return None
         return self._client_binding_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
 
+    async def list_tenant_client_bindings(
+        self,
+        tenant_legacy_id: str,
+        *,
+        platform: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("client_bindings"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "is_deleted": "eq.false",
+        }
+        normalized_platform = str(platform or "").strip().lower()
+        if normalized_platform:
+            filters["platform"] = f"eq.{normalized_platform}"
+        if enabled is not None:
+            filters["enabled"] = f"eq.{str(bool(enabled)).lower()}"
+        rows = await self._safe_select(
+            "client_integration_bindings",
+            select="*",
+            filters=filters,
+            order="updated_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        client_legacy_by_id = await self._load_client_legacy_map(
+            [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            client_id = str((row or {}).get("client_id") or "").strip()
+            client_legacy_id = client_legacy_by_id.get(client_id) or (client_id if _is_uuid(client_id) else "")
+            if not client_legacy_id:
+                continue
+            out.append(self._client_binding_row_to_doc(row, tenant_legacy_id, client_legacy_id))
+        return out
+
     async def upsert_client_binding(
         self,
         tenant_legacy_id: str,
@@ -2041,6 +2112,203 @@ class RuntimeBridge:
         if not rows:
             return None
         return self._client_binding_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    def _clickup_sync_state_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, user_legacy_id: str) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("id") or f"{tenant_legacy_id}:{user_legacy_id}")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["user_id"] = user_legacy_id
+        doc["metadata"] = dict(doc.get("metadata") or {})
+        for key in ("id", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    def _clickup_sync_log_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, user_legacy_id: str) -> dict[str, Any]:
+        doc = dict(row or {})
+        details = dict(doc.pop("details", {}) or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["user_id"] = user_legacy_id
+        doc["run_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["created"] = _safe_int(doc.pop("created_count", 0), 0)
+        doc["updated"] = _safe_int(doc.pop("updated_count", 0), 0)
+        doc["paused"] = _safe_int(doc.pop("paused_count", 0), 0)
+        doc["assigned_found"] = _safe_int(doc.get("assigned_found"), 0)
+        for key, value in details.items():
+            if key not in doc:
+                doc[key] = value
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def get_clickup_client_sync_state(self, tenant_legacy_id: str, user_legacy_id: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("clickup_sync"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        if not target_tenant_id or not target_user_id:
+            return None
+        rows = await self._safe_select(
+            "clickup_client_sync_state",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._clickup_sync_state_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
+
+    async def upsert_clickup_client_sync_state(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        if not target_tenant_id or not target_user_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "user_id": target_user_id,
+            "running": bool((doc or {}).get("running", False)),
+            "started_at": (doc or {}).get("started_at"),
+            "finished_at": (doc or {}).get("finished_at"),
+            "last_success_at": (doc or {}).get("last_success_at"),
+            "last_error": (doc or {}).get("last_error"),
+            "last_run_id": str((doc or {}).get("last_run_id") or "").strip() or None,
+            "metadata": dict((doc or {}).get("metadata") or {}),
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "clickup_client_sync_state",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            result = await self._request(
+                "PATCH",
+                "clickup_client_sync_state",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "clickup_client_sync_state",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._clickup_sync_state_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
+
+    async def get_clickup_client_sync_log(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        run_legacy_id: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("clickup_sync"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        if not target_tenant_id or not target_user_id or not str(run_legacy_id or "").strip():
+            return None
+        rows = await self._safe_select(
+            "clickup_client_sync_logs",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "legacy_source_id": f"eq.{run_legacy_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._clickup_sync_log_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
+
+    async def create_clickup_client_sync_log(
+        self,
+        tenant_legacy_id: str,
+        user_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_user_id = await self.resolve_target_user_id(user_legacy_id)
+        run_legacy_id = str((doc or {}).get("run_id") or (doc or {}).get("_id") or "").strip()
+        if not target_tenant_id or not target_user_id or not run_legacy_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "user_id": target_user_id,
+            "legacy_source_id": run_legacy_id,
+            "legacy_source_kind": "runtime",
+            "ok": bool((doc or {}).get("ok", False)),
+            "started_at": (doc or {}).get("started_at"),
+            "finished_at": (doc or {}).get("finished_at"),
+            "list_id": (doc or {}).get("list_id"),
+            "list_source": (doc or {}).get("list_source"),
+            "created_count": _safe_int((doc or {}).get("created"), 0),
+            "updated_count": _safe_int((doc or {}).get("updated"), 0),
+            "paused_count": _safe_int((doc or {}).get("paused"), 0),
+            "assigned_found": _safe_int((doc or {}).get("assigned_found"), 0),
+            "error": (doc or {}).get("error"),
+            "details": {
+                "debug_sample_account_managers": list((doc or {}).get("debug_sample_account_managers") or []),
+                "debug_sample_custom_field_names": list((doc or {}).get("debug_sample_custom_field_names") or []),
+            },
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "clickup_client_sync_logs",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "user_id": f"eq.{target_user_id}",
+                "legacy_source_id": f"eq.{run_legacy_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            result = await self._request(
+                "PATCH",
+                "clickup_client_sync_logs",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "clickup_client_sync_logs",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._clickup_sync_log_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
 
     def _user_oauth_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, user_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})

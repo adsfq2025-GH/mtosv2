@@ -8,9 +8,10 @@ import os
 import re
 import httpx
 
-from db import db, new_id, utcnow
+from db import db, is_mongo_configured, new_id, utcnow
 import connectors
 from models import Client, ClientIntegrationBinding
+from runtime_bridge import get_runtime_bridge
 
 
 # region debug-point C0:clickup-sync-core
@@ -44,6 +45,125 @@ def _normalize_clickup_list_id(raw: str) -> str:
     if not nums:
         return s
     return max(nums, key=len)
+
+
+async def _save_clickup_integration_metadata(tenant_id: str, patch: dict[str, Any]) -> Optional[dict]:
+    current = await connectors._get_integration_doc(tenant_id, "clickup") or {
+        "tenant_id": tenant_id,
+        "platform": "clickup",
+        "label": "clickup",
+        "status": "connected",
+        "metadata": {},
+    }
+    next_doc = dict(current or {})
+    next_doc["platform"] = "clickup"
+    next_doc["label"] = str(next_doc.get("label") or "clickup")
+    next_doc["status"] = str(next_doc.get("status") or "connected") or "connected"
+    next_meta = dict(next_doc.get("metadata") or {})
+    top_level_keys = {"label", "status", "last_synced_at", "last_error", "vault_secret_ref", "oauth_connection_ref"}
+    for key, value in dict(patch or {}).items():
+        if key in top_level_keys:
+            next_doc[key] = value
+        else:
+            next_meta[key] = value
+    next_doc["metadata"] = next_meta
+    bridge_doc = None
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("integrations"):
+        bridge_doc = await bridge.upsert_tenant_integration(tenant_id, next_doc)
+    mongo_doc = None
+    if is_mongo_configured():
+        await db.integrations.update_one(
+            {"tenant_id": tenant_id, "platform": "clickup"},
+            {
+                "$set": {
+                    "tenant_id": tenant_id,
+                    "platform": "clickup",
+                    "label": next_doc["label"],
+                    "status": next_doc["status"],
+                    "last_synced_at": next_doc.get("last_synced_at"),
+                    "last_error": next_doc.get("last_error"),
+                    "metadata": next_meta,
+                    "updated_at": utcnow().isoformat(),
+                }
+            },
+            upsert=True,
+        )
+        mongo_doc = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "clickup"})
+    return bridge_doc or mongo_doc
+
+
+async def _write_sync_state(tenant_id: str, user_id: str, patch: dict[str, Any]) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    current = await bridge.get_clickup_client_sync_state(tenant_id, user_id) if bridge.is_enabled_for("clickup_sync") else None
+    next_doc = {
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        **dict(current or {}),
+        **dict(patch or {}),
+    }
+    bridge_doc = None
+    if bridge.is_enabled_for("clickup_sync"):
+        bridge_doc = await bridge.upsert_clickup_client_sync_state(tenant_id, user_id, next_doc)
+    mongo_doc = None
+    if is_mongo_configured():
+        await db.clickup_client_sync_state.update_one(
+            {"tenant_id": tenant_id, "user_id": user_id},
+            {"$set": {"tenant_id": tenant_id, "user_id": user_id, **dict(patch or {})}},
+            upsert=True,
+        )
+        mongo_doc = await db.clickup_client_sync_state.find_one({"tenant_id": tenant_id, "user_id": user_id})
+    return bridge_doc or mongo_doc
+
+
+async def _write_sync_log(tenant_id: str, user_id: str, doc: dict[str, Any]) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    bridge_doc = None
+    if bridge.is_enabled_for("clickup_sync"):
+        bridge_doc = await bridge.create_clickup_client_sync_log(tenant_id, user_id, doc)
+    mongo_doc = None
+    if is_mongo_configured():
+        await db.clickup_client_sync_logs.insert_one({"_id": str((doc or {}).get("run_id") or ""), "tenant_id": tenant_id, "user_id": user_id, **dict(doc or {})})
+        mongo_doc = await db.clickup_client_sync_logs.find_one({"_id": str((doc or {}).get("run_id") or ""), "tenant_id": tenant_id, "user_id": user_id})
+    return bridge_doc or mongo_doc
+
+
+async def _list_clients_for_tenant(tenant_id: str) -> List[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("clients"):
+        return await bridge.list_clients(tenant_id, limit=5000)
+    if not is_mongo_configured():
+        return []
+    return await db.clients.find({"tenant_id": tenant_id}).to_list(5000)
+
+
+async def _list_clickup_bindings_for_tenant(tenant_id: str) -> List[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("client_bindings"):
+        return await bridge.list_tenant_client_bindings(tenant_id, platform="clickup_client_health_tracker", enabled=True, limit=5000)
+    if not is_mongo_configured():
+        return []
+    return await db.client_bindings.find(
+        {"tenant_id": tenant_id, "platform": "clickup_client_health_tracker", "enabled": True}
+    ).to_list(5000)
+
+
+async def _upsert_client_doc(tenant_id: str, doc: dict[str, Any]) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    bridge_doc = None
+    if bridge.is_enabled_for("clients"):
+        bridge_doc = await bridge.upsert_client(tenant_id, doc)
+    mongo_doc = None
+    if is_mongo_configured():
+        client_id = str((doc or {}).get("_id") or "").strip()
+        if client_id:
+            await db.clients.update_one({"_id": client_id, "tenant_id": tenant_id}, {"$set": dict(doc or {})}, upsert=True)
+            mongo_doc = await db.clients.find_one({"_id": client_id, "tenant_id": tenant_id})
+        else:
+            c = Client(**dict(doc or {}))
+            await db.clients.insert_one(c.to_mongo())
+            mongo_doc = c.to_mongo()
+    return bridge_doc or mongo_doc
 
 
 async def _clickup_get(url: str, headers: Dict[str, str], params: Optional[dict] = None, timeout: int = 30) -> Tuple[int, Any, str]:
@@ -158,14 +278,10 @@ async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team
     if forced:
         exists = await _clickup_get_list(forced, headers=headers)
         if exists:
-            await db.integrations.update_one(
-                {"tenant_id": tenant_id, "platform": "clickup"},
-                {"$set": {"metadata.client_health_tracker_list_id": forced, "updated_at": utcnow().isoformat()}},
-                upsert=True,
-            )
+            await _save_clickup_integration_metadata(tenant_id, {"client_health_tracker_list_id": forced})
             return {"ok": True, "list_id": forced, "list": exists, "source": "env"}
         return {"ok": False, "error": "clickup_list_forced_not_accessible", "error_detail": f"CLICKUP_CLIENT_HEALTH_TRACKER_LIST_ID not accessible: {forced_raw}"}
-    integration = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "clickup"})
+    integration = await connectors._get_integration_doc(tenant_id, "clickup")
     cached_raw = str(((integration or {}).get("metadata") or {}).get("client_health_tracker_list_id") or "").strip()
     cached = _normalize_clickup_list_id(cached_raw)
     if cached_raw and not cached:
@@ -174,11 +290,7 @@ async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team
         exists = await _clickup_get_list(cached, headers=headers)
         if exists:
             if cached_raw != cached:
-                await db.integrations.update_one(
-                    {"tenant_id": tenant_id, "platform": "clickup"},
-                    {"$set": {"metadata.client_health_tracker_list_id": cached, "updated_at": utcnow().isoformat()}},
-                    upsert=True,
-                )
+                await _save_clickup_integration_metadata(tenant_id, {"client_health_tracker_list_id": cached})
             return {"ok": True, "list_id": cached, "list": exists, "source": "configured"}
         if cached_raw:
             return {"ok": False, "error": "clickup_list_configured_not_accessible", "error_detail": f"Configured Client Health Tracker List ID not accessible: {cached_raw}"}
@@ -194,11 +306,7 @@ async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team
             if _norm(str(l.get("name") or "")) == wanted:
                 list_id = str(l.get("id") or "").strip()
                 if list_id:
-                    await db.integrations.update_one(
-                        {"tenant_id": tenant_id, "platform": "clickup"},
-                        {"$set": {"metadata.client_health_tracker_list_id": list_id, "updated_at": utcnow().isoformat()}},
-                        upsert=True,
-                    )
+                    await _save_clickup_integration_metadata(tenant_id, {"client_health_tracker_list_id": list_id})
                     return {"ok": True, "list_id": list_id, "list": l, "source": "discovered"}
         folders = await _clickup_list_folders_in_space(sid, headers=headers)
         for f in folders:
@@ -210,11 +318,7 @@ async def resolve_client_health_tracker_list_id(tenant_id: str, token: str, team
                 if _norm(str(l.get("name") or "")) == wanted:
                     list_id = str(l.get("id") or "").strip()
                     if list_id:
-                        await db.integrations.update_one(
-                            {"tenant_id": tenant_id, "platform": "clickup"},
-                            {"$set": {"metadata.client_health_tracker_list_id": list_id, "updated_at": utcnow().isoformat()}},
-                            upsert=True,
-                        )
+                        await _save_clickup_integration_metadata(tenant_id, {"client_health_tracker_list_id": list_id})
                         return {"ok": True, "list_id": list_id, "list": l, "source": "discovered"}
     return {"ok": False, "error": "clickup_list_not_found", "error_detail": "Could not find a ClickUp list named 'Client Health Tracker'."}
 
@@ -348,10 +452,10 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
 
     try:
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "run:begin", {"tenant_id": tenant_id, "user_id": user_id, "user_name": user_name, "user_email": user_email})
-        await db.clickup_client_sync_state.update_one(
-            state_key,
-            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": True, "started_at": started_at, "last_run_id": run_id, "updated_at": started_at}},
-            upsert=True,
+        await _write_sync_state(
+            tenant_id,
+            user_id,
+            {"running": True, "started_at": started_at, "last_run_id": run_id, "updated_at": started_at},
         )
         creds = await connectors.get_credentials(tenant_id, "clickup")
         token = connectors._strip_bearer(str((creds or {}).get("api_token") or ""))
@@ -414,6 +518,27 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
         updated = 0
         paused = 0
         task_ids_seen = set()
+        tenant_clients = await _list_clients_for_tenant(tenant_id)
+        tenant_clients_by_id = {
+            str((doc or {}).get("_id") or ""): dict(doc or {})
+            for doc in tenant_clients
+            if str((doc or {}).get("_id") or "").strip()
+        }
+        tenant_clients_by_company = {
+            _norm(str((doc or {}).get("company") or "")): dict(doc or {})
+            for doc in tenant_clients
+            if _norm(str((doc or {}).get("company") or ""))
+        }
+        tenant_clients_by_website = {
+            _norm(str((doc or {}).get("website") or "")): dict(doc or {})
+            for doc in tenant_clients
+            if _norm(str((doc or {}).get("website") or ""))
+        }
+        binding_by_task_id = {}
+        for binding in await _list_clickup_bindings_for_tenant(tenant_id):
+            task_id = str((((binding or {}).get("external_ids") or {}).get("task_id")) or "").strip()
+            if task_id:
+                binding_by_task_id[task_id] = dict(binding or {})
 
         for t in assigned_tasks:
             task_id = str(t.get("id") or "").strip()
@@ -426,17 +551,15 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             if not company:
                 continue
 
-            binding_doc = await db.client_bindings.find_one(
-                {"tenant_id": tenant_id, "platform": "clickup_client_health_tracker", "external_ids.task_id": task_id}
-            )
+            binding_doc = binding_by_task_id.get(task_id)
             client_doc = None
             if binding_doc:
                 client_id = str(binding_doc.get("client_id") or "").strip()
-                client_doc = await db.clients.find_one({"_id": client_id, "tenant_id": tenant_id})
+                client_doc = tenant_clients_by_id.get(client_id)
             if not client_doc and extracted.get("website"):
-                client_doc = await db.clients.find_one({"tenant_id": tenant_id, "website": {"$regex": f"^{extracted.get('website')}$", "$options": "i"}})
+                client_doc = tenant_clients_by_website.get(_norm(str(extracted.get("website") or "")))
             if not client_doc:
-                client_doc = await db.clients.find_one({"tenant_id": tenant_id, "company": {"$regex": f"^{company}$", "$options": "i"}})
+                client_doc = tenant_clients_by_company.get(_norm(company))
 
             base_crm = (client_doc.get("crm_data") or {}) if client_doc else {}
             patch = {
@@ -462,9 +585,10 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             }
 
             if client_doc:
-                await db.clients.update_one({"_id": client_doc.get("_id"), "tenant_id": tenant_id}, {"$set": patch})
+                next_client = {**dict(client_doc or {}), **patch}
+                stored_client = await _upsert_client_doc(tenant_id, next_client)
                 updated += 1
-                client_id = str(client_doc.get("_id"))
+                client_id = str(((stored_client or next_client) or {}).get("_id") or "")
             else:
                 c = Client(
                     tenant_id=tenant_id,
@@ -479,9 +603,15 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
                     status=patch["status"],
                     crm_data=patch["crm_data"],
                 )
-                await db.clients.insert_one(c.to_mongo())
+                stored_client = await _upsert_client_doc(tenant_id, c.to_mongo())
                 created += 1
-                client_id = c.id
+                client_id = str(((stored_client or c.to_mongo()) or {}).get("_id") or c.id)
+            if client_id:
+                next_client_doc = dict(stored_client or next_client if client_doc else stored_client or c.to_mongo())
+                tenant_clients_by_id[client_id] = next_client_doc
+                tenant_clients_by_company[_norm(company)] = next_client_doc
+                if _norm(str(extracted.get("website") or "")):
+                    tenant_clients_by_website[_norm(str(extracted.get("website") or ""))] = next_client_doc
 
             if not binding_doc:
                 b = ClientIntegrationBinding(
@@ -493,14 +623,14 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
                     config={},
                     updated_at=utcnow().isoformat(),
                 )
-                await db.client_bindings.insert_one(b.to_mongo())
+                binding_doc = await connectors._save_client_binding(tenant_id, client_id, b.to_mongo())
+                if binding_doc:
+                    binding_by_task_id[task_id] = binding_doc
 
             if closed:
                 paused += 1
 
-        stale = await db.client_bindings.find(
-            {"tenant_id": tenant_id, "platform": "clickup_client_health_tracker", "enabled": True}
-        ).to_list(5000)
+        stale = list(binding_by_task_id.values())
         for b in stale:
             task_id = str(((b.get("external_ids") or {}).get("task_id")) or "").strip()
             if not task_id:
@@ -510,15 +640,20 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             client_id = str(b.get("client_id") or "").strip()
             if not client_id:
                 continue
-            cdoc = await db.clients.find_one({"_id": client_id, "tenant_id": tenant_id})
+            cdoc = tenant_clients_by_id.get(client_id)
             if not cdoc:
                 continue
             if str(cdoc.get("account_manager_id") or "") != str(user_id):
                 continue
-            await db.clients.update_one(
-                {"_id": client_id, "tenant_id": tenant_id},
-                {"$set": {"account_manager_id": None, "account_manager_name": None, "status": "paused", "updated_at": utcnow().isoformat()}},
-            )
+            next_client = {
+                **dict(cdoc or {}),
+                "account_manager_id": None,
+                "account_manager_name": None,
+                "status": "paused",
+                "updated_at": utcnow().isoformat(),
+            }
+            stored_client = await _upsert_client_doc(tenant_id, next_client)
+            tenant_clients_by_id[client_id] = dict(stored_client or next_client)
 
         finished_at = utcnow().isoformat()
         out = {
@@ -535,11 +670,19 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             "debug_sample_account_managers": sample_ams[:10],
             "debug_sample_custom_field_names": [s for s in dict.fromkeys(sample_custom_fields) if s][:25],
         }
-        await db.clickup_client_sync_logs.insert_one({"_id": run_id, "tenant_id": tenant_id, "user_id": user_id, **out})
-        await db.clickup_client_sync_state.update_one(
-            state_key,
-            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": False, "started_at": started_at, "finished_at": finished_at, "last_success_at": finished_at, "last_error": None, "last_run_id": run_id, "updated_at": finished_at}},
-            upsert=True,
+        await _write_sync_log(tenant_id, user_id, out)
+        await _write_sync_state(
+            tenant_id,
+            user_id,
+            {
+                "running": False,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "last_success_at": finished_at,
+                "last_error": None,
+                "last_run_id": run_id,
+                "updated_at": finished_at,
+            },
         )
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "run:ok", out)
         return out
@@ -548,21 +691,42 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
         err = str(e)
         out = {"ok": False, "run_id": run_id, "started_at": started_at, "finished_at": finished_at, "error": err}
         await _dbg_emit("H2", "clickup_client_sync:sync_assigned_clients_for_user", "run:err", out)
-        await db.clickup_client_sync_logs.insert_one({"_id": run_id, "tenant_id": tenant_id, "user_id": user_id, **out})
-        await db.clickup_client_sync_state.update_one(
-            state_key,
-            {"$set": {"tenant_id": tenant_id, "user_id": user_id, "running": False, "started_at": started_at, "finished_at": finished_at, "last_error": err, "last_run_id": run_id, "updated_at": finished_at}},
-            upsert=True,
+        await _write_sync_log(tenant_id, user_id, out)
+        await _write_sync_state(
+            tenant_id,
+            user_id,
+            {
+                "running": False,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "last_error": err,
+                "last_run_id": run_id,
+                "updated_at": finished_at,
+            },
         )
         return out
 
 
 async def sync_assigned_clients_for_all_users(tenant_id: str) -> Dict[str, Any]:
-    memberships = await db.tenant_memberships.find({"tenant_id": tenant_id, "status": "active", "role": {"$ne": "viewer"}}).to_list(5000)
-    user_ids = [str(m.get("user_id") or "") for m in memberships if str(m.get("user_id") or "").strip()]
-    if not user_ids:
-        return {"ok": True, "tenant_id": tenant_id, "runs": []}
-    users = await db.users.find({"_id": {"$in": user_ids}, "active": True}).to_list(5000)
+    bridge = get_runtime_bridge()
+    users: List[dict] = []
+    if bridge.is_enabled_for("profiles") and bridge.is_enabled_for("tenants"):
+        profiles = await bridge.list_user_profiles(limit=5000)
+        for profile in profiles:
+            memberships = await bridge.list_user_memberships(str((profile or {}).get("_id") or ""), limit=50)
+            if any(
+                str((membership or {}).get("tenant_id") or "") == str(tenant_id)
+                and str((membership or {}).get("status") or "") == "active"
+                and str((membership or {}).get("role") or "") != "viewer"
+                for membership in memberships
+            ):
+                users.append(profile)
+    else:
+        memberships = await db.tenant_memberships.find({"tenant_id": tenant_id, "status": "active", "role": {"$ne": "viewer"}}).to_list(5000)
+        user_ids = [str(m.get("user_id") or "") for m in memberships if str(m.get("user_id") or "").strip()]
+        if not user_ids:
+            return {"ok": True, "tenant_id": tenant_id, "runs": []}
+        users = await db.users.find({"_id": {"$in": user_ids}, "active": True}).to_list(5000)
     runs = []
     for u in users:
         if str(u.get("role") or "") != "manager":
@@ -572,7 +736,13 @@ async def sync_assigned_clients_for_all_users(tenant_id: str) -> Dict[str, Any]:
 
 
 async def sync_all_tenants() -> Dict[str, Any]:
-    tenants = await db.tenants.find({"status": "active"}).to_list(5000)
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("tenants"):
+        tenants = await bridge.list_tenants(status="active", limit=5000)
+    elif is_mongo_configured():
+        tenants = await db.tenants.find({"status": "active"}).to_list(5000)
+    else:
+        tenants = []
     results = []
     for t in tenants:
         tid = str(t.get("_id") or "").strip()
