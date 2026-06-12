@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import ai_visibility
 import connectors
-from db import db, is_mongo_configured, new_id, utcnow
-from oauth_runtime import has_google_oauth_connection, is_no_mongo_oauth_token_read_enabled
+from db import new_id, utcnow
+from oauth_runtime import has_google_oauth_connection
 from models import ActionItem
 from runtime_bridge import get_runtime_bridge
 
@@ -190,14 +190,8 @@ def _confidence_from_sources(availability: Dict[str, Any]) -> Dict[str, Any]:
 async def _get_ai_visibility_config_doc(tenant_id: str, client_id: str) -> Optional[dict]:
     bridge = get_runtime_bridge()
     if bridge.is_enabled_for("ai_visibility"):
-        doc = await bridge.get_ai_visibility_config_for_client(tenant_id, client_id)
-        if doc:
-            return doc
-        if not is_mongo_configured():
-            return None
-    if not is_mongo_configured():
-        return None
-    return await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, {"tenant_id": tenant_id}]})
+        return await bridge.get_ai_visibility_config_for_client(tenant_id, client_id)
+    return None
 
 
 async def _upsert_ai_visibility_config_doc(tenant_id: str, doc: dict) -> dict:
@@ -206,21 +200,8 @@ async def _upsert_ai_visibility_config_doc(tenant_id: str, doc: dict) -> dict:
         stored = await bridge.upsert_ai_visibility_config(tenant_id, doc)
         if not stored:
             raise RuntimeError("Unable to persist AI visibility config in Supabase")
-        if is_mongo_configured():
-            await db.ai_visibility_configs.update_one(
-                {"_id": str(stored.get("_id") or (doc or {}).get("_id") or ""), "tenant_id": tenant_id},
-                {"$set": dict(stored or {})},
-                upsert=True,
-            )
         return stored
-    if not is_mongo_configured():
-        return dict(doc or {})
-    await db.ai_visibility_configs.update_one(
-        {"_id": str((doc or {}).get("_id") or ""), "tenant_id": tenant_id},
-        {"$set": dict(doc or {})},
-        upsert=True,
-    )
-    return await db.ai_visibility_configs.find_one({"_id": str((doc or {}).get("_id") or ""), "tenant_id": tenant_id}) or dict(doc or {})
+    return dict(doc or {})
 
 
 async def _get_latest_ai_visibility_scan_doc(
@@ -232,22 +213,13 @@ async def _get_latest_ai_visibility_scan_doc(
 ) -> Optional[dict]:
     bridge = get_runtime_bridge()
     if bridge.is_enabled_for("ai_visibility"):
-        doc = await bridge.get_latest_ai_visibility_scan(
+        return await bridge.get_latest_ai_visibility_scan(
             tenant_id,
             config_id,
             client_id,
             exclude_scan_id=exclude_scan_id,
         )
-        if doc:
-            return doc
-        if not is_mongo_configured():
-            return None
-    if not is_mongo_configured():
-        return None
-    query: dict[str, Any] = {"$and": [{"config_id": config_id}, {"tenant_id": tenant_id}, {"client_id": client_id}]}
-    if str(exclude_scan_id or "").strip():
-        query["$and"].append({"scan_id": {"$ne": str(exclude_scan_id)}})
-    return await db.ai_visibility_scans.find_one(query, sort=[("created_at", -1)])
+    return None
 
 
 async def _create_ai_visibility_run_doc(tenant_id: str, doc: dict) -> dict:
@@ -256,12 +228,7 @@ async def _create_ai_visibility_run_doc(tenant_id: str, doc: dict) -> dict:
         stored = await bridge.create_ai_visibility_run(tenant_id, doc)
         if not stored:
             raise RuntimeError("Unable to persist AI visibility run in Supabase")
-        if is_mongo_configured():
-            await db.ai_visibility_runs.insert_one(dict(doc or {}))
         return stored
-    if not is_mongo_configured():
-        return dict(doc or {})
-    await db.ai_visibility_runs.insert_one(dict(doc or {}))
     return dict(doc or {})
 
 
@@ -271,12 +238,7 @@ async def _create_ai_visibility_scan_doc(tenant_id: str, doc: dict) -> dict:
         stored = await bridge.create_ai_visibility_scan(tenant_id, doc)
         if not stored:
             raise RuntimeError("Unable to persist AI visibility scan in Supabase")
-        if is_mongo_configured():
-            await db.ai_visibility_scans.insert_one(dict(doc or {}))
         return stored
-    if not is_mongo_configured():
-        return dict(doc or {})
-    await db.ai_visibility_scans.insert_one(dict(doc or {}))
     return dict(doc or {})
 
 
@@ -292,31 +254,15 @@ async def _apply_ai_territory_client_patch(tenant_id: str, client_doc: dict, ter
         stored = await bridge.upsert_client(tenant_id, next_doc)
         if not stored:
             raise RuntimeError("Unable to persist AI territory client patch in Supabase")
-        if is_mongo_configured():
-            await db.clients.update_one(
-                {"_id": str((client_doc or {}).get("_id") or ""), "tenant_id": tenant_id},
-                {
-                    "$set": {
-                        "crm_data.ai_territory_intelligence": territory_payload,
-                        "updated_at": updated_at,
-                    }
-                },
-            )
         return stored
-    if not is_mongo_configured():
-        return {
-            **dict(client_doc or {}),
-            "crm_data": {
-                **dict((client_doc or {}).get("crm_data") or {}),
-                "ai_territory_intelligence": territory_payload,
-            },
-            "updated_at": updated_at,
-        }
-    await db.clients.update_one(
-        {"_id": str((client_doc or {}).get("_id") or ""), "tenant_id": tenant_id},
-        {"$set": {"crm_data.ai_territory_intelligence": territory_payload, "updated_at": updated_at}},
-    )
-    return await db.clients.find_one({"_id": str((client_doc or {}).get("_id") or ""), "tenant_id": tenant_id})
+    return {
+        **dict(client_doc or {}),
+        "crm_data": {
+            **dict((client_doc or {}).get("crm_data") or {}),
+            "ai_territory_intelligence": territory_payload,
+        },
+        "updated_at": updated_at,
+    }
 
 
 async def _create_ai_territory_events(tenant_id: str, client_id: str, events: List[dict]) -> List[dict]:
@@ -327,12 +273,7 @@ async def _create_ai_territory_events(tenant_id: str, client_id: str, events: Li
         stored = await bridge.create_ai_territory_events(tenant_id, client_id, events)
         if not stored and events:
             raise RuntimeError("Unable to persist AI territory events in Supabase")
-        if is_mongo_configured():
-            await db.ai_territory_events.insert_many(events)
         return stored
-    if not is_mongo_configured():
-        return list(events)
-    await db.ai_territory_events.insert_many(events)
     return list(events)
 
 
@@ -342,12 +283,7 @@ async def _create_ai_territory_action_item(tenant_id: str, item: ActionItem) -> 
         stored = await bridge.upsert_action_item(tenant_id, item.to_mongo())
         if not stored:
             raise RuntimeError("Unable to persist AI territory action item in Supabase")
-        if is_mongo_configured():
-            await db.action_items.insert_one(item.to_mongo())
         return stored
-    if not is_mongo_configured():
-        return item.to_mongo()
-    await db.action_items.insert_one(item.to_mongo())
     return item.to_mongo()
 
 
@@ -355,23 +291,14 @@ async def _pick_google_business_profile_user_id(tenant_id: str, preferred_user_i
     if preferred_user_id:
         if await has_google_oauth_connection(tenant_id, str(preferred_user_id), "google_business_profile"):
             return str(preferred_user_id)
-    if is_no_mongo_oauth_token_read_enabled():
-        bridge_docs = await get_runtime_bridge().list_user_oauth_accounts(
-            tenant_id,
-            provider="google",
-            platform="google_business_profile",
-            limit=1,
-        )
-        if bridge_docs:
-            return str((bridge_docs[0] or {}).get("user_id") or "").strip() or None
-        return None
-    if preferred_user_id:
-        tok = await db.user_oauth_tokens.find_one({"tenant_id": tenant_id, "user_id": str(preferred_user_id), "platform": "google_business_profile"})
-        if tok:
-            return str(preferred_user_id)
-    tok = await db.user_oauth_tokens.find_one({"tenant_id": tenant_id, "platform": "google_business_profile"})
-    if tok:
-        return str(tok.get("user_id") or "")
+    bridge_docs = await get_runtime_bridge().list_user_oauth_accounts(
+        tenant_id,
+        provider="google",
+        platform="google_business_profile",
+        limit=1,
+    )
+    if bridge_docs:
+        return str((bridge_docs[0] or {}).get("user_id") or "").strip() or None
     return None
 
 async def run_ai_territory_scan_for_client(

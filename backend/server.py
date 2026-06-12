@@ -268,38 +268,13 @@ async def _get_tenant_settings_doc(tenant_id: str, *, ensure_exists: bool = Fals
     bridge = get_runtime_bridge()
     bridge_doc = await bridge.get_tenant_settings(tenant_id) if bridge.is_enabled_for("settings") else None
     if bridge_doc:
-        normalized_bridge = _normalize_tenant_settings_doc(tenant_id, bridge_doc)
-        if ensure_exists and is_mongo_configured():
-            await db.tenant_settings.update_one(
-                {"tenant_id": tenant_id},
-                {"$set": normalized_bridge},
-                upsert=True,
-            )
-            stored = await db.tenant_settings.find_one({"tenant_id": tenant_id})
-            return _normalize_tenant_settings_doc(tenant_id, stored or normalized_bridge)
-        return normalized_bridge
-
-    if is_mongo_configured():
-        doc = await db.tenant_settings.find_one({"tenant_id": tenant_id})
-        if doc:
-            return _normalize_tenant_settings_doc(tenant_id, doc)
+        return _normalize_tenant_settings_doc(tenant_id, bridge_doc)
 
     default_doc = _tenant_settings_default_doc(tenant_id)
-    if ensure_exists:
-        if is_mongo_configured():
-            await db.tenant_settings.update_one(
-                {"tenant_id": tenant_id},
-                {"$setOnInsert": default_doc},
-                upsert=True,
-            )
-            return _normalize_tenant_settings_doc(
-                tenant_id,
-                await db.tenant_settings.find_one({"tenant_id": tenant_id}),
-            )
-        if bridge.service_configured:
-            upserted = await bridge.upsert_tenant_settings(tenant_id, default_doc)
-            if upserted:
-                return _normalize_tenant_settings_doc(tenant_id, upserted)
+    if ensure_exists and bridge.service_configured:
+        upserted = await bridge.upsert_tenant_settings(tenant_id, default_doc)
+        if upserted:
+            return _normalize_tenant_settings_doc(tenant_id, upserted)
     return _normalize_tenant_settings_doc(tenant_id, default_doc)
 
 
@@ -322,30 +297,11 @@ async def _write_tenant_settings_patch(
     baseline = await _get_tenant_settings_doc(tenant_id)
     next_doc = _normalize_tenant_settings_doc(tenant_id, {**baseline, **dict(patch or {})})
     bridge = get_runtime_bridge()
-    if bridge.is_enabled_for("settings") and bridge.service_configured:
-        final_doc = _normalize_tenant_settings_doc(tenant_id, next_doc)
-        upserted = await bridge.upsert_tenant_settings(tenant_id, final_doc)
-        if upserted:
-            final_doc = _normalize_tenant_settings_doc(tenant_id, upserted)
-        if is_mongo_configured():
-            await db.tenant_settings.update_one({"tenant_id": tenant_id}, {"$set": final_doc}, upsert=upsert)
-        mirror_status = {"attempted": True, "ok": bool(upserted), "reason": reason, "mode": "supabase_primary"}
-        return {"doc": final_doc, "mirror": mirror_status}
-    if is_mongo_configured():
-        await db.tenant_settings.update_one({"tenant_id": tenant_id}, {"$set": next_doc}, upsert=upsert)
-        stored = await db.tenant_settings.find_one({"tenant_id": tenant_id})
-        final_doc = _normalize_tenant_settings_doc(tenant_id, stored or next_doc)
-        mirror_status = {"attempted": False, "ok": False, "reason": "disabled"}
-        if bridge.is_mirror_enabled_for("settings"):
-            mirror_status = await bridge.safe_mirror_tenant_settings(tenant_id, final_doc, reason=reason)
-        return {"doc": final_doc, "mirror": mirror_status}
     final_doc = _normalize_tenant_settings_doc(tenant_id, next_doc)
-    upserted = await bridge.upsert_tenant_settings(tenant_id, final_doc)
+    upserted = await bridge.upsert_tenant_settings(tenant_id, final_doc) if bridge.service_configured and upsert else None
     if upserted:
         final_doc = _normalize_tenant_settings_doc(tenant_id, upserted)
     mirror_status = {"attempted": bool(upserted), "ok": bool(upserted), "reason": reason, "mode": "supabase_primary"}
-    if bridge.is_mirror_enabled_for("settings"):
-        mirror_status = await bridge.safe_mirror_tenant_settings(tenant_id, final_doc, reason=reason)
     return {"doc": final_doc, "mirror": mirror_status}
 
 
@@ -367,13 +323,7 @@ def _merge_runtime_integration_docs(mongo_doc: Optional[dict[str, Any]], bridge_
 
 async def _get_integration_runtime_doc(tenant_id: str, platform: str) -> Optional[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    bridge_doc = await bridge.get_tenant_integration(tenant_id, platform) if bridge.is_enabled_for("integrations") else None
-    if bridge_doc:
-        return bridge_doc
-    if not is_mongo_configured():
-        return None
-    mongo_doc = await db.integrations.find_one({"$and": [{"platform": platform}, tenant_scope(tenant_id)]})
-    return _merge_runtime_integration_docs(mongo_doc, bridge_doc)
+    return await bridge.get_tenant_integration(tenant_id, platform) if bridge.is_enabled_for("integrations") else None
 
 
 async def _mirror_tenant_integration_doc(tenant_id: str, doc: dict[str, Any], *, reason: str) -> dict[str, Any]:
@@ -426,10 +376,7 @@ async def _soft_delete_user_oauth_account_doc(
 
 async def _require_client_access(ctx, client_id: str) -> dict:
     bridge = get_runtime_bridge()
-    bridge_doc = await bridge.get_client(ctx.tenant_id, str(client_id)) if bridge.is_enabled_for("clients") else None
-    doc = bridge_doc
-    if not doc and is_mongo_configured():
-        doc = await db.clients.find_one({"_id": str(client_id), **tenant_scope(ctx.tenant_id)})
+    doc = await bridge.get_client(ctx.tenant_id, str(client_id)) if bridge.is_enabled_for("clients") else None
     if not doc:
         raise HTTPException(404, "Client not found")
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
@@ -440,10 +387,7 @@ async def _require_client_access(ctx, client_id: str) -> dict:
 
 async def _require_meeting_access(ctx, meeting_id: str) -> dict:
     bridge = get_runtime_bridge()
-    bridge_doc = await bridge.get_meeting(ctx.tenant_id, str(meeting_id)) if bridge.is_enabled_for("meetings") else None
-    doc = bridge_doc
-    if not doc and is_mongo_configured():
-        doc = await db.meetings.find_one({"_id": str(meeting_id), **tenant_scope(ctx.tenant_id)})
+    doc = await bridge.get_meeting(ctx.tenant_id, str(meeting_id)) if bridge.is_enabled_for("meetings") else None
     if not doc:
         raise HTTPException(404, "Meeting not found")
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
@@ -464,7 +408,7 @@ async def _allowed_client_ids(ctx) -> Optional[List[str]]:
             and str((doc or {}).get("status") or "") == "active"
         ]
     else:
-        docs = await db.clients.find({"$and": [tenant_scope(ctx.tenant_id), {"account_manager_id": ctx.user.id}, {"status": "active"}]}).to_list(5000)
+        docs = []
     return [str(d.get("_id")) for d in (docs or []) if str(d.get("_id") or "").strip()]
 
 
@@ -491,28 +435,16 @@ async def _list_action_item_docs(
             due_after=due_after,
             limit=limit,
         )
-    q: dict = {"$and": [tenant_scope(tenant_id)]}
-    if client_id:
-        q["$and"].append({"client_id": client_id})
-    if meeting_id:
-        q["$and"].append({"meeting_id": meeting_id})
-    if status:
-        q["$and"].append({"status": status})
-    if owner_type:
-        q["$and"].append({"owner_type": owner_type})
-    if due_before:
-        q["$and"].append({"due_date": {"$lte": due_before}})
-    if due_after:
-        q["$and"].append({"due_date": {"$gte": due_after}})
-    return await db.action_items.find(q).sort("created_at", -1).to_list(limit)
+    return []
 
 
 async def _bg_publish_clickup_brief(tenant_id: str, meeting_id: str) -> None:
     try:
-        m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
+        bridge = get_runtime_bridge()
+        m_doc = await bridge.get_meeting(tenant_id, meeting_id) if bridge.is_enabled_for("meetings") else None
         if not m_doc:
             return
-        c_doc = await db.clients.find_one({"_id": str(m_doc.get("client_id") or ""), **tenant_scope(tenant_id)})
+        c_doc = await bridge.get_client(tenant_id, str(m_doc.get("client_id") or "")) if bridge.is_enabled_for("clients") else None
         res = await connectors.publish_clickup_meeting_brief(tenant_id, m_doc, c_doc or {})
         if not res.get("ok"):
             return
@@ -520,10 +452,14 @@ async def _bg_publish_clickup_brief(tenant_id: str, meeting_id: str) -> None:
         task_url = str(res.get("url") or "").strip()
         if not task_id:
             return
-        await db.meetings.update_one(
-            {"_id": meeting_id, **tenant_scope(tenant_id)},
-            {"$set": {"clickup_client_book.brief_task_id": task_id, "clickup_client_book.brief_task_url": task_url, "updated_at": utcnow().isoformat()}},
-        )
+        meeting_patch = {**dict(m_doc or {})}
+        clickup_client_book = dict(meeting_patch.get("clickup_client_book") or {})
+        clickup_client_book["brief_task_id"] = task_id
+        clickup_client_book["brief_task_url"] = task_url
+        meeting_patch["clickup_client_book"] = clickup_client_book
+        meeting_patch["updated_at"] = utcnow().isoformat()
+        if bridge.is_enabled_for("meetings"):
+            await bridge.upsert_meeting(tenant_id, meeting_patch)
     except Exception as exc:
         logger.error("clickup brief publish failed: %s", exc)
 
@@ -532,8 +468,6 @@ async def _bg_publish_clickup_summary(tenant_id: str, meeting_id: str) -> None:
     try:
         bridge = get_runtime_bridge()
         m_doc = await bridge.get_meeting(tenant_id, meeting_id) if bridge.is_enabled_for("meetings") else None
-        if not m_doc and is_mongo_configured():
-            m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
         if not m_doc:
             return
         if not str(m_doc.get("recap_email") or "").strip():
@@ -541,16 +475,14 @@ async def _bg_publish_clickup_summary(tenant_id: str, meeting_id: str) -> None:
         if not str(m_doc.get("automation_approved_at") or "").strip():
             return
         c_doc = await bridge.get_client(tenant_id, str(m_doc.get("client_id") or "")) if bridge.is_enabled_for("clients") else None
-        if not c_doc and is_mongo_configured():
-            c_doc = await db.clients.find_one({"_id": str(m_doc.get("client_id") or ""), **tenant_scope(tenant_id)})
         if bridge.is_enabled_for("action_items"):
             actions = await bridge.list_action_items(tenant_id, meeting_legacy_id=meeting_id, limit=500)
         else:
-            actions = await db.action_items.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(tenant_id)]}).to_list(500)
+            actions = []
         if bridge.is_enabled_for("tickets"):
             tickets = await bridge.list_tickets(tenant_id, meeting_legacy_id=meeting_id, limit=500)
         else:
-            tickets = await db.tickets.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(tenant_id)]}).to_list(500)
+            tickets = []
         res = await connectors.publish_clickup_meeting_summary(tenant_id, m_doc, c_doc or {}, actions or [], tickets or [])
         if not res.get("ok"):
             return
@@ -566,11 +498,6 @@ async def _bg_publish_clickup_summary(tenant_id: str, meeting_id: str) -> None:
         meeting_patch["updated_at"] = utcnow().isoformat()
         if bridge.is_enabled_for("meetings"):
             await bridge.upsert_meeting(tenant_id, meeting_patch)
-        elif is_mongo_configured():
-            await db.meetings.update_one(
-                {"_id": meeting_id, **tenant_scope(tenant_id)},
-                {"$set": {"clickup_client_book.summary_task_id": task_id, "clickup_client_book.summary_task_url": task_url, "updated_at": utcnow().isoformat()}},
-            )
     except Exception as exc:
         logger.error("clickup summary publish failed: %s", exc)
 
@@ -579,14 +506,12 @@ async def _bg_publish_clickup_tickets(tenant_id: str, meeting_id: str) -> None:
     try:
         bridge = get_runtime_bridge()
         m_doc = await bridge.get_meeting(tenant_id, meeting_id) if bridge.is_enabled_for("meetings") else None
-        if not m_doc and is_mongo_configured():
-            m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
         if not m_doc:
             return
         if bridge.is_enabled_for("tickets"):
             tickets = await bridge.list_tickets(tenant_id, meeting_legacy_id=meeting_id, limit=1000)
         else:
-            tickets = await db.tickets.find({"$and": [{"meeting_id": meeting_id}, tenant_scope(tenant_id)]}).to_list(1000)
+            tickets = []
         if not tickets:
             return
         res = await connectors.publish_clickup_department_tickets(tenant_id, m_doc, tickets)
@@ -604,18 +529,14 @@ async def _bg_publish_clickup_tickets(tenant_id: str, meeting_id: str) -> None:
                             tenant_id,
                             {**dict(doc0), "external_id": task_id, "external_url": url, "updated_at": utcnow().isoformat()},
                         )
-                elif is_mongo_configured():
-                    await db.tickets.update_one(
-                        {"_id": tid, **tenant_scope(tenant_id)},
-                        {"$set": {"external_id": task_id, "external_url": url, "updated_at": utcnow().isoformat()}},
-                    )
     except Exception as exc:
         logger.error("clickup tickets publish failed: %s", exc)
 
 
 async def _bg_send_client_recap_email(tenant_id: str, meeting_id: str, user_id: str) -> None:
     try:
-        m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(tenant_id)})
+        bridge = get_runtime_bridge()
+        m_doc = await bridge.get_meeting(tenant_id, meeting_id) if bridge.is_enabled_for("meetings") else None
         if not m_doc:
             return
         if str(m_doc.get("recap_sent_at") or "").strip():
@@ -627,17 +548,22 @@ async def _bg_send_client_recap_email(tenant_id: str, meeting_id: str, user_id: 
         if not plain:
             return
         client_id = str(m_doc.get("client_id") or "").strip()
-        c_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(tenant_id)})
+        c_doc = await bridge.get_client(tenant_id, client_id) if bridge.is_enabled_for("clients") else None
         to_addr = str((c_doc or {}).get("email") or "").strip()
         if not to_addr:
             return
         res = await connectors.send_gmail_plain_email(tenant_id, user_id, to_addr, subject, plain)
         if not res.get("ok"):
             return
-        await db.meetings.update_one(
-            {"_id": meeting_id, **tenant_scope(tenant_id)},
-            {"$set": {"recap_subject": subject, "recap_email": plain, "recap_sent_at": utcnow().isoformat(), "updated_at": utcnow().isoformat()}},
-        )
+        meeting_patch = {
+            **dict(m_doc or {}),
+            "recap_subject": subject,
+            "recap_email": plain,
+            "recap_sent_at": utcnow().isoformat(),
+            "updated_at": utcnow().isoformat(),
+        }
+        if bridge.is_enabled_for("meetings"):
+            await bridge.upsert_meeting(tenant_id, meeting_patch)
     except Exception as exc:
         logger.error("gmail recap send failed: %s", exc)
 
@@ -1134,10 +1060,6 @@ async def _get_prompt_template_doc(tenant_id: str, key: str) -> Optional[dict[st
             str(prompt_templates.get(normalized_key) or ""),
             updated_at=str((settings_doc or {}).get("updated_at") or ""),
         )
-    if is_mongo_configured():
-        doc = await db.prompt_templates.find_one({"tenant_id": tenant_id, "key": normalized_key})
-        if doc:
-            return doc
     return None
 
 
@@ -1163,15 +1085,6 @@ async def _write_prompt_template_doc(tenant_id: str, key: str, text: str) -> dic
         next_text,
         updated_at=str((result.get("doc") or {}).get("updated_at") or ""),
     )
-    if is_mongo_configured():
-        await db.prompt_templates.update_one(
-            {"tenant_id": tenant_id, "key": normalized_key},
-            {"$set": {"tenant_id": tenant_id, "key": normalized_key, "text": next_text, "updated_at": final_doc.get("updated_at")}},
-            upsert=True,
-        )
-        mongo_doc = await db.prompt_templates.find_one({"tenant_id": tenant_id, "key": normalized_key})
-        if mongo_doc:
-            return mongo_doc
     return final_doc
 
 
@@ -1192,7 +1105,7 @@ async def put_prompt_template(key: str, data: PromptTemplateIn, ctx=Depends(get_
 
 
 async def _is_internal_tenant_id(tenant_id: str) -> bool:
-    tdoc = await db.tenants.find_one({"_id": tenant_id})
+    tdoc = await get_runtime_bridge().get_tenant(tenant_id)
     tslug = str((tdoc or {}).get("slug") or "")
     internal_slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
     return bool(tslug and internal_slug and tslug == internal_slug)
@@ -1247,7 +1160,7 @@ async def super_grant_ai_visibility(
 ):
     if user.role != "admin":
         raise HTTPException(403, "Admin only")
-    tdoc = await db.tenants.find_one({"_id": tenant_id})
+    tdoc = await get_runtime_bridge().get_tenant(tenant_id)
     if not tdoc:
         raise HTTPException(404, "Tenant not found")
 
@@ -1274,34 +1187,20 @@ async def _get_ai_visibility_config_doc(
     config_id: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    doc = None
-    if bridge.is_enabled_for("ai_visibility"):
-        if str(config_id or "").strip():
-            doc = await bridge.get_ai_visibility_config(tenant_id, str(config_id))
-        elif str(client_id or "").strip():
-            doc = await bridge.get_ai_visibility_config_for_client(tenant_id, str(client_id))
-        if doc:
-            return doc
-        if not is_mongo_configured():
-            return None
-    if not is_mongo_configured():
+    if not bridge.is_enabled_for("ai_visibility"):
         return None
     if str(config_id or "").strip():
-        return await db.ai_visibility_configs.find_one({"_id": str(config_id), **tenant_scope(tenant_id)})
+        return await bridge.get_ai_visibility_config(tenant_id, str(config_id))
     if str(client_id or "").strip():
-        return await db.ai_visibility_configs.find_one({"$and": [{"client_id": str(client_id)}, tenant_scope(tenant_id)]})
+        return await bridge.get_ai_visibility_config_for_client(tenant_id, str(client_id))
     return None
 
 
 async def _list_ai_visibility_configs_docs(tenant_id: str, client_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    if bridge.is_enabled_for("ai_visibility"):
-        docs = await bridge.list_ai_visibility_configs(tenant_id, client_legacy_id=str(client_id), limit=limit)
-        if docs or not is_mongo_configured():
-            return docs
-    if not is_mongo_configured():
+    if not bridge.is_enabled_for("ai_visibility"):
         return []
-    return await db.ai_visibility_configs.find({"$and": [{"client_id": str(client_id)}, tenant_scope(tenant_id)]}).sort("created_at", -1).to_list(limit)
+    return await bridge.list_ai_visibility_configs(tenant_id, client_legacy_id=str(client_id), limit=limit)
 
 
 async def _list_ai_visibility_runs_docs(
@@ -1312,16 +1211,9 @@ async def _list_ai_visibility_runs_docs(
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    if bridge.is_enabled_for("ai_visibility"):
-        docs = await bridge.list_ai_visibility_runs(tenant_id, str(config_id), scan_id=scan_id, limit=limit)
-        if docs or not is_mongo_configured():
-            return docs
-    if not is_mongo_configured():
+    if not bridge.is_enabled_for("ai_visibility"):
         return []
-    q = {"$and": [{"config_id": str(config_id)}, tenant_scope(tenant_id)]}
-    if scan_id:
-        q["$and"].append({"scan_id": str(scan_id)})
-    return await db.ai_visibility_runs.find(q).sort("created_at", -1).to_list(int(limit))
+    return await bridge.list_ai_visibility_runs(tenant_id, str(config_id), scan_id=scan_id, limit=limit)
 
 
 async def _list_ai_visibility_scans_docs(
@@ -1332,21 +1224,14 @@ async def _list_ai_visibility_scans_docs(
     limit: int = 30,
 ) -> list[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    if bridge.is_enabled_for("ai_visibility"):
-        docs = await bridge.list_ai_visibility_scans(
-            tenant_id,
-            str(config_id),
-            client_legacy_id=str(client_id) if client_id else None,
-            limit=limit,
-        )
-        if docs or not is_mongo_configured():
-            return docs
-    if not is_mongo_configured():
+    if not bridge.is_enabled_for("ai_visibility"):
         return []
-    query = {"$and": [{"config_id": str(config_id)}, tenant_scope(tenant_id)]}
-    if client_id:
-        query["$and"].append({"client_id": str(client_id)})
-    return await db.ai_visibility_scans.find(query).sort("created_at", -1).to_list(int(limit))
+    return await bridge.list_ai_visibility_scans(
+        tenant_id,
+        str(config_id),
+        client_legacy_id=str(client_id) if client_id else None,
+        limit=limit,
+    )
 
 
 async def _get_latest_ai_visibility_scan_doc(
@@ -1355,29 +1240,16 @@ async def _get_latest_ai_visibility_scan_doc(
     client_id: str,
 ) -> Optional[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    if bridge.is_enabled_for("ai_visibility"):
-        doc = await bridge.get_latest_ai_visibility_scan(tenant_id, str(config_id), str(client_id))
-        if doc:
-            return doc
-        if not is_mongo_configured():
-            return None
-    if not is_mongo_configured():
+    if not bridge.is_enabled_for("ai_visibility"):
         return None
-    return await db.ai_visibility_scans.find_one(
-        {"$and": [{"config_id": str(config_id)}, {"client_id": str(client_id)}, tenant_scope(tenant_id)]},
-        sort=[("created_at", -1)],
-    )
+    return await bridge.get_latest_ai_visibility_scan(tenant_id, str(config_id), str(client_id))
 
 
 async def _list_ai_territory_events_docs(tenant_id: str, client_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    if bridge.is_enabled_for("ai_visibility"):
-        docs = await bridge.list_ai_territory_events(tenant_id, str(client_id), limit=limit)
-        if docs or not is_mongo_configured():
-            return docs
-    if not is_mongo_configured():
+    if not bridge.is_enabled_for("ai_visibility"):
         return []
-    return await db.ai_territory_events.find({"$and": [{"client_id": str(client_id)}, tenant_scope(tenant_id)]}).sort("created_at", -1).to_list(limit)
+    return await bridge.list_ai_territory_events(tenant_id, str(client_id), limit=limit)
 
 
 @api.get("/ai-visibility/configs")
@@ -1735,14 +1607,11 @@ async def list_white_label_domains(ctx=Depends(get_current_context)):
         raise HTTPException(403, "Admin only")
     bridge = get_runtime_bridge()
     tdoc = await bridge.get_tenant(ctx.tenant_id)
-    if not tdoc and is_mongo_configured():
-        tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
     slug = (tdoc or {}).get("slug") or ""
     base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
     default_subdomain = f"{slug}.{base_domain}" if slug and base_domain else ""
-    mongo_docs = await db.tenant_domains.find({"tenant_id": ctx.tenant_id}).to_list(200) if is_mongo_configured() else []
     bridge_docs = await bridge.list_tenant_domains(ctx.tenant_id, limit=200)
-    docs = merge_prefer_bridge(mongo_docs, bridge_docs, key_field="domain", include_bridge_only=True)
+    docs = bridge_docs
     custom_domains = sorted({str(d.get("domain") or "").strip().lower() for d in (docs or []) if d.get("domain")})
     return {"ok": True, "default_subdomain": default_subdomain, "custom_domains": custom_domains}
 
@@ -1760,20 +1629,10 @@ async def add_white_label_domain(domain: str = Query(...), ctx=Depends(get_curre
     existing_bridge = await bridge.get_tenant_domain(d)
     if existing_bridge and str(existing_bridge.get("tenant_id")) != str(ctx.tenant_id):
         raise HTTPException(409, "Domain already in use by another tenant")
-    if not existing_bridge and is_mongo_configured():
-        existing = await db.tenant_domains.find_one({"domain": d})
-        if existing and str(existing.get("tenant_id")) != str(ctx.tenant_id):
-            raise HTTPException(409, "Domain already in use by another tenant")
     if bridge.is_enabled_for("domains"):
         bridged_doc = await bridge.upsert_tenant_domain(ctx.tenant_id, d)
         if not bridged_doc:
             raise HTTPException(503, "Unable to store domain in Supabase")
-    if is_mongo_configured():
-        await db.tenant_domains.update_one(
-            {"domain": d},
-            {"$set": {"domain": d, "tenant_id": ctx.tenant_id, "updated_at": utcnow().isoformat()}, "$setOnInsert": {"created_at": utcnow().isoformat()}},
-            upsert=True,
-        )
     return {"ok": True}
 
 
@@ -1789,8 +1648,6 @@ async def delete_white_label_domain(domain: str = Query(...), ctx=Depends(get_cu
         deleted = await bridge.delete_tenant_domain(ctx.tenant_id, d)
         if not deleted:
             raise HTTPException(503, "Unable to delete domain from Supabase")
-    if is_mongo_configured():
-        await db.tenant_domains.delete_one({"tenant_id": ctx.tenant_id, "domain": d})
     return {"ok": True}
 
 
@@ -1802,7 +1659,7 @@ async def list_white_label_uploads(ctx=Depends(get_current_context)):
     if bridge.is_enabled_for("tenant_files"):
         docs = await bridge.list_tenant_files(ctx.tenant_id, limit=200)
     else:
-        docs = await db.tenant_files.find({"tenant_id": ctx.tenant_id}).sort("created_at", -1).to_list(200)
+        docs = []
     return [{"id": d.get("_id"), "filename": d.get("filename"), "mime_type": d.get("mime_type"), "size_bytes": d.get("size_bytes"), "created_at": d.get("created_at"), "extracted_chars": d.get("extracted_chars", 0)} for d in docs]
 
 
@@ -1877,10 +1734,8 @@ async def upload_white_label_doc(
     bridge = get_runtime_bridge()
     if bridge.is_enabled_for("tenant_files"):
         await bridge.create_tenant_file(ctx.tenant_id, doc)
-        if is_mongo_configured():
-            await db.tenant_files.insert_one(doc)
     else:
-        await db.tenant_files.insert_one(doc)
+        pass
     return {"ok": True, "file": {"id": file_id, "filename": file.filename, "mime_type": file.content_type, "size_bytes": len(raw), "extracted_chars": len(extracted_text or "")}}
 
 
@@ -1893,7 +1748,7 @@ async def analyze_white_label(ctx=Depends(get_current_context)):
     if bridge.is_enabled_for("tenant_files"):
         files = await bridge.list_tenant_files(ctx.tenant_id, limit=50)
     else:
-        files = await db.tenant_files.find({"tenant_id": ctx.tenant_id}).sort("created_at", -1).to_list(50)
+        files = []
     corpus = "\n\n".join([(f.get("extracted_text") or "") for f in files if (f.get("extracted_text") or "").strip()])[:80_000]
     if not corpus.strip():
         raise HTTPException(400, "No extractable text found in uploads")
@@ -1945,11 +1800,7 @@ async def list_clients(ctx=Depends(get_current_context)):
                 and str((doc or {}).get("status") or "") == "active"
             ]
         return [Client.from_mongo(d).model_dump() for d in docs]
-    q = tenant_scope(ctx.tenant_id)
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        q = {"$and": [q, {"account_manager_id": ctx.user.id, "status": "active"}]}
-    docs = await db.clients.find(q).sort("created_at", -1).to_list(1000)
-    return [Client.from_mongo(d).model_dump() for d in docs]
+    return []
 
 
 @api.post("/clients")
@@ -1962,20 +1813,13 @@ async def create_client(data: ClientIn, ctx=Depends(get_current_context)):
         profile = await bridge.get_user_profile(str(data.account_manager_id))
         if profile:
             am_name = profile.get("name")
-        elif is_mongo_configured():
-            am_doc = await db.users.find_one({"_id": data.account_manager_id})
-            if am_doc:
-                am_name = am_doc.get("name")
     c = Client(tenant_id=ctx.tenant_id, **data.model_dump(), account_manager_name=am_name)
     if bridge.is_enabled_for("clients"):
         stored = await bridge.upsert_client(ctx.tenant_id, c.to_mongo())
         if stored:
-            if is_mongo_configured():
-                await db.clients.insert_one(c.to_mongo())
             return Client.from_mongo(stored).model_dump()
         raise HTTPException(503, "Unable to create client in Supabase")
-    await db.clients.insert_one(c.to_mongo())
-    return c.model_dump()
+    raise HTTPException(503, "Clients runtime is not enabled")
 
 
 @api.get("/clients/{client_id}")
@@ -2063,11 +1907,8 @@ async def generate_client_suggestions(
     next_doc = {**dict(c_doc or {}), **patch}
     if bridge.is_enabled_for("clients"):
         doc2 = await bridge.upsert_client(ctx.tenant_id, next_doc)
-        if is_mongo_configured():
-            await db.clients.update_one({"_id": client_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     else:
-        await db.clients.update_one({"_id": client_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-        doc2 = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+        raise HTTPException(503, "Clients runtime is not enabled")
     c2 = Client.from_mongo(doc2)
     return {
         "client_id": c2.id,
@@ -2087,11 +1928,8 @@ async def update_client(client_id: str, patch: dict, ctx=Depends(get_current_con
     next_doc = {**dict(existing or {}), **dict(patch or {})}
     if bridge.is_enabled_for("clients"):
         doc = await bridge.upsert_client(ctx.tenant_id, next_doc)
-        if is_mongo_configured():
-            await db.clients.update_one({"_id": client_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
     else:
-        await db.clients.update_one({"_id": client_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-        doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+        raise HTTPException(503, "Clients runtime is not enabled")
     return Client.from_mongo(doc).model_dump()
 
 
@@ -2107,19 +1945,10 @@ async def delete_client(client_id: str, ctx=Depends(get_current_context)):
         await bridge.soft_delete_content_captures_for_client(ctx.tenant_id, client_id)
         await bridge.soft_delete_tickets_for_client(ctx.tenant_id, client_id)
         await bridge.soft_delete_qa_scorecards_for_client(ctx.tenant_id, client_id)
-        if is_mongo_configured():
-            await db.clients.delete_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
-            await db.meetings.delete_many({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
-            await db.action_items.delete_many({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
-            await db.content_captures.delete_many({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
         if deleted:
             return {"ok": True}
         raise HTTPException(503, "Unable to delete client in Supabase")
-    await db.clients.delete_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
-    await db.meetings.delete_many({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
-    await db.action_items.delete_many({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
-    await db.content_captures.delete_many({"client_id": client_id, **tenant_scope(ctx.tenant_id)})
-    return {"ok": True}
+    raise HTTPException(503, "Clients runtime is not enabled")
 
 
 @api.get("/clients/{client_id}/bindings")
@@ -2128,8 +1957,7 @@ async def list_client_bindings(client_id: str, ctx=Depends(get_current_context))
     if bridge.is_enabled_for("client_bindings"):
         docs = await bridge.list_client_bindings(ctx.tenant_id, client_id, limit=100)
         return [ClientIntegrationBinding.from_mongo(d).model_dump() for d in docs]
-    docs = await db.client_bindings.find({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]}).to_list(100)
-    return [ClientIntegrationBinding.from_mongo(d).model_dump() for d in docs]
+    return []
 
 
 @api.get("/admin/runtime-bridge/smoke")
@@ -2158,9 +1986,7 @@ async def upsert_client_binding(
         raise HTTPException(403, "Admin only")
     if platform not in INTEGRATIONS:
         raise HTTPException(404, "Unknown integration")
-    existing = await db.client_bindings.find_one(
-        {"$and": [{"client_id": client_id, "platform": platform}, tenant_scope(ctx.tenant_id)]}
-    )
+    bridge = get_runtime_bridge()
     update = {
         "enabled": bool(data.enabled),
         "external_ids": data.external_ids or {},
@@ -2168,22 +1994,21 @@ async def upsert_client_binding(
         "tenant_id": ctx.tenant_id,
         "updated_at": utcnow().isoformat(),
     }
-    if existing:
-        await db.client_bindings.update_one({"_id": existing["_id"]}, {"$set": update})
-        doc = await db.client_bindings.find_one({"_id": existing["_id"]})
-        return ClientIntegrationBinding.from_mongo(doc).model_dump()
     binding = ClientIntegrationBinding(client_id=client_id, platform=platform, **update)
-    await db.client_bindings.insert_one(binding.to_mongo())
-    return binding.model_dump()
+    if not bridge.is_enabled_for("client_bindings"):
+        raise HTTPException(503, "Client bindings runtime is not enabled")
+    stored = await bridge.upsert_client_binding(ctx.tenant_id, client_id, binding.to_mongo())
+    return ClientIntegrationBinding.from_mongo(stored or binding.to_mongo()).model_dump()
 
 
 @api.delete("/clients/{client_id}/bindings/{platform}")
 async def delete_client_binding(client_id: str, platform: str, ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    await db.client_bindings.delete_one(
-        {"$and": [{"client_id": client_id, "platform": platform}, tenant_scope(ctx.tenant_id)]}
-    )
+    bridge = get_runtime_bridge()
+    if not bridge.is_enabled_for("client_bindings"):
+        raise HTTPException(503, "Client bindings runtime is not enabled")
+    await bridge.soft_delete_client_binding(ctx.tenant_id, client_id, platform)
     return {"ok": True}
 
 
@@ -2199,115 +2024,11 @@ async def ghl_contacts_for_import(
     ctx=Depends(get_current_context),
 ):
     raise HTTPException(410, "GoHighLevel contact import has been replaced by ClickUp Client Assignment Sync.")
-    res = await connectors.list_gohighlevel_contacts(ctx.tenant_id, location_id=location_id, query=query, limit=limit)
-    if not res.get("ok"):
-        raise HTTPException(400, res.get("error_detail") or res.get("error") or "GoHighLevel import failed")
-    return res
 
 
 @api.post("/import/gohighlevel/clients")
 async def import_clients_from_gohighlevel(data: ImportGhlClientsIn, ctx=Depends(get_current_context)):
     raise HTTPException(410, "GoHighLevel contact import has been replaced by ClickUp Client Assignment Sync.")
-    location_id = (data.location_id or "").strip()
-    if not location_id:
-        raise HTTPException(400, "Missing location_id")
-
-    selected = data.contacts or []
-    if not selected and data.contact_ids:
-        res = await connectors.list_gohighlevel_contacts(ctx.tenant_id, location_id=location_id, query="", limit=200)
-        if not res.get("ok"):
-            raise HTTPException(400, res.get("error_detail") or res.get("error") or "GoHighLevel import failed")
-        contacts = res.get("contacts") or []
-        wanted = {str(x) for x in (data.contact_ids or [])}
-        selected = [c for c in contacts if str((c or {}).get("id")) in wanted]
-
-    created = []
-    skipped = []
-    for c in selected:
-        contact_id = str((c or {}).get("id") or "").strip()
-        name = str((c or {}).get("name") or "").strip()
-        company = str((c or {}).get("company") or "").strip()
-        if not contact_id or not name or not company:
-            continue
-        detail = await connectors.fetch_gohighlevel_contact_detail(ctx.tenant_id, location_id=location_id, contact_id=contact_id)
-        full_contact = (detail.get("contact") or {}) if detail.get("ok") else {}
-        enriched = connectors._extract_services_products_from_ghl_contact(full_contact) if full_contact else {"services": [], "assigned_products": [], "crm_data": {}}
-        website = (
-            str(full_contact.get("website") or full_contact.get("websiteUrl") or full_contact.get("websiteUri") or (c or {}).get("website") or "").strip()
-            if full_contact
-            else str((c or {}).get("website") or "").strip()
-        )
-        existing = await db.clients.find_one(
-            {"$and": [{"name": {"$regex": f"^{name}$", "$options": "i"}, "company": {"$regex": f"^{company}$", "$options": "i"}}, tenant_scope(ctx.tenant_id)]}
-        )
-        if existing:
-            skipped.append({"contact_id": contact_id, "reason": "already_exists", "client_id": existing.get("_id")})
-            continue
-
-        client_in = ClientIn(
-            name=name,
-            company=company,
-            email=(c or {}).get("email") or None,
-            phone=(c or {}).get("phone") or None,
-            website=website or None,
-            services=enriched.get("services") or [],
-            assigned_products=enriched.get("assigned_products") or [],
-            crm_data=enriched.get("crm_data") or {},
-            account_manager_id=ctx.user.id,
-        )
-        new_client = Client(tenant_id=ctx.tenant_id, **client_in.model_dump(), account_manager_name=ctx.user.name)
-        await db.clients.insert_one(new_client.to_mongo())
-
-        binding = ClientIntegrationBinding(
-            tenant_id=ctx.tenant_id,
-            client_id=new_client.id,
-            platform="gohighlevel",
-            enabled=True,
-            external_ids={"location_id": str(location_id), "contact_id": str(contact_id)},
-            config={},
-            updated_at=utcnow().isoformat(),
-        )
-        await db.client_bindings.insert_one(binding.to_mongo())
-
-        gbp_match = await connectors.find_best_gbp_location_for_client(
-            ctx.tenant_id,
-            user_id=ctx.user.id,
-            company=company,
-            website=website,
-            phone=(c or {}).get("phone") or "",
-        )
-        if gbp_match.get("ok") and gbp_match.get("match"):
-            match = gbp_match.get("match") or {}
-            loc = match.get("location") or {}
-            account_name = str(match.get("account_name") or "").strip()
-            location_name = str(loc.get("name") or "").strip()
-            gbp_data = {
-                "account_name": account_name,
-                "location_name": location_name,
-                "location_title": loc.get("title"),
-                "websiteUri": loc.get("websiteUri"),
-                "phoneNumbers": loc.get("phoneNumbers"),
-                "storefrontAddress": loc.get("storefrontAddress"),
-                "match_score": match.get("match_score"),
-            }
-            await db.clients.update_one(
-                {"_id": new_client.id, **tenant_scope(ctx.tenant_id)},
-                {"$set": {"gbp_data": gbp_data, "updated_at": utcnow().isoformat()}},
-            )
-            if account_name and location_name:
-                gbp_binding = ClientIntegrationBinding(
-                    tenant_id=ctx.tenant_id,
-                    client_id=new_client.id,
-                    platform="google_business_profile",
-                    enabled=True,
-                    external_ids={"account_name": account_name, "location_name": location_name},
-                    config={},
-                    updated_at=utcnow().isoformat(),
-                )
-                await db.client_bindings.insert_one(gbp_binding.to_mongo())
-        created.append(new_client.model_dump())
-
-    return {"ok": True, "created": created, "skipped": skipped}
 
 
 @api.get("/import/clickup/clients/status")
@@ -2329,18 +2050,12 @@ async def clickup_client_sync_status(user_id: str = Query(default=""), ctx=Depen
     await _dbg_emit("H1", "status:begin", {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
     bridge = get_runtime_bridge()
     doc = await bridge.get_clickup_client_sync_state(ctx.tenant_id, str(target_user_id)) if bridge.is_enabled_for("clickup_sync") else None
-    if not doc and is_mongo_configured():
-        doc = await db.clickup_client_sync_state.find_one({"tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
-        if isinstance(doc, dict) and isinstance(doc.get("_id"), ObjectId):
-            doc = {k: v for k, v in doc.items() if k != "_id"}
     state = doc or {"tenant_id": ctx.tenant_id, "user_id": str(target_user_id), "last_success_at": None, "last_error": None}
     await _dbg_emit("H1", "status:ok", {"state": state})
     last_run_id = str((state or {}).get("last_run_id") or "").strip()
     last_run = None
     if last_run_id:
         last_run = await bridge.get_clickup_client_sync_log(ctx.tenant_id, str(target_user_id), last_run_id) if bridge.is_enabled_for("clickup_sync") else None
-        if not last_run and is_mongo_configured():
-            last_run = await db.clickup_client_sync_logs.find_one({"_id": last_run_id, "tenant_id": ctx.tenant_id, "user_id": str(target_user_id)})
         if last_run:
             last_run = {k: v for k, v in last_run.items() if k not in ("tenant_id", "user_id")}
     return {"ok": True, "state": state, "last_run": last_run}
@@ -2527,9 +2242,7 @@ def _pdf_from_lines(title: str, lines: List[str]) -> bytes:
 
 async def _collect_client_comms(client_doc: dict, ctx) -> dict:
     client = Client.from_mongo(client_doc).model_dump()
-    binding = await db.client_bindings.find_one(
-        {"$and": [{"client_id": client.get("id"), "platform": "gohighlevel", "enabled": True}, tenant_scope(ctx.tenant_id)]}
-    )
+    binding = await connectors.get_client_binding(ctx.tenant_id, str(client.get("id") or ""), "gohighlevel")
     location_id = ((binding or {}).get("external_ids") or {}).get("location_id") or ((binding or {}).get("config") or {}).get("location_id")
     contact_id = ((binding or {}).get("external_ids") or {}).get("contact_id") or ((binding or {}).get("config") or {}).get("contact_id")
     if not location_id or not contact_id:
@@ -2565,7 +2278,7 @@ async def _collect_client_comms(client_doc: dict, ctx) -> dict:
 async def export_client_communications_html(client_id: str, ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    doc = await _require_client_access(ctx, client_id)
     if not doc:
         raise HTTPException(404, "Client not found")
     bundle = await _collect_client_comms(doc, ctx)
@@ -2582,7 +2295,7 @@ async def export_client_communications_html(client_id: str, ctx=Depends(get_curr
 async def export_client_communications_pdf(client_id: str, ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
-    doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    doc = await _require_client_access(ctx, client_id)
     if not doc:
         raise HTTPException(404, "Client not found")
     bundle = await _collect_client_comms(doc, ctx)
@@ -2629,14 +2342,7 @@ async def list_meetings(client_id: Optional[str] = None, ctx=Depends(get_current
         if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
             docs = [doc for doc in docs if str((doc or {}).get("account_manager_id") or "") == str(ctx.user.id)]
         return [Meeting.from_mongo(d).model_dump() for d in docs]
-    q = {"$and": [tenant_scope(ctx.tenant_id)]}
-    if client_id:
-        await _require_client_access(ctx, client_id)
-        q["$and"].append({"client_id": client_id})
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        q["$and"].append({"account_manager_id": ctx.user.id})
-    docs = await db.meetings.find(q).sort("created_at", -1).to_list(500)
-    return [Meeting.from_mongo(d).model_dump() for d in docs]
+    return []
 
 
 @api.post("/meetings")
@@ -2658,12 +2364,9 @@ async def create_meeting(data: MeetingIn, ctx=Depends(get_current_context)):
     if bridge.is_enabled_for("meetings"):
         stored = await bridge.upsert_meeting(ctx.tenant_id, m.to_mongo())
         if stored:
-            if is_mongo_configured():
-                await db.meetings.insert_one(m.to_mongo())
             return Meeting.from_mongo(stored).model_dump()
         raise HTTPException(503, "Unable to create meeting in Supabase")
-    await db.meetings.insert_one(m.to_mongo())
-    return m.model_dump()
+    raise HTTPException(503, "Meetings runtime is not enabled")
 
 
 @api.post("/clients/{client_id}/monthly-touch")
@@ -2961,14 +2664,10 @@ async def generate_brief(
     compare_end: str = Query(default=""),
     ctx=Depends(get_current_context),
 ):
-    m_doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
-    if not m_doc:
-        raise HTTPException(404, "Meeting not found")
-    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
-        if str(m_doc.get("account_manager_id") or "") != str(ctx.user.id):
-            raise HTTPException(403, "Forbidden")
+    m_doc = await _require_meeting_access(ctx, meeting_id)
     meeting = Meeting.from_mongo(m_doc)
-    c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
+    bridge = get_runtime_bridge()
+    c_doc = await bridge.get_client(ctx.tenant_id, meeting.client_id) if bridge.is_enabled_for("clients") else None
     client = Client.from_mongo(c_doc) if c_doc else None
     client_d = client.model_dump() if client else {"name": meeting.client_name}
     start_d = _parse_iso_date(start or "") or _default_last_30_days()[0]
@@ -3519,8 +3218,6 @@ async def get_meeting_qa(meeting_id: str, ctx=Depends(get_current_context)):
     await _require_meeting_access(ctx, meeting_id)
     bridge = get_runtime_bridge()
     doc = await bridge.get_latest_qa_scorecard(ctx.tenant_id, meeting_id) if bridge.is_enabled_for("qa_scorecards") else None
-    if not doc and is_mongo_configured():
-        doc = await db.qa_scorecards.find_one({"$and": [{"meeting_id": meeting_id}, tenant_scope(ctx.tenant_id)]}, sort=[("created_at", -1)])
     if not doc:
         return {"ok": True, "scorecard": None}
     return {
@@ -3541,8 +3238,6 @@ async def score_meeting(meeting_id: str, ctx=Depends(get_current_context)):
         raise HTTPException(400, "Missing transcript")
     bridge = get_runtime_bridge()
     c_doc = await bridge.get_client(ctx.tenant_id, meeting.client_id) if bridge.is_enabled_for("clients") else None
-    if not c_doc and is_mongo_configured():
-        c_doc = await db.clients.find_one({"_id": meeting.client_id, **tenant_scope(ctx.tenant_id)})
     client = Client.model_validate(c_doc) if c_doc and bridge.is_enabled_for("clients") else (Client.from_mongo(c_doc) if c_doc else None)
     try:
         scored = await ai.score_meeting_qa(
@@ -3569,17 +3264,11 @@ async def score_meeting(meeting_id: str, ctx=Depends(get_current_context)):
     )
     if bridge.is_enabled_for("qa_scorecards"):
         stored = await bridge.create_qa_scorecard(ctx.tenant_id, card.to_mongo())
-        if is_mongo_configured():
-            await db.qa_scorecards.insert_one(card.to_mongo())
         meeting_patch = {**meeting.model_dump(), "meeting_score": card.total_score, "updated_at": utcnow().isoformat()}
         if bridge.is_enabled_for("meetings"):
             await bridge.upsert_meeting(ctx.tenant_id, meeting_patch)
-        elif is_mongo_configured():
-            await db.meetings.update_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)}, {"$set": {"meeting_score": card.total_score, "updated_at": utcnow().isoformat()}})
         return {"ok": True, "scorecard": QAScorecard.model_validate(stored or card.model_dump()).model_dump()}
-    await db.qa_scorecards.insert_one(card.to_mongo())
-    await db.meetings.update_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)}, {"$set": {"meeting_score": card.total_score, "updated_at": utcnow().isoformat()}})
-    return {"ok": True, "scorecard": card.model_dump()}
+    raise HTTPException(503, "QA runtime is not enabled")
 
 
 # ===================== ACTION ITEMS =====================
@@ -3641,11 +3330,11 @@ async def action_follow_up(
     if bridge.is_enabled_for("clients"):
         clients_docs = [doc for doc in await bridge.list_clients(ctx.tenant_id, limit=5000) if str((doc or {}).get("_id") or "") in client_ids]
     else:
-        clients_docs = await db.clients.find({"$and": [{"_id": {"$in": list(client_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if client_ids else []
+        clients_docs = []
     if bridge.is_enabled_for("meetings"):
         meetings_docs = [doc for doc in await bridge.list_meetings(ctx.tenant_id, limit=5000) if str((doc or {}).get("_id") or "") in meeting_ids]
     else:
-        meetings_docs = await db.meetings.find({"$and": [{"_id": {"$in": list(meeting_ids)}}, tenant_scope(ctx.tenant_id)]}).to_list(500) if meeting_ids else []
+        meetings_docs = []
 
     client_name_by_id = {c.get("_id"): c.get("name") or c.get("company") or "Client" for c in clients_docs}
     meeting_title_by_id = {m.get("_id"): m.get("title") or "Meeting" for m in meetings_docs}
@@ -4687,7 +4376,7 @@ async def integrations_status(ctx=Depends(get_current_context)):
     if bridge.is_enabled_for("integrations"):
         docs = await bridge.list_tenant_integrations(ctx.tenant_id, limit=100)
     else:
-        docs = await db.integrations.find(tenant_scope(ctx.tenant_id)).to_list(100)
+        docs = []
     by_platform = {d["platform"]: d for d in docs}
     out = []
     for cat in list_integrations():
@@ -4719,26 +4408,9 @@ async def integrations_status(ctx=Depends(get_current_context)):
 @api.get("/diagnostics/integrations")
 async def diagnostics_integrations(ctx=Depends(get_current_context)):
     bridge = get_runtime_bridge()
-    mongo_docs = [] if bridge.is_enabled_for("integrations") else await db.integrations.find(tenant_scope(ctx.tenant_id)).to_list(200)
     bridge_docs = await bridge.list_tenant_integrations(ctx.tenant_id, limit=200)
     safe = []
-    seen_platforms: set[str] = set()
-    bridge_by_platform = {
-        str(doc.get("platform") or "").strip(): dict(doc or {})
-        for doc in bridge_docs
-        if str(doc.get("platform") or "").strip()
-    }
-    for mongo_doc in mongo_docs:
-        merged = _merge_runtime_integration_docs(mongo_doc, bridge_by_platform.get(str((mongo_doc or {}).get("platform") or "").strip()))
-        dd = {k: v for k, v in (merged or {}).items() if k not in ("credentials_encrypted",)}
-        if isinstance(dd.get("_id"), ObjectId):
-            dd["_id"] = str(dd["_id"])
-        if dd.get("platform"):
-            seen_platforms.add(str(dd["platform"]))
-        safe.append(dd)
-    for platform, bridge_doc in bridge_by_platform.items():
-        if platform in seen_platforms:
-            continue
+    for bridge_doc in bridge_docs:
         safe.append({k: v for k, v in dict(bridge_doc or {}).items() if k not in ("credentials_encrypted",)})
 
     safe_user_google = []
@@ -4798,11 +4470,11 @@ async def diagnostics_google_oauth(ctx=Depends(get_current_context)):
 
 @api.get("/diagnostics/client/{client_id}")
 async def diagnostics_client(client_id: str, ctx=Depends(get_current_context)):
-    await _require_client_access(ctx, client_id)
-    cdoc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    bridge = get_runtime_bridge()
+    cdoc = await _require_client_access(ctx, client_id)
     if not cdoc:
         raise HTTPException(404, "Client not found")
-    bindings = await db.client_bindings.find({"client_id": client_id, **tenant_scope(ctx.tenant_id)}).to_list(200)
+    bindings = await bridge.list_client_bindings(ctx.tenant_id, client_id, limit=200) if bridge.is_enabled_for("client_bindings") else []
     safe_bindings = []
     for b in bindings:
         bb = dict(b or {})
@@ -4829,7 +4501,8 @@ async def diagnostics_client(client_id: str, ctx=Depends(get_current_context)):
 
 @api.get("/diagnostics/meeting/{meeting_id}")
 async def diagnostics_meeting(meeting_id: str, ctx=Depends(get_current_context)):
-    doc = await db.meetings.find_one({"_id": meeting_id, **tenant_scope(ctx.tenant_id)})
+    bridge = get_runtime_bridge()
+    doc = await bridge.get_meeting(ctx.tenant_id, meeting_id) if bridge.is_enabled_for("meetings") else None
     if not doc:
         raise HTTPException(404, "Meeting not found")
     client_id = str(doc.get("client_id") or "").strip()
@@ -5142,10 +4815,7 @@ async def delete_ghl_location_token(location_id: str = Query(...), ctx=Depends(g
 # ===================== DOCS =====================
 @api.get("/docs")
 async def docs_list(ctx=Depends(get_current_context)):
-    tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
-    tslug = str((tdoc or {}).get("slug") or "")
-    internal_slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
-    is_internal_tenant = bool(tslug and internal_slug and tslug == internal_slug)
+    is_internal_tenant = await _is_internal_tenant_id(ctx.tenant_id)
     is_admin_view = ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")
     sdoc = await _get_tenant_settings_doc(ctx.tenant_id)
     settings = TenantSettings.from_mongo(sdoc)
@@ -5196,10 +4866,7 @@ async def docs_detail(slug: str, ctx=Depends(get_current_context)):
     if not d:
         raise HTTPException(404, "Doc not found")
 
-    tdoc = await db.tenants.find_one({"_id": ctx.tenant_id})
-    tslug = str((tdoc or {}).get("slug") or "")
-    internal_slug = os.environ.get("INTERNAL_WIKI_TENANT_SLUG", "default").strip()
-    is_internal_tenant = bool(tslug and internal_slug and tslug == internal_slug)
+    is_internal_tenant = await _is_internal_tenant_id(ctx.tenant_id)
     is_admin_view = ctx.user.role == "admin" or ctx.tenant_role in ("owner", "admin")
     aud = (d.get("audience") or "tenant").strip().lower()
     if aud == "internal" and not is_internal_tenant:

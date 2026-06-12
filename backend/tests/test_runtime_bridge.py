@@ -813,6 +813,44 @@ def test_upsert_client_binding_posts_supabase_payload():
     assert captured[0]["payload"]["external_ids"]["folder_id"] == "folder_123"
 
 
+def test_soft_delete_client_binding_marks_row_deleted():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("client_bindings",),
+            "supported_domains": ("client_bindings",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "params": kwargs.get("params"), "payload": kwargs.get("payload")})
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    deleted = asyncio.run(bridge.soft_delete_client_binding("mongo-tenant-id", "mongo-client-id", "ClickUp"))
+
+    assert deleted is True
+    assert captured[0]["method"] == "PATCH"
+    assert captured[0]["relation"] == "client_integration_bindings"
+    assert captured[0]["params"]["platform"] == "eq.clickup"
+    assert captured[0]["payload"]["is_deleted"] is True
+
+
 def test_upsert_client_posts_supabase_payload():
     bridge = RuntimeBridge(
         {

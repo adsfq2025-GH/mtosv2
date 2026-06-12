@@ -3314,6 +3314,33 @@ class RuntimeBridge:
             return None
         return self._client_binding_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
 
+    async def soft_delete_client_binding(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        platform: str,
+    ) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        normalized_platform = str(platform or "").strip().lower()
+        if not target_tenant_id or not target_client_id or not normalized_platform:
+            return False
+        await self._request(
+            "PATCH",
+            "client_integration_bindings",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "platform": f"eq.{normalized_platform}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
     def _clickup_sync_state_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, user_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})
         doc["_id"] = str(doc.get("id") or f"{tenant_legacy_id}:{user_legacy_id}")

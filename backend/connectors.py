@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 from fastapi import HTTPException
 
-from db import db, decrypt_secret, encrypt_secret, is_mongo_configured
+from db import decrypt_secret, encrypt_secret
 from oauth_runtime import (
     decode_inline_oauth_connection_ref,
     get_google_oauth_runtime_doc,
@@ -27,21 +27,7 @@ def _tenant_scope(tenant_id: str) -> dict:
 
 
 async def _get_integration_doc(tenant_id: str, platform: str) -> Optional[dict]:
-    mongo_doc = None
-    if is_mongo_configured():
-        mongo_doc = await db.integrations.find_one({"$and": [{"platform": platform}, _tenant_scope(tenant_id)]})
-    bridge_doc = await get_runtime_bridge().get_tenant_integration(tenant_id, platform)
-    if mongo_doc and bridge_doc:
-        return {
-            **dict(mongo_doc or {}),
-            **dict(bridge_doc or {}),
-            "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or {}),
-            "metadata": {
-                **dict((mongo_doc or {}).get("metadata") or {}),
-                **dict((bridge_doc or {}).get("metadata") or {}),
-            },
-        }
-    return bridge_doc or mongo_doc
+    return await get_runtime_bridge().get_tenant_integration(tenant_id, platform)
 
 
 async def get_credentials(tenant_id: str, platform: str) -> Dict[str, str]:
@@ -82,28 +68,13 @@ async def get_client_binding(tenant_id: str, client_id: str, platform: str) -> O
     bridge_doc = await get_runtime_bridge().get_client_binding(tenant_id, client_id, platform)
     if bridge_doc:
         return bridge_doc
-    if not is_mongo_configured():
-        return None
-    return await db.client_bindings.find_one(
-        {"$and": [{"client_id": client_id, "platform": platform, "enabled": True}, _tenant_scope(tenant_id)]}
-    )
+    return None
 
 
 async def _save_client_binding(tenant_id: str, client_id: str, doc: dict) -> Optional[dict]:
-    bridge_doc = None
     if get_runtime_bridge().is_enabled_for("client_bindings"):
-        bridge_doc = await get_runtime_bridge().upsert_client_binding(tenant_id, client_id, doc)
-    mongo_doc = None
-    if is_mongo_configured():
-        await db.client_bindings.update_one(
-            {"$and": [{"client_id": client_id, "platform": str((doc or {}).get("platform") or "").strip().lower()}, _tenant_scope(tenant_id)]},
-            {"$set": dict(doc or {})},
-            upsert=True,
-        )
-        mongo_doc = await db.client_bindings.find_one(
-            {"$and": [{"client_id": client_id, "platform": str((doc or {}).get("platform") or "").strip().lower()}, _tenant_scope(tenant_id)]}
-        )
-    return bridge_doc or mongo_doc
+        return await get_runtime_bridge().upsert_client_binding(tenant_id, client_id, doc)
+    return dict(doc or {})
 
 
 async def _update_client_binding_external_ids(tenant_id: str, client_id: str, platform: str, patch: dict[str, Any]) -> Optional[dict]:
@@ -130,10 +101,7 @@ async def list_gohighlevel_location_token_ids(tenant_id: str) -> list[str]:
     bridge_ids = sorted({str(location_id or "").strip() for location_id in _ghl_location_tokens_map(integration_doc).keys() if str(location_id or "").strip()})
     if bridge_ids:
         return bridge_ids
-    if not is_mongo_configured():
-        return []
-    docs = await db.integration_location_tokens.find({"tenant_id": tenant_id, "platform": "gohighlevel"}).to_list(2000)
-    return sorted({str(d.get("location_id") or "") for d in (docs or []) if d.get("location_id")})
+    return []
 
 
 async def upsert_gohighlevel_location_token(tenant_id: str, location_id: str, token: str) -> bool:
@@ -157,13 +125,7 @@ async def upsert_gohighlevel_location_token(tenant_id: str, location_id: str, to
     bridge_doc = None
     if get_runtime_bridge().is_enabled_for("integrations"):
         bridge_doc = await get_runtime_bridge().upsert_tenant_integration(tenant_id, integration_doc)
-    if is_mongo_configured():
-        await db.integration_location_tokens.update_one(
-            {"tenant_id": tenant_id, "platform": "gohighlevel", "location_id": lid},
-            {"$set": {"token_encrypted": encrypt_secret(tok), "updated_at": _utc_now().isoformat()}},
-            upsert=True,
-        )
-    return bool(bridge_doc or is_mongo_configured())
+    return bool(bridge_doc)
 
 
 async def delete_gohighlevel_location_token(tenant_id: str, location_id: str) -> bool:
@@ -181,9 +143,6 @@ async def delete_gohighlevel_location_token(tenant_id: str, location_id: str) ->
             integration_doc["metadata"] = metadata
             updated_doc = await get_runtime_bridge().upsert_tenant_integration(tenant_id, integration_doc)
             updated_bridge = updated_doc is not None
-    if is_mongo_configured():
-        await db.integration_location_tokens.delete_one({"tenant_id": tenant_id, "platform": "gohighlevel", "location_id": lid})
-        return True
     return updated_bridge
 
 
@@ -1296,14 +1255,7 @@ async def get_gohighlevel_location_token(tenant_id: str, location_id: str) -> st
     encrypted = _ghl_location_tokens_map(integration_doc).get(lid) if integration_doc else None
     if encrypted:
         return _strip_bearer(decrypt_secret(encrypted))
-    if not is_mongo_configured():
-        return ""
-    doc = await db.integration_location_tokens.find_one(
-        {"tenant_id": tenant_id, "platform": "gohighlevel", "location_id": lid}
-    )
-    if not doc:
-        return ""
-    return _strip_bearer(decrypt_secret(doc.get("token_encrypted") or ""))
+    return ""
 
 
 async def _gohighlevel_token_for_location(tenant_id: str, location_id: str) -> str:

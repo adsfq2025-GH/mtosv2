@@ -8,7 +8,7 @@ import os
 import re
 import httpx
 
-from db import db, is_mongo_configured, new_id, utcnow
+from db import new_id, utcnow
 import connectors
 from models import Client, ClientIntegrationBinding
 from runtime_bridge import get_runtime_bridge
@@ -67,30 +67,10 @@ async def _save_clickup_integration_metadata(tenant_id: str, patch: dict[str, An
         else:
             next_meta[key] = value
     next_doc["metadata"] = next_meta
-    bridge_doc = None
     bridge = get_runtime_bridge()
     if bridge.is_enabled_for("integrations"):
-        bridge_doc = await bridge.upsert_tenant_integration(tenant_id, next_doc)
-    mongo_doc = None
-    if is_mongo_configured():
-        await db.integrations.update_one(
-            {"tenant_id": tenant_id, "platform": "clickup"},
-            {
-                "$set": {
-                    "tenant_id": tenant_id,
-                    "platform": "clickup",
-                    "label": next_doc["label"],
-                    "status": next_doc["status"],
-                    "last_synced_at": next_doc.get("last_synced_at"),
-                    "last_error": next_doc.get("last_error"),
-                    "metadata": next_meta,
-                    "updated_at": utcnow().isoformat(),
-                }
-            },
-            upsert=True,
-        )
-        mongo_doc = await db.integrations.find_one({"tenant_id": tenant_id, "platform": "clickup"})
-    return bridge_doc or mongo_doc
+        return await bridge.upsert_tenant_integration(tenant_id, next_doc)
+    return next_doc
 
 
 async def _write_sync_state(tenant_id: str, user_id: str, patch: dict[str, Any]) -> Optional[dict]:
@@ -102,68 +82,37 @@ async def _write_sync_state(tenant_id: str, user_id: str, patch: dict[str, Any])
         **dict(current or {}),
         **dict(patch or {}),
     }
-    bridge_doc = None
     if bridge.is_enabled_for("clickup_sync"):
-        bridge_doc = await bridge.upsert_clickup_client_sync_state(tenant_id, user_id, next_doc)
-    mongo_doc = None
-    if is_mongo_configured():
-        await db.clickup_client_sync_state.update_one(
-            {"tenant_id": tenant_id, "user_id": user_id},
-            {"$set": {"tenant_id": tenant_id, "user_id": user_id, **dict(patch or {})}},
-            upsert=True,
-        )
-        mongo_doc = await db.clickup_client_sync_state.find_one({"tenant_id": tenant_id, "user_id": user_id})
-    return bridge_doc or mongo_doc
+        return await bridge.upsert_clickup_client_sync_state(tenant_id, user_id, next_doc)
+    return next_doc
 
 
 async def _write_sync_log(tenant_id: str, user_id: str, doc: dict[str, Any]) -> Optional[dict]:
     bridge = get_runtime_bridge()
-    bridge_doc = None
     if bridge.is_enabled_for("clickup_sync"):
-        bridge_doc = await bridge.create_clickup_client_sync_log(tenant_id, user_id, doc)
-    mongo_doc = None
-    if is_mongo_configured():
-        await db.clickup_client_sync_logs.insert_one({"_id": str((doc or {}).get("run_id") or ""), "tenant_id": tenant_id, "user_id": user_id, **dict(doc or {})})
-        mongo_doc = await db.clickup_client_sync_logs.find_one({"_id": str((doc or {}).get("run_id") or ""), "tenant_id": tenant_id, "user_id": user_id})
-    return bridge_doc or mongo_doc
+        return await bridge.create_clickup_client_sync_log(tenant_id, user_id, doc)
+    return dict(doc or {})
 
 
 async def _list_clients_for_tenant(tenant_id: str) -> List[dict]:
     bridge = get_runtime_bridge()
     if bridge.is_enabled_for("clients"):
         return await bridge.list_clients(tenant_id, limit=5000)
-    if not is_mongo_configured():
-        return []
-    return await db.clients.find({"tenant_id": tenant_id}).to_list(5000)
+    return []
 
 
 async def _list_clickup_bindings_for_tenant(tenant_id: str) -> List[dict]:
     bridge = get_runtime_bridge()
     if bridge.is_enabled_for("client_bindings"):
         return await bridge.list_tenant_client_bindings(tenant_id, platform="clickup_client_health_tracker", enabled=True, limit=5000)
-    if not is_mongo_configured():
-        return []
-    return await db.client_bindings.find(
-        {"tenant_id": tenant_id, "platform": "clickup_client_health_tracker", "enabled": True}
-    ).to_list(5000)
+    return []
 
 
 async def _upsert_client_doc(tenant_id: str, doc: dict[str, Any]) -> Optional[dict]:
     bridge = get_runtime_bridge()
-    bridge_doc = None
     if bridge.is_enabled_for("clients"):
-        bridge_doc = await bridge.upsert_client(tenant_id, doc)
-    mongo_doc = None
-    if is_mongo_configured():
-        client_id = str((doc or {}).get("_id") or "").strip()
-        if client_id:
-            await db.clients.update_one({"_id": client_id, "tenant_id": tenant_id}, {"$set": dict(doc or {})}, upsert=True)
-            mongo_doc = await db.clients.find_one({"_id": client_id, "tenant_id": tenant_id})
-        else:
-            c = Client(**dict(doc or {}))
-            await db.clients.insert_one(c.to_mongo())
-            mongo_doc = c.to_mongo()
-    return bridge_doc or mongo_doc
+        return await bridge.upsert_client(tenant_id, doc)
+    return dict(doc or {})
 
 
 async def _clickup_get(url: str, headers: Dict[str, str], params: Optional[dict] = None, timeout: int = 30) -> Tuple[int, Any, str]:
@@ -722,11 +671,7 @@ async def sync_assigned_clients_for_all_users(tenant_id: str) -> Dict[str, Any]:
             ):
                 users.append(profile)
     else:
-        memberships = await db.tenant_memberships.find({"tenant_id": tenant_id, "status": "active", "role": {"$ne": "viewer"}}).to_list(5000)
-        user_ids = [str(m.get("user_id") or "") for m in memberships if str(m.get("user_id") or "").strip()]
-        if not user_ids:
-            return {"ok": True, "tenant_id": tenant_id, "runs": []}
-        users = await db.users.find({"_id": {"$in": user_ids}, "active": True}).to_list(5000)
+        users = []
     runs = []
     for u in users:
         if str(u.get("role") or "") != "manager":
@@ -739,8 +684,6 @@ async def sync_all_tenants() -> Dict[str, Any]:
     bridge = get_runtime_bridge()
     if bridge.is_enabled_for("tenants"):
         tenants = await bridge.list_tenants(status="active", limit=5000)
-    elif is_mongo_configured():
-        tenants = await db.tenants.find({"status": "active"}).to_list(5000)
     else:
         tenants = []
     results = []
