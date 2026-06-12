@@ -1515,6 +1515,164 @@ def test_get_ai_visibility_config_for_client_preserves_legacy_shape():
     assert doc["keywords"] == ["roofer near me"]
 
 
+def test_list_ai_visibility_configs_maps_client_ids_back_to_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("ai_visibility", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "ai_visibility_configs":
+            return [
+                {
+                    "id": "config-row-id",
+                    "legacy_source_id": "mongo-config-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "market": "Dallas, TX",
+                    "keywords": ["roofer near me"],
+                    "enabled": True,
+                }
+            ]
+        if relation == "clients":
+            return [{"id": "supabase-client-id", "legacy_source_id": "mongo-client-id"}]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_ai_visibility_configs("mongo-tenant-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-config-id"
+    assert docs[0]["client_id"] == "mongo-client-id"
+
+
+def test_list_ai_visibility_runs_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("ai_visibility", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_ai_visibility_config_id(_: str, __: str):
+        return "supabase-config-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "ai_visibility_runs":
+            return [
+                {
+                    "id": "run-row-id",
+                    "legacy_source_id": "mongo-run-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "config_id": "supabase-config-id",
+                    "client_id": "supabase-client-id",
+                    "scan_id": "scan_run_123",
+                    "keyword": "roofer near me",
+                    "provider": "openai",
+                    "parsed": {"citations": []},
+                    "hit": True,
+                    "hit_brand": True,
+                    "hit_domain": False,
+                }
+            ]
+        if relation == "ai_visibility_configs":
+            return [{"id": "supabase-config-id", "legacy_source_id": "mongo-config-id"}]
+        if relation == "clients":
+            return [{"id": "supabase-client-id", "legacy_source_id": "mongo-client-id"}]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_ai_visibility_config_id = fake_resolve_target_ai_visibility_config_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_ai_visibility_runs("mongo-tenant-id", "mongo-config-id", scan_id="scan_run_123", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-run-id"
+    assert docs[0]["config_id"] == "mongo-config-id"
+    assert docs[0]["client_id"] == "mongo-client-id"
+    assert docs[0]["hit"] is True
+
+
+def test_list_ai_visibility_scans_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("ai_visibility", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_ai_visibility_config_id(_: str, __: str):
+        return "supabase-config-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "ai_visibility_scans":
+            return [
+                {
+                    "id": "scan-row-id",
+                    "legacy_source_id": "mongo-scan-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "config_id": "supabase-config-id",
+                    "client_id": "supabase-client-id",
+                    "providers": {"openai": {"hits": 1, "total": 2}},
+                    "share_of_voice": {"market_rank": 1},
+                    "platform_rankings": {"openai": {"score": 50.0}},
+                    "themes": [],
+                    "competitors": [],
+                    "content_intelligence": {"status": "generated"},
+                    "growth_engine": {"status": "generated"},
+                    "territory_intelligence": {"covered_markets": []},
+                    "data_confidence": {"level": "medium"},
+                    "total": 2,
+                    "hits": 1,
+                    "prompts_total": 2,
+                    "overall_visibility_score": 50.0,
+                }
+            ]
+        if relation == "ai_visibility_configs":
+            return [{"id": "supabase-config-id", "legacy_source_id": "mongo-config-id"}]
+        if relation == "clients":
+            return [{"id": "supabase-client-id", "legacy_source_id": "mongo-client-id"}]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_ai_visibility_config_id = fake_resolve_target_ai_visibility_config_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_ai_visibility_scans("mongo-tenant-id", "mongo-config-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-scan-id"
+    assert docs[0]["config_id"] == "mongo-config-id"
+    assert docs[0]["client_id"] == "mongo-client-id"
+    assert docs[0]["overall_visibility_score"] == 50.0
+
+
 def test_create_ai_visibility_scan_preserves_legacy_shape():
     bridge = RuntimeBridge(
         {

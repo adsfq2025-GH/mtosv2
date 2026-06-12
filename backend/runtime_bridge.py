@@ -2458,6 +2458,54 @@ class RuntimeBridge:
             return None
         return self._ai_visibility_config_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
 
+    async def list_ai_visibility_configs(
+        self,
+        tenant_legacy_id: str,
+        *,
+        client_legacy_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("ai_visibility"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "is_deleted": "eq.false",
+        }
+        client_legacy_by_id: dict[str, str] = {}
+        if client_legacy_id:
+            target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+            if not target_client_id:
+                return []
+            filters["client_id"] = f"eq.{target_client_id}"
+        rows = await self._safe_select(
+            "ai_visibility_configs",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        if client_legacy_id:
+            client_legacy_by_id = {
+                str((rows[0] or {}).get("client_id") or "").strip(): client_legacy_id,
+            }
+        else:
+            client_legacy_by_id = await self._load_client_legacy_map(
+                [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+            )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            target_client_id = str((row or {}).get("client_id") or "").strip()
+            resolved_client_legacy_id = client_legacy_by_id.get(target_client_id) or (target_client_id if _is_uuid(target_client_id) else "")
+            if not resolved_client_legacy_id:
+                continue
+            out.append(self._ai_visibility_config_row_to_doc(row, tenant_legacy_id, resolved_client_legacy_id))
+        return out
+
     async def get_ai_visibility_config(
         self,
         tenant_legacy_id: str,
@@ -2560,6 +2608,58 @@ class RuntimeBridge:
         if not rows:
             return None
         return self._ai_visibility_config_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    async def list_ai_visibility_runs(
+        self,
+        tenant_legacy_id: str,
+        config_legacy_id: str,
+        *,
+        scan_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("ai_visibility"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_config_id = await self.resolve_target_ai_visibility_config_id(tenant_legacy_id, config_legacy_id)
+        if not target_tenant_id or not target_config_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "config_id": f"eq.{target_config_id}",
+            "is_deleted": "eq.false",
+        }
+        normalized_scan_id = str(scan_id or "").strip()
+        if normalized_scan_id:
+            filters["scan_id"] = f"eq.{normalized_scan_id}"
+        rows = await self._safe_select(
+            "ai_visibility_runs",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        config_legacy_map = await self._load_ai_visibility_config_legacy_map([target_config_id])
+        client_legacy_by_id = await self._load_client_legacy_map(
+            [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+        )
+        resolved_config_legacy_id = config_legacy_map.get(target_config_id) or config_legacy_id
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            target_client_id = str((row or {}).get("client_id") or "").strip()
+            resolved_client_legacy_id = client_legacy_by_id.get(target_client_id) or (target_client_id if _is_uuid(target_client_id) else "")
+            if not resolved_client_legacy_id:
+                continue
+            out.append(
+                self._ai_visibility_run_row_to_doc(
+                    row,
+                    tenant_legacy_id,
+                    resolved_client_legacy_id,
+                    resolved_config_legacy_id,
+                )
+            )
+        return out
 
     async def create_ai_visibility_run(
         self,
@@ -2695,6 +2795,64 @@ class RuntimeBridge:
         if not rows:
             return None
         return self._ai_visibility_scan_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id, config_legacy_id)
+
+    async def list_ai_visibility_scans(
+        self,
+        tenant_legacy_id: str,
+        config_legacy_id: str,
+        *,
+        client_legacy_id: Optional[str] = None,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("ai_visibility"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_config_id = await self.resolve_target_ai_visibility_config_id(tenant_legacy_id, config_legacy_id)
+        if not target_tenant_id or not target_config_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "config_id": f"eq.{target_config_id}",
+            "is_deleted": "eq.false",
+        }
+        if client_legacy_id:
+            target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+            if not target_client_id:
+                return []
+            filters["client_id"] = f"eq.{target_client_id}"
+        rows = await self._safe_select(
+            "ai_visibility_scans",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        config_legacy_map = await self._load_ai_visibility_config_legacy_map([target_config_id])
+        client_legacy_by_id = (
+            {str((rows[0] or {}).get("client_id") or "").strip(): client_legacy_id}
+            if client_legacy_id
+            else await self._load_client_legacy_map(
+                [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+            )
+        )
+        resolved_config_legacy_id = config_legacy_map.get(target_config_id) or config_legacy_id
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            target_client_id = str((row or {}).get("client_id") or "").strip()
+            resolved_client_legacy_id = client_legacy_by_id.get(target_client_id) or (target_client_id if _is_uuid(target_client_id) else "")
+            if not resolved_client_legacy_id:
+                continue
+            out.append(
+                self._ai_visibility_scan_row_to_doc(
+                    row,
+                    tenant_legacy_id,
+                    resolved_client_legacy_id,
+                    resolved_config_legacy_id,
+                )
+            )
+        return out
 
     async def list_ai_territory_events(
         self,

@@ -1331,13 +1331,126 @@ async def super_grant_ai_visibility(
     return {"ok": True}
 
 
+async def _get_ai_visibility_config_doc(
+    tenant_id: str,
+    *,
+    client_id: Optional[str] = None,
+    config_id: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    bridge = get_runtime_bridge()
+    doc = None
+    if bridge.is_enabled_for("ai_visibility"):
+        if str(config_id or "").strip():
+            doc = await bridge.get_ai_visibility_config(tenant_id, str(config_id))
+        elif str(client_id or "").strip():
+            doc = await bridge.get_ai_visibility_config_for_client(tenant_id, str(client_id))
+        if doc:
+            return doc
+        if not is_mongo_configured():
+            return None
+    if not is_mongo_configured():
+        return None
+    if str(config_id or "").strip():
+        return await db.ai_visibility_configs.find_one({"_id": str(config_id), **tenant_scope(tenant_id)})
+    if str(client_id or "").strip():
+        return await db.ai_visibility_configs.find_one({"$and": [{"client_id": str(client_id)}, tenant_scope(tenant_id)]})
+    return None
+
+
+async def _list_ai_visibility_configs_docs(tenant_id: str, client_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        docs = await bridge.list_ai_visibility_configs(tenant_id, client_legacy_id=str(client_id), limit=limit)
+        if docs or not is_mongo_configured():
+            return docs
+    if not is_mongo_configured():
+        return []
+    return await db.ai_visibility_configs.find({"$and": [{"client_id": str(client_id)}, tenant_scope(tenant_id)]}).sort("created_at", -1).to_list(limit)
+
+
+async def _list_ai_visibility_runs_docs(
+    tenant_id: str,
+    config_id: str,
+    *,
+    scan_id: Optional[str] = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        docs = await bridge.list_ai_visibility_runs(tenant_id, str(config_id), scan_id=scan_id, limit=limit)
+        if docs or not is_mongo_configured():
+            return docs
+    if not is_mongo_configured():
+        return []
+    q = {"$and": [{"config_id": str(config_id)}, tenant_scope(tenant_id)]}
+    if scan_id:
+        q["$and"].append({"scan_id": str(scan_id)})
+    return await db.ai_visibility_runs.find(q).sort("created_at", -1).to_list(int(limit))
+
+
+async def _list_ai_visibility_scans_docs(
+    tenant_id: str,
+    config_id: str,
+    *,
+    client_id: Optional[str] = None,
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        docs = await bridge.list_ai_visibility_scans(
+            tenant_id,
+            str(config_id),
+            client_legacy_id=str(client_id) if client_id else None,
+            limit=limit,
+        )
+        if docs or not is_mongo_configured():
+            return docs
+    if not is_mongo_configured():
+        return []
+    query = {"$and": [{"config_id": str(config_id)}, tenant_scope(tenant_id)]}
+    if client_id:
+        query["$and"].append({"client_id": str(client_id)})
+    return await db.ai_visibility_scans.find(query).sort("created_at", -1).to_list(int(limit))
+
+
+async def _get_latest_ai_visibility_scan_doc(
+    tenant_id: str,
+    config_id: str,
+    client_id: str,
+) -> Optional[dict[str, Any]]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        doc = await bridge.get_latest_ai_visibility_scan(tenant_id, str(config_id), str(client_id))
+        if doc:
+            return doc
+        if not is_mongo_configured():
+            return None
+    if not is_mongo_configured():
+        return None
+    return await db.ai_visibility_scans.find_one(
+        {"$and": [{"config_id": str(config_id)}, {"client_id": str(client_id)}, tenant_scope(tenant_id)]},
+        sort=[("created_at", -1)],
+    )
+
+
+async def _list_ai_territory_events_docs(tenant_id: str, client_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        docs = await bridge.list_ai_territory_events(tenant_id, str(client_id), limit=limit)
+        if docs or not is_mongo_configured():
+            return docs
+    if not is_mongo_configured():
+        return []
+    return await db.ai_territory_events.find({"$and": [{"client_id": str(client_id)}, tenant_scope(tenant_id)]}).sort("created_at", -1).to_list(limit)
+
+
 @api.get("/ai-visibility/configs")
 async def list_ai_visibility_configs(
     client_id: str = Query(...),
     ctx=Depends(_require_ai_visibility),
 ):
-    docs = await db.ai_visibility_configs.find({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(200)
-    client_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
+    docs = await _list_ai_visibility_configs_docs(ctx.tenant_id, client_id, limit=200)
+    client_doc = await _require_client_access(ctx, client_id)
     client_obj = client_doc or {}
     out = []
     for d in docs or []:
@@ -1356,13 +1469,11 @@ async def create_ai_visibility_config(
     client_id: str = Query(...),
     ctx=Depends(_require_ai_visibility),
 ):
-    existing = await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]})
+    existing = await _get_ai_visibility_config_doc(ctx.tenant_id, client_id=client_id)
     if existing:
         return {"ok": True, "config": AiVisibilityConfig.from_mongo(existing).model_dump()}
 
-    client_doc = await db.clients.find_one({"_id": client_id, **tenant_scope(ctx.tenant_id)})
-    if not client_doc:
-        raise HTTPException(404, "Client not found")
+    client_doc = await _require_client_access(ctx, client_id)
 
     intel = await ai_visibility.generate_prompt_intelligence(client_doc)
     cfg = AiVisibilityConfig(
@@ -1375,8 +1486,12 @@ async def create_ai_visibility_config(
         domain_override=None,
         enabled=True,
     )
-    await db.ai_visibility_configs.insert_one(cfg.to_mongo())
-    return {"ok": True, "config": cfg.model_dump(), "prompt_intelligence": {"themes": intel.get("themes") or [], "prompts_total": intel.get("prompts_total") or 0}}
+    stored = await ai_territory_intelligence._upsert_ai_visibility_config_doc(ctx.tenant_id, cfg.to_mongo())
+    return {
+        "ok": True,
+        "config": AiVisibilityConfig.from_mongo(stored).model_dump(),
+        "prompt_intelligence": {"themes": intel.get("themes") or [], "prompts_total": intel.get("prompts_total") or 0},
+    }
 
 
 @api.patch("/ai-visibility/configs/{config_id}")
@@ -1385,11 +1500,11 @@ async def update_ai_visibility_config(
     data: Dict[str, Any] = Body(default_factory=dict),
     ctx=Depends(_require_ai_visibility),
 ):
-    cfg_doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+    cfg_doc = await _get_ai_visibility_config_doc(ctx.tenant_id, config_id=config_id)
     if not cfg_doc:
         raise HTTPException(404, "Config not found")
     cfg = AiVisibilityConfig.from_mongo(cfg_doc)
-    client_doc = await db.clients.find_one({"_id": cfg.client_id, **tenant_scope(ctx.tenant_id)})
+    client_doc = await _require_client_access(ctx, cfg.client_id)
     if not isinstance(data, dict):
         raise HTTPException(400, "Invalid payload")
 
@@ -1398,8 +1513,10 @@ async def update_ai_visibility_config(
     if not data:
         intel = await ai_visibility.generate_prompt_intelligence(client_doc or {})
         patch["market"] = str(intel.get("market") or "").strip()
-        await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-        doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+        doc = await ai_territory_intelligence._upsert_ai_visibility_config_doc(
+            ctx.tenant_id,
+            {**dict(cfg_doc or {}), **patch},
+        )
         return {
             "ok": True,
             "config": AiVisibilityConfig.from_mongo(doc).model_dump(),
@@ -1419,8 +1536,10 @@ async def update_ai_visibility_config(
         v = str(data.get("market_override") or "").strip()
         patch["market_override"] = v if v else None
 
-    await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": patch})
-    doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+    doc = await ai_territory_intelligence._upsert_ai_visibility_config_doc(
+        ctx.tenant_id,
+        {**dict(cfg_doc or {}), **patch},
+    )
     return {"ok": True, "config": AiVisibilityConfig.from_mongo(doc).model_dump()}
 
 
@@ -1431,10 +1550,11 @@ async def list_ai_visibility_runs(
     scan_id: Optional[str] = Query(None),
     ctx=Depends(_require_ai_visibility),
 ):
-    q = {"$and": [{"config_id": config_id}, tenant_scope(ctx.tenant_id)]}
-    if scan_id:
-        q["$and"].append({"scan_id": str(scan_id)})
-    docs = await db.ai_visibility_runs.find(q).sort("created_at", -1).to_list(int(limit))
+    cfg_doc = await _get_ai_visibility_config_doc(ctx.tenant_id, config_id=config_id)
+    if not cfg_doc:
+        raise HTTPException(404, "Config not found")
+    await _require_client_access(ctx, str(cfg_doc.get("client_id") or ""))
+    docs = await _list_ai_visibility_runs_docs(ctx.tenant_id, config_id, scan_id=scan_id, limit=int(limit))
     return {"ok": True, "runs": [AiVisibilityRun.from_mongo(d).model_dump() for d in (docs or [])]}
 
 
@@ -1444,22 +1564,29 @@ async def list_ai_visibility_scans(
     limit: int = Query(30, ge=1, le=200),
     ctx=Depends(_require_ai_visibility),
 ):
-    docs = await db.ai_visibility_scans.find({"$and": [{"config_id": config_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(int(limit))
+    cfg_doc = await _get_ai_visibility_config_doc(ctx.tenant_id, config_id=config_id)
+    if not cfg_doc:
+        raise HTTPException(404, "Config not found")
+    await _require_client_access(ctx, str(cfg_doc.get("client_id") or ""))
+    docs = await _list_ai_visibility_scans_docs(
+        ctx.tenant_id,
+        config_id,
+        client_id=str(cfg_doc.get("client_id") or ""),
+        limit=int(limit),
+    )
     return {"ok": True, "scans": [AiVisibilityScan.from_mongo(d).model_dump() for d in (docs or [])]}
 
 
 @api.post("/ai-visibility/configs/{config_id}/run")
 async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibility)):
-    cfg_doc = await db.ai_visibility_configs.find_one({"_id": config_id, **tenant_scope(ctx.tenant_id)})
+    cfg_doc = await _get_ai_visibility_config_doc(ctx.tenant_id, config_id=config_id)
     if not cfg_doc:
         raise HTTPException(404, "Config not found")
     cfg = AiVisibilityConfig.from_mongo(cfg_doc)
     if not cfg.enabled:
         raise HTTPException(400, "Config is disabled")
 
-    client_doc = await db.clients.find_one({"_id": cfg.client_id, **tenant_scope(ctx.tenant_id)})
-    if not client_doc:
-        raise HTTPException(404, "Client not found")
+    client_doc = await _require_client_access(ctx, cfg.client_id)
 
     brand, domain = ai_visibility.infer_brand_and_domain(client_doc, cfg.brand_override, cfg.domain_override)
     intel = await ai_visibility.generate_prompt_intelligence(client_doc)
@@ -1518,12 +1645,12 @@ async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibil
                     hit_brand=bool(r.get("hit_brand")),
                     hit_domain=bool(r.get("hit_domain")),
                 )
-                await db.ai_visibility_runs.insert_one(run.to_mongo())
+                stored_run = await ai_territory_intelligence._create_ai_visibility_run_doc(ctx.tenant_id, run.to_mongo())
                 created += 1
-                if run.hit:
+                if bool((stored_run or {}).get("hit")):
                     hit_count += 1
                     per_provider[p]["hits"] += 1
-                runs_for_metrics.append(run.model_dump())
+                runs_for_metrics.append(AiVisibilityRun.from_mongo(stored_run).model_dump())
             except ai.AIProviderError:
                 per_provider[p]["errors"] += 1
             except Exception:
@@ -1558,13 +1685,16 @@ async def run_ai_visibility_scan(config_id: str, ctx=Depends(_require_ai_visibil
         content_intelligence={"status": "generated", "source": "website+gbp"},
         growth_engine={"status": "generated", "source": "scan_mentions"},
     )
-    await db.ai_visibility_scans.insert_one(scan.to_mongo())
-    await db.ai_visibility_configs.update_one({"_id": config_id, **tenant_scope(ctx.tenant_id)}, {"$set": {"market": market, "updated_at": utcnow().isoformat()}})
+    stored_scan = await ai_territory_intelligence._create_ai_visibility_scan_doc(ctx.tenant_id, scan.to_mongo())
+    await ai_territory_intelligence._upsert_ai_visibility_config_doc(
+        ctx.tenant_id,
+        {**dict(cfg_doc or {}), "market": market, "updated_at": utcnow().isoformat()},
+    )
 
     return {
         "ok": True,
         "scan_id": scan_id,
-        "scan": scan.model_dump(),
+        "scan": AiVisibilityScan.from_mongo(stored_scan).model_dump(),
         "created": created,
         "hits": hit_count,
         "total": total,
@@ -1619,14 +1749,11 @@ async def put_ai_territory_settings(
 @api.get("/ai-territory/{client_id}/latest")
 async def ai_territory_latest(client_id: str, ctx=Depends(get_current_context)):
     await _require_client_access(ctx, client_id)
-    cfg = await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]})
+    cfg = await _get_ai_visibility_config_doc(ctx.tenant_id, client_id=client_id)
     if not cfg:
         return {"ok": True, "scan": None, "events": []}
-    scan = await db.ai_visibility_scans.find_one(
-        {"$and": [{"config_id": str(cfg.get("_id"))}, {"client_id": client_id}, tenant_scope(ctx.tenant_id)]},
-        sort=[("created_at", -1)],
-    )
-    events = await db.ai_territory_events.find({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]}).sort("created_at", -1).to_list(50)
+    scan = await _get_latest_ai_visibility_scan_doc(ctx.tenant_id, str(cfg.get("_id") or ""), client_id)
+    events = await _list_ai_territory_events_docs(ctx.tenant_id, client_id, limit=50)
     return {"ok": True, "scan": AiVisibilityScan.from_mongo(scan).model_dump() if scan else None, "events": events}
 
 
@@ -1634,12 +1761,15 @@ async def ai_territory_latest(client_id: str, ctx=Depends(get_current_context)):
 async def ai_territory_history(client_id: str, limit: int = 30, ctx=Depends(get_current_context)):
     await _require_client_access(ctx, client_id)
     limit = max(1, min(int(limit or 30), 200))
-    cfg = await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, tenant_scope(ctx.tenant_id)]})
+    cfg = await _get_ai_visibility_config_doc(ctx.tenant_id, client_id=client_id)
     if not cfg:
         return {"ok": True, "scans": []}
-    docs = await db.ai_visibility_scans.find(
-        {"$and": [{"config_id": str(cfg.get("_id"))}, {"client_id": client_id}, tenant_scope(ctx.tenant_id)]}
-    ).sort("created_at", -1).to_list(limit)
+    docs = await _list_ai_visibility_scans_docs(
+        ctx.tenant_id,
+        str(cfg.get("_id") or ""),
+        client_id=client_id,
+        limit=limit,
+    )
     return {"ok": True, "scans": [AiVisibilityScan.from_mongo(d).model_dump() for d in (docs or [])]}
 
 
