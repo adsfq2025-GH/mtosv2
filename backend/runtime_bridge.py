@@ -2310,6 +2310,482 @@ class RuntimeBridge:
             return None
         return self._clickup_sync_log_row_to_doc(rows[0], tenant_legacy_id, user_legacy_id)
 
+    def _ai_visibility_config_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["keywords"] = list(doc.get("keywords") or [])
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    def _ai_visibility_run_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        config_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["config_id"] = config_legacy_id
+        doc["parsed"] = dict(doc.get("parsed") or {})
+        doc["hit"] = bool(doc.get("hit", False))
+        doc["hit_brand"] = bool(doc.get("hit_brand", False))
+        doc["hit_domain"] = bool(doc.get("hit_domain", False))
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    def _ai_visibility_scan_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        config_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["config_id"] = config_legacy_id
+        doc["providers"] = dict(doc.get("providers") or {})
+        doc["share_of_voice"] = dict(doc.get("share_of_voice") or {})
+        doc["platform_rankings"] = dict(doc.get("platform_rankings") or {})
+        doc["themes"] = list(doc.get("themes") or [])
+        doc["competitors"] = list(doc.get("competitors") or [])
+        doc["content_intelligence"] = dict(doc.get("content_intelligence") or {})
+        doc["growth_engine"] = dict(doc.get("growth_engine") or {})
+        doc["territory_intelligence"] = dict(doc.get("territory_intelligence") or {})
+        doc["data_confidence"] = dict(doc.get("data_confidence") or {})
+        doc["total"] = _safe_int(doc.get("total"), 0)
+        doc["hits"] = _safe_int(doc.get("hits"), 0)
+        doc["prompts_total"] = _safe_int(doc.get("prompts_total"), 0)
+        doc["overall_visibility_score"] = _safe_float(doc.get("overall_visibility_score"), 0.0)
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    def _ai_territory_event_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        user_legacy_by_id: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        account_manager_user_id = str(doc.pop("account_manager_user_id", "") or "").strip()
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["account_manager_id"] = (user_legacy_by_id or {}).get(account_manager_user_id) or account_manager_user_id or None
+        doc["explain"] = dict(doc.get("explain") or {})
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def _load_ai_visibility_config_legacy_map(self, config_ids: Sequence[str]) -> dict[str, str]:
+        clean_ids = [str(config_id).strip() for config_id in config_ids if str(config_id).strip()]
+        if not clean_ids:
+            return {}
+        rows = await self._safe_select(
+            "ai_visibility_configs",
+            select="id,legacy_source_id",
+            filters={"id": f"in.({','.join(clean_ids)})"},
+            limit=len(clean_ids),
+        )
+        if not rows:
+            return {}
+        return {
+            str(row.get("id") or ""): str(row.get("legacy_source_id") or row.get("id") or "")
+            for row in rows
+            if str(row.get("id") or "").strip()
+        }
+
+    async def resolve_target_ai_visibility_config_id(
+        self,
+        tenant_legacy_id: str,
+        config_legacy_id: str,
+    ) -> Optional[str]:
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id or not str(config_legacy_id or "").strip():
+            return None
+        rows = await self._safe_select(
+            "ai_visibility_configs",
+            select="id,legacy_source_id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{config_legacy_id},id.eq.{config_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return str((rows[0] or {}).get("id") or "").strip() or None
+
+    async def get_ai_visibility_config_for_client(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("ai_visibility"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return None
+        rows = await self._safe_select(
+            "ai_visibility_configs",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            order="created_at.desc",
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._ai_visibility_config_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    async def get_ai_visibility_config(
+        self,
+        tenant_legacy_id: str,
+        config_legacy_id: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("ai_visibility"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id or not str(config_legacy_id or "").strip():
+            return None
+        rows = await self._safe_select(
+            "ai_visibility_configs",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{config_legacy_id},id.eq.{config_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        client_id = str(row.get("client_id") or "").strip()
+        client_legacy_id = client_legacy_by_id.get(client_id) or (client_id if _is_uuid(client_id) else "")
+        if not client_legacy_id:
+            return None
+        return self._ai_visibility_config_row_to_doc(row, tenant_legacy_id, client_legacy_id)
+
+    async def upsert_ai_visibility_config(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        client_legacy_id = str((doc or {}).get("client_id") or "").strip()
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return None
+        config_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        target_config_id = (
+            await self.resolve_target_ai_visibility_config_id(tenant_legacy_id, config_legacy_id)
+            if config_legacy_id
+            else None
+        )
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "legacy_source_id": config_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "mongo"),
+            "market": str((doc or {}).get("market") or "").strip(),
+            "market_override": (doc or {}).get("market_override"),
+            "keywords": list((doc or {}).get("keywords") or []),
+            "brand_override": (doc or {}).get("brand_override"),
+            "domain_override": (doc or {}).get("domain_override"),
+            "enabled": bool((doc or {}).get("enabled", True)),
+            "created_at": (doc or {}).get("created_at"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        if target_config_id:
+            result = await self._request(
+                "PATCH",
+                "ai_visibility_configs",
+                params={"id": f"eq.{target_config_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            existing_rows = await self._safe_select(
+                "ai_visibility_configs",
+                select="id",
+                filters={
+                    "tenant_id": f"eq.{target_tenant_id}",
+                    "client_id": f"eq.{target_client_id}",
+                    "is_deleted": "eq.false",
+                },
+                limit=1,
+            )
+            if existing_rows:
+                row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+                result = await self._request(
+                    "PATCH",
+                    "ai_visibility_configs",
+                    params={"id": f"eq.{row_id}"},
+                    payload=payload,
+                    headers=self._write_headers(prefer="return=representation"),
+                )
+            else:
+                result = await self._request(
+                    "POST",
+                    "ai_visibility_configs",
+                    payload=payload,
+                    headers=self._write_headers(prefer="return=representation"),
+                )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._ai_visibility_config_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    async def create_ai_visibility_run(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        client_legacy_id = str((doc or {}).get("client_id") or "").strip()
+        config_legacy_id = str((doc or {}).get("config_id") or "").strip()
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        target_config_id = await self.resolve_target_ai_visibility_config_id(tenant_legacy_id, config_legacy_id)
+        if not target_tenant_id or not target_client_id or not target_config_id:
+            return None
+        run_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        payload = {
+            "tenant_id": target_tenant_id,
+            "config_id": target_config_id,
+            "client_id": target_client_id,
+            "legacy_source_id": run_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "mongo"),
+            "scan_id": str((doc or {}).get("scan_id") or "").strip() or None,
+            "market": str((doc or {}).get("market") or "").strip(),
+            "keyword": str((doc or {}).get("keyword") or "").strip(),
+            "theme": (doc or {}).get("theme"),
+            "prompt_kind": (doc or {}).get("prompt_kind"),
+            "provider": str((doc or {}).get("provider") or "").strip(),
+            "prompt": str((doc or {}).get("prompt") or ""),
+            "response_text": str((doc or {}).get("response_text") or ""),
+            "parsed": dict((doc or {}).get("parsed") or {}),
+            "hit": bool((doc or {}).get("hit", False)),
+            "hit_brand": bool((doc or {}).get("hit_brand", False)),
+            "hit_domain": bool((doc or {}).get("hit_domain", False)),
+            "created_at": (doc or {}).get("created_at"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        result = await self._request(
+            "POST",
+            "ai_visibility_runs",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._ai_visibility_run_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id, config_legacy_id)
+
+    async def get_latest_ai_visibility_scan(
+        self,
+        tenant_legacy_id: str,
+        config_legacy_id: str,
+        client_legacy_id: str,
+        *,
+        exclude_scan_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("ai_visibility"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        target_config_id = await self.resolve_target_ai_visibility_config_id(tenant_legacy_id, config_legacy_id)
+        if not target_tenant_id or not target_client_id or not target_config_id:
+            return None
+        filters = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "config_id": f"eq.{target_config_id}",
+            "client_id": f"eq.{target_client_id}",
+            "is_deleted": "eq.false",
+        }
+        if str(exclude_scan_id or "").strip():
+            filters["scan_id"] = f"neq.{exclude_scan_id}"
+        rows = await self._safe_select(
+            "ai_visibility_scans",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._ai_visibility_scan_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id, config_legacy_id)
+
+    async def create_ai_visibility_scan(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        client_legacy_id = str((doc or {}).get("client_id") or "").strip()
+        config_legacy_id = str((doc or {}).get("config_id") or "").strip()
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        target_config_id = await self.resolve_target_ai_visibility_config_id(tenant_legacy_id, config_legacy_id)
+        if not target_tenant_id or not target_client_id or not target_config_id:
+            return None
+        scan_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        payload = {
+            "tenant_id": target_tenant_id,
+            "config_id": target_config_id,
+            "client_id": target_client_id,
+            "legacy_source_id": scan_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "mongo"),
+            "scan_id": str((doc or {}).get("scan_id") or "").strip() or None,
+            "market": str((doc or {}).get("market") or "").strip(),
+            "brand": str((doc or {}).get("brand") or "").strip(),
+            "domain": str((doc or {}).get("domain") or "").strip(),
+            "providers": dict((doc or {}).get("providers") or {}),
+            "total": _safe_int((doc or {}).get("total"), 0),
+            "hits": _safe_int((doc or {}).get("hits"), 0),
+            "overall_visibility_score": _safe_float((doc or {}).get("overall_visibility_score"), 0.0),
+            "share_of_voice": dict((doc or {}).get("share_of_voice") or {}),
+            "platform_rankings": dict((doc or {}).get("platform_rankings") or {}),
+            "themes": list((doc or {}).get("themes") or []),
+            "prompts_total": _safe_int((doc or {}).get("prompts_total"), 0),
+            "competitors": list((doc or {}).get("competitors") or []),
+            "content_intelligence": dict((doc or {}).get("content_intelligence") or {}),
+            "growth_engine": dict((doc or {}).get("growth_engine") or {}),
+            "territory_intelligence": dict((doc or {}).get("territory_intelligence") or {}),
+            "data_confidence": dict((doc or {}).get("data_confidence") or {}),
+            "created_at": (doc or {}).get("created_at"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        result = await self._request(
+            "POST",
+            "ai_visibility_scans",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._ai_visibility_scan_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id, config_legacy_id)
+
+    async def list_ai_territory_events(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("ai_visibility"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return []
+        rows = await self._safe_select(
+            "ai_territory_events",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        user_legacy_by_id = await self._load_user_legacy_map(
+            [str(row.get("account_manager_user_id") or "").strip() for row in rows if str(row.get("account_manager_user_id") or "").strip()]
+        )
+        return [
+            self._ai_territory_event_row_to_doc(row, tenant_legacy_id, client_legacy_id, user_legacy_by_id)
+            for row in rows
+        ]
+
+    async def create_ai_territory_events(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        docs: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not self.service_configured:
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id or not docs:
+            return []
+        payload: list[dict[str, Any]] = []
+        for doc in docs:
+            account_manager_legacy_id = str((doc or {}).get("account_manager_id") or "").strip()
+            target_account_manager_id = (
+                await self.resolve_target_user_id(account_manager_legacy_id)
+                if account_manager_legacy_id
+                else None
+            )
+            event_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+            payload.append(
+                {
+                    "tenant_id": target_tenant_id,
+                    "client_id": target_client_id,
+                    "account_manager_user_id": target_account_manager_id,
+                    "legacy_source_id": event_legacy_id or None,
+                    "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "mongo"),
+                    "kind": str((doc or {}).get("kind") or "").strip(),
+                    "severity": str((doc or {}).get("severity") or "low").strip() or "low",
+                    "title": str((doc or {}).get("title") or "").strip(),
+                    "description": str((doc or {}).get("description") or ""),
+                    "scan_id": str((doc or {}).get("scan_id") or "").strip() or None,
+                    "explain": dict((doc or {}).get("explain") or {}),
+                    "created_at": (doc or {}).get("created_at"),
+                    "updated_at": (doc or {}).get("updated_at"),
+                    "is_deleted": False,
+                }
+            )
+        result = await self._request(
+            "POST",
+            "ai_territory_events",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return []
+        user_legacy_by_id = await self._load_user_legacy_map(
+            [str(row.get("account_manager_user_id") or "").strip() for row in rows if str(row.get("account_manager_user_id") or "").strip()]
+        )
+        return [
+            self._ai_territory_event_row_to_doc(row, tenant_legacy_id, client_legacy_id, user_legacy_by_id)
+            for row in rows
+        ]
+
     def _user_oauth_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str, user_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})
         doc["_id"] = str(doc.get("id") or f"{doc.get('provider') or 'oauth'}:{doc.get('platform') or ''}")

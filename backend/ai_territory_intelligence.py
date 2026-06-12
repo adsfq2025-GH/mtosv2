@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import ai_visibility
 import connectors
-from db import db, new_id, utcnow
+from db import db, is_mongo_configured, new_id, utcnow
 from oauth_runtime import has_google_oauth_connection, is_no_mongo_oauth_token_read_enabled
 from models import ActionItem
 from runtime_bridge import get_runtime_bridge
@@ -187,6 +187,170 @@ def _confidence_from_sources(availability: Dict[str, Any]) -> Dict[str, Any]:
     return {"percent": pct, "level": level, "availability": availability}
 
 
+async def _get_ai_visibility_config_doc(tenant_id: str, client_id: str) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        doc = await bridge.get_ai_visibility_config_for_client(tenant_id, client_id)
+        if doc:
+            return doc
+        if not is_mongo_configured():
+            return None
+    if not is_mongo_configured():
+        return None
+    return await db.ai_visibility_configs.find_one({"$and": [{"client_id": client_id}, {"tenant_id": tenant_id}]})
+
+
+async def _upsert_ai_visibility_config_doc(tenant_id: str, doc: dict) -> dict:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        stored = await bridge.upsert_ai_visibility_config(tenant_id, doc)
+        if not stored:
+            raise RuntimeError("Unable to persist AI visibility config in Supabase")
+        if is_mongo_configured():
+            await db.ai_visibility_configs.update_one(
+                {"_id": str(stored.get("_id") or (doc or {}).get("_id") or ""), "tenant_id": tenant_id},
+                {"$set": dict(stored or {})},
+                upsert=True,
+            )
+        return stored
+    if not is_mongo_configured():
+        return dict(doc or {})
+    await db.ai_visibility_configs.update_one(
+        {"_id": str((doc or {}).get("_id") or ""), "tenant_id": tenant_id},
+        {"$set": dict(doc or {})},
+        upsert=True,
+    )
+    return await db.ai_visibility_configs.find_one({"_id": str((doc or {}).get("_id") or ""), "tenant_id": tenant_id}) or dict(doc or {})
+
+
+async def _get_latest_ai_visibility_scan_doc(
+    tenant_id: str,
+    config_id: str,
+    client_id: str,
+    *,
+    exclude_scan_id: Optional[str] = None,
+) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        doc = await bridge.get_latest_ai_visibility_scan(
+            tenant_id,
+            config_id,
+            client_id,
+            exclude_scan_id=exclude_scan_id,
+        )
+        if doc:
+            return doc
+        if not is_mongo_configured():
+            return None
+    if not is_mongo_configured():
+        return None
+    query: dict[str, Any] = {"$and": [{"config_id": config_id}, {"tenant_id": tenant_id}, {"client_id": client_id}]}
+    if str(exclude_scan_id or "").strip():
+        query["$and"].append({"scan_id": {"$ne": str(exclude_scan_id)}})
+    return await db.ai_visibility_scans.find_one(query, sort=[("created_at", -1)])
+
+
+async def _create_ai_visibility_run_doc(tenant_id: str, doc: dict) -> dict:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        stored = await bridge.create_ai_visibility_run(tenant_id, doc)
+        if not stored:
+            raise RuntimeError("Unable to persist AI visibility run in Supabase")
+        if is_mongo_configured():
+            await db.ai_visibility_runs.insert_one(dict(doc or {}))
+        return stored
+    if not is_mongo_configured():
+        return dict(doc or {})
+    await db.ai_visibility_runs.insert_one(dict(doc or {}))
+    return dict(doc or {})
+
+
+async def _create_ai_visibility_scan_doc(tenant_id: str, doc: dict) -> dict:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        stored = await bridge.create_ai_visibility_scan(tenant_id, doc)
+        if not stored:
+            raise RuntimeError("Unable to persist AI visibility scan in Supabase")
+        if is_mongo_configured():
+            await db.ai_visibility_scans.insert_one(dict(doc or {}))
+        return stored
+    if not is_mongo_configured():
+        return dict(doc or {})
+    await db.ai_visibility_scans.insert_one(dict(doc or {}))
+    return dict(doc or {})
+
+
+async def _apply_ai_territory_client_patch(tenant_id: str, client_doc: dict, territory_payload: dict) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    updated_at = utcnow().isoformat()
+    if bridge.is_enabled_for("clients"):
+        next_doc = dict(client_doc or {})
+        next_crm_data = dict(next_doc.get("crm_data") or {})
+        next_crm_data["ai_territory_intelligence"] = territory_payload
+        next_doc["crm_data"] = next_crm_data
+        next_doc["updated_at"] = updated_at
+        stored = await bridge.upsert_client(tenant_id, next_doc)
+        if not stored:
+            raise RuntimeError("Unable to persist AI territory client patch in Supabase")
+        if is_mongo_configured():
+            await db.clients.update_one(
+                {"_id": str((client_doc or {}).get("_id") or ""), "tenant_id": tenant_id},
+                {
+                    "$set": {
+                        "crm_data.ai_territory_intelligence": territory_payload,
+                        "updated_at": updated_at,
+                    }
+                },
+            )
+        return stored
+    if not is_mongo_configured():
+        return {
+            **dict(client_doc or {}),
+            "crm_data": {
+                **dict((client_doc or {}).get("crm_data") or {}),
+                "ai_territory_intelligence": territory_payload,
+            },
+            "updated_at": updated_at,
+        }
+    await db.clients.update_one(
+        {"_id": str((client_doc or {}).get("_id") or ""), "tenant_id": tenant_id},
+        {"$set": {"crm_data.ai_territory_intelligence": territory_payload, "updated_at": updated_at}},
+    )
+    return await db.clients.find_one({"_id": str((client_doc or {}).get("_id") or ""), "tenant_id": tenant_id})
+
+
+async def _create_ai_territory_events(tenant_id: str, client_id: str, events: List[dict]) -> List[dict]:
+    if not events:
+        return []
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("ai_visibility"):
+        stored = await bridge.create_ai_territory_events(tenant_id, client_id, events)
+        if not stored and events:
+            raise RuntimeError("Unable to persist AI territory events in Supabase")
+        if is_mongo_configured():
+            await db.ai_territory_events.insert_many(events)
+        return stored
+    if not is_mongo_configured():
+        return list(events)
+    await db.ai_territory_events.insert_many(events)
+    return list(events)
+
+
+async def _create_ai_territory_action_item(tenant_id: str, item: ActionItem) -> dict:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("action_items"):
+        stored = await bridge.upsert_action_item(tenant_id, item.to_mongo())
+        if not stored:
+            raise RuntimeError("Unable to persist AI territory action item in Supabase")
+        if is_mongo_configured():
+            await db.action_items.insert_one(item.to_mongo())
+        return stored
+    if not is_mongo_configured():
+        return item.to_mongo()
+    await db.action_items.insert_one(item.to_mongo())
+    return item.to_mongo()
+
+
 async def _pick_google_business_profile_user_id(tenant_id: str, preferred_user_id: str) -> Optional[str]:
     if preferred_user_id:
         if await has_google_oauth_connection(tenant_id, str(preferred_user_id), "google_business_profile"):
@@ -220,9 +384,8 @@ async def run_ai_territory_scan_for_client(
     force: bool = False,
     reason: str = "scheduled",
 ) -> Dict[str, Any]:
-    cfg_doc = await db.ai_visibility_configs.find_one({"$and": [{"client_id": str(client_doc.get("_id"))}, {"tenant_id": tenant_id}]})
+    cfg_doc = await _get_ai_visibility_config_doc(tenant_id, str(client_doc.get("_id")))
     if not cfg_doc:
-        intel0 = {}
         cfg = {
             "_id": new_id(),
             "tenant_id": tenant_id,
@@ -235,15 +398,15 @@ async def run_ai_territory_scan_for_client(
             "created_at": utcnow().isoformat(),
             "updated_at": utcnow().isoformat(),
         }
-        await db.ai_visibility_configs.insert_one(cfg)
-        cfg_doc = cfg
+        cfg_doc = await _upsert_ai_visibility_config_doc(tenant_id, cfg)
 
     config_id = str(cfg_doc.get("_id"))
     client_id = str(client_doc.get("_id"))
 
-    last = await db.ai_visibility_scans.find_one(
-        {"$and": [{"config_id": config_id}, {"tenant_id": tenant_id}, {"client_id": client_id}]},
-        sort=[("created_at", -1)],
+    last = await _get_latest_ai_visibility_scan_doc(
+        tenant_id,
+        config_id,
+        client_id,
     )
     if last and not force:
         try:
@@ -271,7 +434,11 @@ async def run_ai_territory_scan_for_client(
     website_ok = bool(website_raw)
 
     availability = {
-        "google_business_profile": {"ok": bool(gbp_profile), "error": gbp_err, "binding": bool(await db.client_bindings.find_one({"$and": [{"tenant_id": tenant_id}, {"client_id": client_id}, {"platform": "google_business_profile"}, {"enabled": True}]}))},
+        "google_business_profile": {
+            "ok": bool(gbp_profile),
+            "error": gbp_err,
+            "binding": bool(await connectors.get_client_binding(tenant_id, client_id, "google_business_profile")),
+        },
         "website": {"ok": website_ok},
         "search_console": {"ok": False},
         "citations": {"ok": False},
@@ -347,12 +514,12 @@ async def run_ai_territory_scan_for_client(
                     "created_at": utcnow().isoformat(),
                     "updated_at": utcnow().isoformat(),
                 }
-                await db.ai_visibility_runs.insert_one(run_doc)
+                stored_run = await _create_ai_visibility_run_doc(tenant_id, run_doc)
                 created += 1
-                if run_doc["hit"]:
+                if stored_run.get("hit"):
                     hit_count += 1
                     per_provider[p]["hits"] += 1
-                runs_for_metrics.append(run_doc)
+                runs_for_metrics.append(stored_run)
             except Exception:
                 per_provider[p]["errors"] += 1
 
@@ -393,15 +560,24 @@ async def run_ai_territory_scan_for_client(
         "updated_at": utcnow().isoformat(),
     }
 
-    prev = await db.ai_visibility_scans.find_one(
-        {"$and": [{"config_id": config_id}, {"tenant_id": tenant_id}, {"client_id": client_id}, {"scan_id": {"$ne": scan_id}}]},
-        sort=[("created_at", -1)],
+    prev = await _get_latest_ai_visibility_scan_doc(
+        tenant_id,
+        config_id,
+        client_id,
+        exclude_scan_id=scan_id,
     )
     change = _scan_change(prev, scan_doc)
     scan_doc["growth_engine"] = {**(scan_doc.get("growth_engine") or {}), "delta": change.get("delta"), "changes": change.get("changes"), "reason": reason}
 
-    await db.ai_visibility_scans.insert_one(scan_doc)
-    await db.ai_visibility_configs.update_one({"_id": config_id, "tenant_id": tenant_id}, {"$set": {"market": "", "updated_at": utcnow().isoformat()}})
+    stored_scan = await _create_ai_visibility_scan_doc(tenant_id, scan_doc)
+    cfg_doc = await _upsert_ai_visibility_config_doc(
+        tenant_id,
+        {
+            **dict(cfg_doc or {}),
+            "market": "",
+            "updated_at": utcnow().isoformat(),
+        },
+    )
 
     delta = (change.get("delta") or {}) if isinstance(change, dict) else {}
     opps0 = (territory.get("expansion_opportunities") or []) if isinstance(territory, dict) else []
@@ -418,27 +594,24 @@ async def run_ai_territory_scan_for_client(
         tp.append({"topic": "Visibility & territory", "angle": "No major changes detected. Confirm ongoing coverage and identify the next best expansion territory."})
 
     client_patch = {
-        "crm_data.ai_territory_intelligence": {
-            "scan_id": scan_id,
-            "last_scan_at": scan_doc.get("created_at"),
-            "overall_visibility_score": scan_doc.get("overall_visibility_score"),
-            "share_of_voice": scan_doc.get("share_of_voice"),
-            "visibility_delta": (change.get("delta") or {}).get("visibility_score"),
-            "market_rank_delta": (change.get("delta") or {}).get("market_rank_delta"),
-            "territory": territory,
-            "opportunities": (territory.get("expansion_opportunities") or [])[:10],
-            "meeting_talking_points": tp,
-            "data_sources_used": [k for k, v in (availability or {}).items() if isinstance(v, dict) and v.get("ok")],
-            "source_availability": availability,
-            "confidence": conf,
-            "calculation_logic": "Visibility scores are computed as hit_rate = brand_or_domain_mentioned / total_prompts across configured AI providers. Territory scores are computed from location-intent prompts grouped by territory.",
-        },
-        "updated_at": utcnow().isoformat(),
+        "scan_id": scan_id,
+        "last_scan_at": stored_scan.get("created_at"),
+        "overall_visibility_score": stored_scan.get("overall_visibility_score"),
+        "share_of_voice": stored_scan.get("share_of_voice"),
+        "visibility_delta": (change.get("delta") or {}).get("visibility_score"),
+        "market_rank_delta": (change.get("delta") or {}).get("market_rank_delta"),
+        "territory": territory,
+        "opportunities": (territory.get("expansion_opportunities") or [])[:10],
+        "meeting_talking_points": tp,
+        "data_sources_used": [k for k, v in (availability or {}).items() if isinstance(v, dict) and v.get("ok")],
+        "source_availability": availability,
+        "confidence": conf,
+        "calculation_logic": "Visibility scores are computed as hit_rate = brand_or_domain_mentioned / total_prompts across configured AI providers. Territory scores are computed from location-intent prompts grouped by territory.",
     }
-    await db.clients.update_one({"_id": client_id, "tenant_id": tenant_id}, {"$set": client_patch})
+    await _apply_ai_territory_client_patch(tenant_id, client_doc, client_patch)
 
-    await _emit_events_and_actions(tenant_id=tenant_id, client_doc=client_doc, scan=scan_doc, change=change)
-    return {"ok": True, "scan_id": scan_id, "scan": scan_doc, "created_runs": created, "providers": providers}
+    await _emit_events_and_actions(tenant_id=tenant_id, client_doc=client_doc, scan=stored_scan, change=change)
+    return {"ok": True, "scan_id": scan_id, "scan": stored_scan, "created_runs": created, "providers": providers}
 
 
 async def _emit_events_and_actions(*, tenant_id: str, client_doc: dict, scan: dict, change: dict) -> None:
@@ -564,7 +737,7 @@ async def _emit_events_and_actions(*, tenant_id: str, client_doc: dict, scan: di
                 status="open",
                 priority="medium",
             )
-            await db.action_items.insert_one(a.to_mongo())
+            await _create_ai_territory_action_item(tenant_id, a)
 
     if events:
-        await db.ai_territory_events.insert_many(events)
+        await _create_ai_territory_events(tenant_id, client_id, events)
