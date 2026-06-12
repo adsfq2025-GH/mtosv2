@@ -122,6 +122,17 @@ async def _count_monthly_touch_meetings(tenant_id: str, client_id: str) -> int:
 
 
 async def _get_previous_review_snapshot(tenant_id: str, client_id: str, current_month: str) -> Optional[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("reviews"):
+        docs = await bridge.list_review_monthly_snapshots(
+            tenant_id,
+            client_legacy_id=str(client_id),
+            limit=24,
+        )
+        for doc in docs or []:
+            if str((doc or {}).get("month") or "") != current_month:
+                return doc
+        return None
     if not is_mongo_configured():
         return None
     docs = await db.review_monthly_snapshots.find({"client_id": str(client_id), **_tenant_scope(tenant_id)}).sort("month", -1).to_list(24)
@@ -132,8 +143,6 @@ async def _get_previous_review_snapshot(tenant_id: str, client_id: str, current_
 
 
 async def upsert_review_snapshot_from_kpi(tenant_id: str, client_id: str, kpi: Dict[str, Any]) -> None:
-    if not is_mongo_configured():
-        return
     try:
         gbp = (kpi or {}).get("google_business_profile") or {}
         nr = gbp.get("new_reviews") or {}
@@ -152,6 +161,12 @@ async def upsert_review_snapshot_from_kpi(tenant_id: str, client_id: str, kpi: D
             kpi_period_kind=str(period.get("kind") or ""),
             kpi_period_current_end=cur_end or None,
         )
+        bridge = get_runtime_bridge()
+        if bridge.is_enabled_for("reviews"):
+            await bridge.upsert_review_monthly_snapshot(tenant_id, client_id, snap.to_mongo())
+            return
+        if not is_mongo_configured():
+            return
         await db.review_monthly_snapshots.update_one(
             {"client_id": client_id, "month": month, **_tenant_scope(tenant_id)},
             {"$set": snap.to_mongo(), "$setOnInsert": {"_id": snap.id}},

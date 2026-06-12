@@ -12,6 +12,13 @@ SUPPORTED_RUNTIME_BRIDGE_DOMAINS = DEFAULT_RUNTIME_BRIDGE_DOMAINS + (
     "oauth_accounts",
     "clickup_sync",
     "ai_visibility",
+    "reviews",
+    "discovery",
+    "roadmap",
+    "content_captures",
+    "tickets",
+    "qa_scorecards",
+    "tenant_files",
 )
 DEFAULT_RUNTIME_MIRROR_DOMAINS: tuple[str, ...] = ()
 SUPPORTED_RUNTIME_MIRROR_DOMAINS = ("settings", "integrations", "oauth_accounts")

@@ -1690,6 +1690,1207 @@ class RuntimeBridge:
         )
         return True
 
+    def _client_review_goal_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["monthly_goal"] = _safe_int(doc.get("monthly_goal"), 10)
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    def _review_event_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        meeting_legacy_by_id: Optional[dict[str, str]] = None,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        meeting_id = str(doc.get("meeting_id") or "").strip()
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["meeting_id"] = (meeting_legacy_by_id or {}).get(meeting_id) or (meeting_id if _is_uuid(meeting_id) else None) or None
+        doc["count"] = _safe_int(doc.get("count"), 1)
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    def _review_monthly_snapshot_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["received"] = _safe_int(doc.get("received"), 0)
+        avg_rating = doc.get("avg_rating")
+        doc["avg_rating"] = _safe_float(avg_rating) if avg_rating not in (None, "") else None
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def get_client_review_goal(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("reviews"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return None
+        rows = await self._safe_select(
+            "client_review_goals",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._client_review_goal_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    async def upsert_client_review_goal(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "legacy_source_id": str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip() or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "monthly_goal": _safe_int((doc or {}).get("monthly_goal"), 10),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "client_review_goals",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            result = await self._request(
+                "PATCH",
+                "client_review_goals",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "client_review_goals",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._client_review_goal_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    async def create_review_event(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        meeting_legacy_id = str((doc or {}).get("meeting_id") or "").strip()
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id) if meeting_legacy_id else None
+        if not target_tenant_id or not target_client_id or (meeting_legacy_id and not target_meeting_id):
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "meeting_id": target_meeting_id,
+            "legacy_source_id": str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip() or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "kind": str((doc or {}).get("kind") or "requested"),
+            "count": _safe_int((doc or {}).get("count"), 1),
+            "occurred_on": (doc or {}).get("occurred_on"),
+            "channel": str((doc or {}).get("channel") or "other"),
+            "source": str((doc or {}).get("source") or "manual"),
+            "notes": (doc or {}).get("notes"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        result = await self._request(
+            "POST",
+            "review_events",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str((rows[0] or {}).get("meeting_id") or "").strip()])
+        return self._review_event_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id, meeting_legacy_by_id)
+
+    async def list_review_events(
+        self,
+        tenant_legacy_id: str,
+        *,
+        client_legacy_id: str,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("reviews"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return []
+        rows = await self._safe_select(
+            "review_events",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            order="occurred_on.desc,created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        meeting_legacy_by_id = await self._load_meeting_legacy_map(
+            [str(row.get("meeting_id") or "").strip() for row in rows if str(row.get("meeting_id") or "").strip()]
+        )
+        return [
+            self._review_event_row_to_doc(row, tenant_legacy_id, client_legacy_id, meeting_legacy_by_id)
+            for row in rows
+        ]
+
+    async def list_review_monthly_snapshots(
+        self,
+        tenant_legacy_id: str,
+        *,
+        client_legacy_id: Optional[str] = None,
+        months: Optional[Sequence[str]] = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("reviews"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "is_deleted": "eq.false",
+        }
+        client_legacy_by_id: dict[str, str] = {}
+        if client_legacy_id:
+            target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+            if not target_client_id:
+                return []
+            filters["client_id"] = f"eq.{target_client_id}"
+        clean_months = [str(month).strip() for month in (months or []) if str(month).strip()]
+        if clean_months:
+            filters["month"] = f"in.({','.join(clean_months)})"
+        rows = await self._safe_select(
+            "review_monthly_snapshots",
+            select="*",
+            filters=filters,
+            order="month.desc,created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        if client_legacy_id:
+            client_legacy_by_id = {str((rows[0] or {}).get("client_id") or "").strip(): client_legacy_id}
+        else:
+            client_legacy_by_id = await self._load_client_legacy_map(
+                [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+            )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            target_client_id = str((row or {}).get("client_id") or "").strip()
+            resolved_client_legacy_id = client_legacy_by_id.get(target_client_id) or (target_client_id if _is_uuid(target_client_id) else "")
+            if not resolved_client_legacy_id:
+                continue
+            out.append(self._review_monthly_snapshot_row_to_doc(row, tenant_legacy_id, resolved_client_legacy_id))
+        return out
+
+    async def upsert_review_monthly_snapshot(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        month = str((doc or {}).get("month") or "").strip()
+        if not target_tenant_id or not target_client_id or not month:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "legacy_source_id": str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip() or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "month": month,
+            "received": _safe_int((doc or {}).get("received"), 0),
+            "avg_rating": _safe_float((doc or {}).get("avg_rating")) if (doc or {}).get("avg_rating") not in (None, "") else None,
+            "source": str((doc or {}).get("source") or "gbp"),
+            "kpi_period_kind": (doc or {}).get("kpi_period_kind"),
+            "kpi_period_current_end": (doc or {}).get("kpi_period_current_end"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "review_monthly_snapshots",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "month": f"eq.{month}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            result = await self._request(
+                "PATCH",
+                "review_monthly_snapshots",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "review_monthly_snapshots",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._review_monthly_snapshot_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    def _discovery_question_template_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["tags"] = list(doc.get("tags") or [])
+        doc["deliverables"] = list(doc.get("deliverables") or [])
+        doc["active"] = bool(doc.get("active", True))
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def list_discovery_question_templates(
+        self,
+        tenant_legacy_id: str,
+        *,
+        active_only: bool = False,
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("discovery"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "is_deleted": "eq.false",
+        }
+        if active_only:
+            filters["active"] = "eq.true"
+        rows = await self._safe_select(
+            "discovery_question_templates",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        return [self._discovery_question_template_row_to_doc(row, tenant_legacy_id) for row in rows]
+
+    async def get_discovery_question_template(
+        self,
+        tenant_legacy_id: str,
+        template_legacy_id: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("discovery"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id or not str(template_legacy_id or "").strip():
+            return None
+        rows = await self._safe_select(
+            "discovery_question_templates",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{template_legacy_id},id.eq.{template_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._discovery_question_template_row_to_doc(rows[0], tenant_legacy_id)
+
+    async def resolve_target_discovery_question_template_id(
+        self,
+        tenant_legacy_id: str,
+        template_legacy_id: str,
+    ) -> Optional[str]:
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id or not str(template_legacy_id or "").strip():
+            return None
+        rows = await self._safe_select(
+            "discovery_question_templates",
+            select="id,legacy_source_id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{template_legacy_id},id.eq.{template_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return str((rows[0] or {}).get("id") or "").strip() or None
+
+    async def upsert_discovery_question_template(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        template_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        target_template_id = (
+            await self.resolve_target_discovery_question_template_id(tenant_legacy_id, template_legacy_id)
+            if template_legacy_id
+            else None
+        )
+        payload = {
+            "tenant_id": target_tenant_id,
+            "legacy_source_id": template_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "kind": str((doc or {}).get("kind") or "operational"),
+            "category": str((doc or {}).get("category") or "").strip(),
+            "question": str((doc or {}).get("question") or "").strip(),
+            "tags": list((doc or {}).get("tags") or []),
+            "deliverables": list((doc or {}).get("deliverables") or []),
+            "active": bool((doc or {}).get("active", True)),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        if target_template_id:
+            result = await self._request(
+                "PATCH",
+                "discovery_question_templates",
+                params={"id": f"eq.{target_template_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "discovery_question_templates",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._discovery_question_template_row_to_doc(rows[0], tenant_legacy_id)
+
+    async def soft_delete_discovery_question_template(
+        self,
+        tenant_legacy_id: str,
+        template_legacy_id: str,
+    ) -> bool:
+        if not self.service_configured:
+            return False
+        target_template_id = await self.resolve_target_discovery_question_template_id(tenant_legacy_id, template_legacy_id)
+        if not target_template_id:
+            return False
+        await self._request(
+            "PATCH",
+            "discovery_question_templates",
+            params={"id": f"eq.{target_template_id}"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    def _roadmap_plan_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+    ) -> dict[str, Any]:
+        doc = dict(row or {})
+        items = doc.get("items") or []
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = client_legacy_id
+        doc["weeks"] = _safe_int(doc.get("weeks"), 12)
+        doc["items"] = [dict(item or {}) for item in items if isinstance(item, dict)]
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def get_roadmap_plan(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("roadmap"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return None
+        rows = await self._safe_select(
+            "roadmap_plans",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return self._roadmap_plan_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    async def upsert_roadmap_plan(
+        self,
+        tenant_legacy_id: str,
+        client_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return None
+        plan_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "legacy_source_id": plan_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "start_date": (doc or {}).get("start_date"),
+            "weeks": _safe_int((doc or {}).get("weeks"), 12),
+            "items": [dict(item or {}) for item in ((doc or {}).get("items") or []) if isinstance(item, dict)],
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        existing_rows = await self._safe_select(
+            "roadmap_plans",
+            select="id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if existing_rows:
+            row_id = str((existing_rows[0] or {}).get("id") or "").strip()
+            result = await self._request(
+                "PATCH",
+                "roadmap_plans",
+                params={"id": f"eq.{row_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "roadmap_plans",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._roadmap_plan_row_to_doc(rows[0], tenant_legacy_id, client_legacy_id)
+
+    def _content_capture_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_by_id: dict[str, str],
+        meeting_legacy_by_id: Optional[dict[str, str]] = None,
+    ) -> Optional[dict[str, Any]]:
+        doc = dict(row or {})
+        client_id = str(doc.get("client_id") or "").strip()
+        legacy_client_id = client_legacy_by_id.get(client_id) or (client_id if _is_uuid(client_id) else "")
+        if not legacy_client_id:
+            return None
+        meeting_id = str(doc.get("meeting_id") or "").strip()
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = legacy_client_id
+        doc["meeting_id"] = (meeting_legacy_by_id or {}).get(meeting_id) or (meeting_id if _is_uuid(meeting_id) else None) or None
+        doc["requested"] = bool(doc.get("requested", False))
+        doc["received"] = bool(doc.get("received", False))
+        doc["routed_to_marketing"] = bool(doc.get("routed_to_marketing", False))
+        sentiment_score = doc.get("sentiment_score")
+        doc["sentiment_score"] = _safe_float(sentiment_score) if sentiment_score not in (None, "") else None
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def list_content_captures(
+        self,
+        tenant_legacy_id: str,
+        *,
+        client_legacy_id: Optional[str] = None,
+        meeting_legacy_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("content_captures"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "is_deleted": "eq.false",
+        }
+        if client_legacy_id:
+            target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+            if not target_client_id:
+                return []
+            filters["client_id"] = f"eq.{target_client_id}"
+        if meeting_legacy_id:
+            target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+            if not target_meeting_id:
+                return []
+            filters["meeting_id"] = f"eq.{target_meeting_id}"
+        rows = await self._safe_select(
+            "content_captures",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        client_legacy_by_id = await self._load_client_legacy_map(
+            [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+        )
+        meeting_legacy_by_id = await self._load_meeting_legacy_map(
+            [str(row.get("meeting_id") or "").strip() for row in rows if str(row.get("meeting_id") or "").strip()]
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            doc = self._content_capture_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+            if doc:
+                out.append(doc)
+        return out
+
+    async def get_content_capture(
+        self,
+        tenant_legacy_id: str,
+        content_capture_legacy_id: str,
+    ) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("content_captures"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "content_captures",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "legacy_source_id": f"eq.{content_capture_legacy_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows and _is_uuid(content_capture_legacy_id):
+            rows = await self._safe_select(
+                "content_captures",
+                select="*",
+                filters={"tenant_id": f"eq.{target_tenant_id}", "id": f"eq.{content_capture_legacy_id}", "is_deleted": "eq.false"},
+                limit=1,
+            )
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        return self._content_capture_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+
+    async def resolve_target_content_capture_id(
+        self,
+        tenant_legacy_id: str,
+        content_capture_legacy_id: str,
+    ) -> Optional[str]:
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "content_captures",
+            select="id,legacy_source_id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{content_capture_legacy_id},id.eq.{content_capture_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return str((rows[0] or {}).get("id") or "").strip() or None
+
+    async def upsert_content_capture(
+        self,
+        tenant_legacy_id: str,
+        doc: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        content_capture_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        target_content_capture_id = (
+            await self.resolve_target_content_capture_id(tenant_legacy_id, content_capture_legacy_id)
+            if content_capture_legacy_id
+            else None
+        )
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, str((doc or {}).get("client_id") or "").strip())
+        if not target_client_id:
+            return None
+        meeting_legacy_id = str((doc or {}).get("meeting_id") or "").strip()
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id) if meeting_legacy_id else None
+        if meeting_legacy_id and not target_meeting_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "meeting_id": target_meeting_id,
+            "legacy_source_id": content_capture_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "type": str((doc or {}).get("type") or "quote"),
+            "content": str((doc or {}).get("content") or ""),
+            "sentiment_score": _safe_float((doc or {}).get("sentiment_score")) if (doc or {}).get("sentiment_score") not in (None, "") else None,
+            "timestamp_in_meeting": (doc or {}).get("timestamp_in_meeting"),
+            "requested": bool((doc or {}).get("requested", False)),
+            "received": bool((doc or {}).get("received", False)),
+            "routed_to_marketing": bool((doc or {}).get("routed_to_marketing", False)),
+            "notes": (doc or {}).get("notes"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        if target_content_capture_id:
+            result = await self._request(
+                "PATCH",
+                "content_captures",
+                params={"id": f"eq.{target_content_capture_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "content_captures",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        return self._content_capture_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+
+    async def soft_delete_content_capture(self, tenant_legacy_id: str, content_capture_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_content_capture_id = await self.resolve_target_content_capture_id(tenant_legacy_id, content_capture_legacy_id)
+        if not target_content_capture_id:
+            return False
+        await self._request(
+            "PATCH",
+            "content_captures",
+            params={"id": f"eq.{target_content_capture_id}"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def soft_delete_content_captures_for_client(self, tenant_legacy_id: str, client_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return False
+        await self._request(
+            "PATCH",
+            "content_captures",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "client_id": f"eq.{target_client_id}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def soft_delete_content_captures_for_meeting(self, tenant_legacy_id: str, meeting_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+        if not target_tenant_id or not target_meeting_id:
+            return False
+        await self._request(
+            "PATCH",
+            "content_captures",
+            params={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "meeting_id": f"eq.{target_meeting_id}",
+                "is_deleted": "eq.false",
+            },
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    def _ticket_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_by_id: dict[str, str],
+        meeting_legacy_by_id: Optional[dict[str, str]] = None,
+    ) -> Optional[dict[str, Any]]:
+        doc = dict(row or {})
+        client_id = str(doc.get("client_id") or "").strip()
+        legacy_client_id = client_legacy_by_id.get(client_id) or (client_id if _is_uuid(client_id) else "")
+        if not legacy_client_id:
+            return None
+        meeting_id = str(doc.get("meeting_id") or "").strip()
+        legacy_meeting_id = (meeting_legacy_by_id or {}).get(meeting_id) or (meeting_id if _is_uuid(meeting_id) else "")
+        if not legacy_meeting_id:
+            return None
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = legacy_client_id
+        doc["meeting_id"] = legacy_meeting_id
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    def _qa_scorecard_row_to_doc(
+        self,
+        row: dict[str, Any],
+        tenant_legacy_id: str,
+        client_legacy_by_id: dict[str, str],
+        meeting_legacy_by_id: Optional[dict[str, str]] = None,
+        user_legacy_by_id: Optional[dict[str, str]] = None,
+    ) -> Optional[dict[str, Any]]:
+        doc = dict(row or {})
+        client_id = str(doc.get("client_id") or "").strip()
+        legacy_client_id = client_legacy_by_id.get(client_id) or (client_id if _is_uuid(client_id) else "")
+        if not legacy_client_id:
+            return None
+        meeting_id = str(doc.get("meeting_id") or "").strip()
+        legacy_meeting_id = (meeting_legacy_by_id or {}).get(meeting_id) or (meeting_id if _is_uuid(meeting_id) else "")
+        if not legacy_meeting_id:
+            return None
+        account_manager_user_id = str(doc.pop("account_manager_user_id", "") or "").strip()
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["client_id"] = legacy_client_id
+        doc["meeting_id"] = legacy_meeting_id
+        doc["account_manager_id"] = (user_legacy_by_id or {}).get(account_manager_user_id) or account_manager_user_id or None
+        doc["total_score"] = _safe_int(doc.get("total_score"), 0)
+        doc["dimensions"] = dict(doc.get("dimensions") or {})
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def list_tickets(
+        self,
+        tenant_legacy_id: str,
+        *,
+        meeting_legacy_id: Optional[str] = None,
+        client_legacy_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("tickets"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        filters: dict[str, str] = {
+            "tenant_id": f"eq.{target_tenant_id}",
+            "is_deleted": "eq.false",
+        }
+        if meeting_legacy_id:
+            target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+            if not target_meeting_id:
+                return []
+            filters["meeting_id"] = f"eq.{target_meeting_id}"
+        if client_legacy_id:
+            target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+            if not target_client_id:
+                return []
+            filters["client_id"] = f"eq.{target_client_id}"
+        rows = await self._safe_select(
+            "tickets",
+            select="*",
+            filters=filters,
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        client_legacy_by_id = await self._load_client_legacy_map(
+            [str(row.get("client_id") or "").strip() for row in rows if str(row.get("client_id") or "").strip()]
+        )
+        meeting_legacy_by_id = await self._load_meeting_legacy_map(
+            [str(row.get("meeting_id") or "").strip() for row in rows if str(row.get("meeting_id") or "").strip()]
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            doc = self._ticket_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+            if doc:
+                out.append(doc)
+        return out
+
+    async def get_ticket(self, tenant_legacy_id: str, ticket_legacy_id: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("tickets"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "tickets",
+            select="*",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "legacy_source_id": f"eq.{ticket_legacy_id}",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows and _is_uuid(ticket_legacy_id):
+            rows = await self._safe_select(
+                "tickets",
+                select="*",
+                filters={"tenant_id": f"eq.{target_tenant_id}", "id": f"eq.{ticket_legacy_id}", "is_deleted": "eq.false"},
+                limit=1,
+            )
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        return self._ticket_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+
+    async def resolve_target_ticket_id(self, tenant_legacy_id: str, ticket_legacy_id: str) -> Optional[str]:
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        rows = await self._safe_select(
+            "tickets",
+            select="id,legacy_source_id",
+            filters={
+                "tenant_id": f"eq.{target_tenant_id}",
+                "or": f"(legacy_source_id.eq.{ticket_legacy_id},id.eq.{ticket_legacy_id})",
+                "is_deleted": "eq.false",
+            },
+            limit=1,
+        )
+        if not rows:
+            return None
+        return str((rows[0] or {}).get("id") or "").strip() or None
+
+    async def upsert_ticket(self, tenant_legacy_id: str, doc: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        ticket_legacy_id = str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip()
+        target_ticket_id = await self.resolve_target_ticket_id(tenant_legacy_id, ticket_legacy_id) if ticket_legacy_id else None
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, str((doc or {}).get("client_id") or "").strip())
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, str((doc or {}).get("meeting_id") or "").strip())
+        if not target_client_id or not target_meeting_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "meeting_id": target_meeting_id,
+            "legacy_source_id": ticket_legacy_id or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "department": str((doc or {}).get("department") or "Other"),
+            "title": str((doc or {}).get("title") or "Ticket"),
+            "description": (doc or {}).get("description"),
+            "priority": str((doc or {}).get("priority") or "medium"),
+            "status": str((doc or {}).get("status") or "open"),
+            "external_id": (doc or {}).get("external_id"),
+            "external_url": (doc or {}).get("external_url"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        if target_ticket_id:
+            result = await self._request(
+                "PATCH",
+                "tickets",
+                params={"id": f"eq.{target_ticket_id}"},
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        else:
+            result = await self._request(
+                "POST",
+                "tickets",
+                payload=payload,
+                headers=self._write_headers(prefer="return=representation"),
+            )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        return self._ticket_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id)
+
+    async def soft_delete_tickets_for_client(self, tenant_legacy_id: str, client_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return False
+        await self._request(
+            "PATCH",
+            "tickets",
+            params={"tenant_id": f"eq.{target_tenant_id}", "client_id": f"eq.{target_client_id}", "is_deleted": "eq.false"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def soft_delete_tickets_for_meeting(self, tenant_legacy_id: str, meeting_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+        if not target_tenant_id or not target_meeting_id:
+            return False
+        await self._request(
+            "PATCH",
+            "tickets",
+            params={"tenant_id": f"eq.{target_tenant_id}", "meeting_id": f"eq.{target_meeting_id}", "is_deleted": "eq.false"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def get_latest_qa_scorecard(self, tenant_legacy_id: str, meeting_legacy_id: str) -> Optional[dict[str, Any]]:
+        if not self.is_enabled_for("qa_scorecards"):
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+        if not target_tenant_id or not target_meeting_id:
+            return None
+        rows = await self._safe_select(
+            "qa_scorecards",
+            select="*",
+            filters={"tenant_id": f"eq.{target_tenant_id}", "meeting_id": f"eq.{target_meeting_id}", "is_deleted": "eq.false"},
+            order="created_at.desc",
+            limit=1,
+        )
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        user_legacy_by_id = await self._load_user_legacy_map([str(row.get("account_manager_user_id") or "").strip()])
+        return self._qa_scorecard_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id, user_legacy_by_id)
+
+    async def create_qa_scorecard(self, tenant_legacy_id: str, doc: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, str((doc or {}).get("client_id") or "").strip())
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, str((doc or {}).get("meeting_id") or "").strip())
+        account_manager_user_id = await self.resolve_target_user_id(str((doc or {}).get("account_manager_id") or "").strip())
+        if not target_client_id or not target_meeting_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "client_id": target_client_id,
+            "meeting_id": target_meeting_id,
+            "account_manager_user_id": account_manager_user_id,
+            "legacy_source_id": str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip() or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "account_manager_name": (doc or {}).get("account_manager_name"),
+            "total_score": _safe_int((doc or {}).get("total_score"), 0),
+            "dimensions": dict((doc or {}).get("dimensions") or {}),
+            "feedback": (doc or {}).get("feedback"),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        result = await self._request(
+            "POST",
+            "qa_scorecards",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        row = rows[0] or {}
+        client_legacy_by_id = await self._load_client_legacy_map([str(row.get("client_id") or "").strip()])
+        meeting_legacy_by_id = await self._load_meeting_legacy_map([str(row.get("meeting_id") or "").strip()])
+        user_legacy_by_id = await self._load_user_legacy_map([str(row.get("account_manager_user_id") or "").strip()])
+        return self._qa_scorecard_row_to_doc(row, tenant_legacy_id, client_legacy_by_id, meeting_legacy_by_id, user_legacy_by_id)
+
+    async def soft_delete_qa_scorecards_for_client(self, tenant_legacy_id: str, client_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_client_id = await self.resolve_target_client_id(tenant_legacy_id, client_legacy_id)
+        if not target_tenant_id or not target_client_id:
+            return False
+        await self._request(
+            "PATCH",
+            "qa_scorecards",
+            params={"tenant_id": f"eq.{target_tenant_id}", "client_id": f"eq.{target_client_id}", "is_deleted": "eq.false"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    async def soft_delete_qa_scorecards_for_meeting(self, tenant_legacy_id: str, meeting_legacy_id: str) -> bool:
+        if not self.service_configured:
+            return False
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        target_meeting_id = await self.resolve_target_meeting_id(tenant_legacy_id, meeting_legacy_id)
+        if not target_tenant_id or not target_meeting_id:
+            return False
+        await self._request(
+            "PATCH",
+            "qa_scorecards",
+            params={"tenant_id": f"eq.{target_tenant_id}", "meeting_id": f"eq.{target_meeting_id}", "is_deleted": "eq.false"},
+            payload={"is_deleted": True},
+            headers=self._write_headers(prefer="return=minimal"),
+        )
+        return True
+
+    def _tenant_file_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str) -> dict[str, Any]:
+        doc = dict(row or {})
+        doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or "")
+        doc["tenant_id"] = tenant_legacy_id
+        doc["size_bytes"] = _safe_int(doc.get("size_bytes"), 0)
+        doc["extracted_chars"] = _safe_int(doc.get("extracted_chars"), 0)
+        doc["storage"] = dict(doc.get("storage") or {})
+        for key in ("id", "legacy_source_id", "legacy_source_kind", "created_by", "is_deleted"):
+            doc.pop(key, None)
+        return doc
+
+    async def list_tenant_files(self, tenant_legacy_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        if not self.is_enabled_for("tenant_files"):
+            return []
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return []
+        rows = await self._safe_select(
+            "tenant_files",
+            select="*",
+            filters={"tenant_id": f"eq.{target_tenant_id}", "is_deleted": "eq.false"},
+            order="created_at.desc",
+            limit=limit,
+        )
+        if not rows:
+            return []
+        return [self._tenant_file_row_to_doc(row, tenant_legacy_id) for row in rows]
+
+    async def create_tenant_file(self, tenant_legacy_id: str, doc: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self.service_configured:
+            return None
+        target_tenant_id = await self.resolve_target_tenant_id(tenant_legacy_id)
+        if not target_tenant_id:
+            return None
+        payload = {
+            "tenant_id": target_tenant_id,
+            "legacy_source_id": str((doc or {}).get("_id") or (doc or {}).get("id") or "").strip() or None,
+            "legacy_source_kind": str((doc or {}).get("legacy_source_kind") or "runtime"),
+            "purpose": str((doc or {}).get("purpose") or "documentation"),
+            "filename": (doc or {}).get("filename"),
+            "mime_type": (doc or {}).get("mime_type"),
+            "size_bytes": _safe_int((doc or {}).get("size_bytes"), 0),
+            "storage": dict((doc or {}).get("storage") or {}),
+            "extracted_text": (doc or {}).get("extracted_text"),
+            "extracted_chars": _safe_int((doc or {}).get("extracted_chars"), 0),
+            "updated_at": (doc or {}).get("updated_at"),
+            "is_deleted": False,
+        }
+        result = await self._request(
+            "POST",
+            "tenant_files",
+            payload=payload,
+            headers=self._write_headers(prefer="return=representation"),
+        )
+        rows = result if isinstance(result, list) else [result]
+        if not rows:
+            return None
+        return self._tenant_file_row_to_doc(rows[0], tenant_legacy_id)
+
     def _integration_row_to_doc(self, row: dict[str, Any], tenant_legacy_id: str) -> dict[str, Any]:
         doc = dict(row or {})
         doc["_id"] = str(doc.get("legacy_source_id") or doc.get("id") or doc.get("platform") or "")

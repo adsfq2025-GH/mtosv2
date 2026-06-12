@@ -1453,6 +1453,957 @@ def test_create_clickup_client_sync_log_preserves_legacy_shape():
     assert captured[0]["payload"]["legacy_source_id"] == "run_123"
 
 
+def test_runtime_bridge_settings_allow_reviews_domain(monkeypatch):
+    monkeypatch.setenv("SUPABASE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-secret")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_DOMAINS", "clients,reviews")
+    reset_supabase_settings_cache()
+
+    settings = get_runtime_bridge_settings()
+
+    assert settings["domains"] == ("clients", "reviews")
+    assert "reviews" in settings["supported_domains"]
+    reset_supabase_settings_cache()
+
+
+def test_get_client_review_goal_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("reviews", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "client_review_goals":
+            return [
+                {
+                    "id": "goal-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "monthly_goal": 18,
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.get_client_review_goal("mongo-tenant-id", "mongo-client-id"))
+
+    assert doc is not None
+    assert doc["_id"] == "goal-row-id"
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["client_id"] == "mongo-client-id"
+    assert doc["monthly_goal"] == 18
+
+
+def test_list_review_events_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("reviews", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_load_meeting_legacy_map(meeting_ids):
+        assert meeting_ids == ["supabase-meeting-id"]
+        return {"supabase-meeting-id": "mongo-meeting-id"}
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "review_events":
+            return [
+                {
+                    "id": "event-row-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "meeting_id": "supabase-meeting-id",
+                    "kind": "requested",
+                    "count": 3,
+                    "occurred_on": "2026-06-01",
+                    "channel": "sms",
+                    "source": "manual",
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._load_meeting_legacy_map = fake_load_meeting_legacy_map  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_review_events("mongo-tenant-id", client_legacy_id="mongo-client-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "event-row-id"
+    assert docs[0]["meeting_id"] == "mongo-meeting-id"
+    assert docs[0]["count"] == 3
+
+
+def test_upsert_review_monthly_snapshot_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("reviews", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "review_monthly_snapshots":
+            return []
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "snapshot-row-id",
+                "legacy_source_id": "mongo-snapshot-id",
+                "tenant_id": "supabase-tenant-id",
+                "client_id": "supabase-client-id",
+                "month": "2026-06",
+                "received": 7,
+                "avg_rating": 4.8,
+                "source": "gbp",
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_review_monthly_snapshot(
+            "mongo-tenant-id",
+            "mongo-client-id",
+            {
+                "_id": "mongo-snapshot-id",
+                "month": "2026-06",
+                "received": 7,
+                "avg_rating": 4.8,
+                "source": "gbp",
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-snapshot-id"
+    assert captured[0]["relation"] == "review_monthly_snapshots"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["client_id"] == "supabase-client-id"
+    assert captured[0]["payload"]["month"] == "2026-06"
+    assert captured[0]["payload"]["received"] == 7
+
+
+def test_runtime_bridge_settings_allow_discovery_domain(monkeypatch):
+    monkeypatch.setenv("SUPABASE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-secret")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_DOMAINS", "clients,discovery")
+    reset_supabase_settings_cache()
+
+    settings = get_runtime_bridge_settings()
+
+    assert settings["domains"] == ("clients", "discovery")
+    assert "discovery" in settings["supported_domains"]
+    reset_supabase_settings_cache()
+
+
+def test_list_discovery_question_templates_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("discovery",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "discovery_question_templates":
+            return [
+                {
+                    "id": "template-row-id",
+                    "legacy_source_id": "mongo-template-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "kind": "operational",
+                    "category": "Reviews",
+                    "question": "How are you asking for reviews right now?",
+                    "tags": ["reviews"],
+                    "deliverables": ["gbp"],
+                    "active": True,
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_discovery_question_templates("mongo-tenant-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-template-id"
+    assert docs[0]["tenant_id"] == "mongo-tenant-id"
+    assert docs[0]["tags"] == ["reviews"]
+    assert docs[0]["deliverables"] == ["gbp"]
+
+
+def test_upsert_discovery_question_template_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("discovery",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "template-row-id",
+                "legacy_source_id": "mongo-template-id",
+                "tenant_id": "supabase-tenant-id",
+                "kind": "operational",
+                "category": "Reviews",
+                "question": "How are you asking for reviews right now?",
+                "tags": ["reviews"],
+                "deliverables": ["gbp"],
+                "active": True,
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_discovery_question_template(
+            "mongo-tenant-id",
+            {
+                "_id": "mongo-template-id",
+                "kind": "operational",
+                "category": "Reviews",
+                "question": "How are you asking for reviews right now?",
+                "tags": ["reviews"],
+                "deliverables": ["gbp"],
+                "active": True,
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-template-id"
+    assert captured[0]["relation"] == "discovery_question_templates"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["category"] == "Reviews"
+    assert captured[0]["payload"]["question"] == "How are you asking for reviews right now?"
+
+
+def test_soft_delete_discovery_question_template_marks_row_deleted():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("discovery",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_discovery_question_template_id(_: str, __: str):
+        return "supabase-template-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "params": kwargs.get("params"), "payload": kwargs.get("payload")})
+        return {}
+
+    bridge.resolve_target_discovery_question_template_id = fake_resolve_target_discovery_question_template_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    ok = asyncio.run(bridge.soft_delete_discovery_question_template("mongo-tenant-id", "mongo-template-id"))
+
+    assert ok is True
+    assert captured[0]["relation"] == "discovery_question_templates"
+    assert captured[0]["params"] == {"id": "eq.supabase-template-id"}
+    assert captured[0]["payload"] == {"is_deleted": True}
+
+
+def test_runtime_bridge_settings_allow_roadmap_domain(monkeypatch):
+    monkeypatch.setenv("SUPABASE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-secret")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_DOMAINS", "clients,roadmap")
+    reset_supabase_settings_cache()
+
+    settings = get_runtime_bridge_settings()
+
+    assert settings["domains"] == ("clients", "roadmap")
+    assert "roadmap" in settings["supported_domains"]
+    reset_supabase_settings_cache()
+
+
+def test_get_roadmap_plan_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("roadmap", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "roadmap_plans":
+            return [
+                {
+                    "id": "roadmap-row-id",
+                    "legacy_source_id": "mongo-roadmap-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "start_date": "2026-06-01",
+                    "weeks": 12,
+                    "items": [
+                        {
+                            "id": "roadmap-item-1",
+                            "week": 1,
+                            "title": "Launch review ask flow",
+                            "status": "open",
+                            "priority": "high",
+                            "action_item_id": "legacy-action-item-id",
+                        }
+                    ],
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.get_roadmap_plan("mongo-tenant-id", "mongo-client-id"))
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-roadmap-id"
+    assert doc["tenant_id"] == "mongo-tenant-id"
+    assert doc["client_id"] == "mongo-client-id"
+    assert doc["items"][0]["title"] == "Launch review ask flow"
+    assert doc["items"][0]["action_item_id"] == "legacy-action-item-id"
+
+
+def test_upsert_roadmap_plan_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("roadmap", "clients"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "roadmap_plans":
+            return []
+        return []
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "roadmap-row-id",
+                "legacy_source_id": "mongo-roadmap-id",
+                "tenant_id": "supabase-tenant-id",
+                "client_id": "supabase-client-id",
+                "start_date": "2026-06-01",
+                "weeks": 12,
+                "items": [{"id": "roadmap-item-1", "week": 1, "title": "Launch review ask flow"}],
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_roadmap_plan(
+            "mongo-tenant-id",
+            "mongo-client-id",
+            {
+                "_id": "mongo-roadmap-id",
+                "start_date": "2026-06-01",
+                "weeks": 12,
+                "items": [{"id": "roadmap-item-1", "week": 1, "title": "Launch review ask flow"}],
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-roadmap-id"
+    assert captured[0]["relation"] == "roadmap_plans"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["client_id"] == "supabase-client-id"
+    assert captured[0]["payload"]["items"][0]["title"] == "Launch review ask flow"
+
+
+def test_runtime_bridge_settings_allow_content_captures_domain(monkeypatch):
+    monkeypatch.setenv("SUPABASE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-secret")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_DOMAINS", "clients,meetings,content_captures")
+    reset_supabase_settings_cache()
+
+    settings = get_runtime_bridge_settings()
+
+    assert settings["domains"] == ("clients", "content_captures", "meetings")
+    assert "content_captures" in settings["supported_domains"]
+    reset_supabase_settings_cache()
+
+
+def test_list_content_captures_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("content_captures", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_load_client_legacy_map(client_ids):
+        assert client_ids == ["supabase-client-id"]
+        return {"supabase-client-id": "mongo-client-id"}
+
+    async def fake_load_meeting_legacy_map(meeting_ids):
+        assert meeting_ids == ["supabase-meeting-id"]
+        return {"supabase-meeting-id": "mongo-meeting-id"}
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "content_captures":
+            return [
+                {
+                    "id": "capture-row-id",
+                    "legacy_source_id": "mongo-capture-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "meeting_id": "supabase-meeting-id",
+                    "type": "quote",
+                    "content": "Customer loved the fast turnaround.",
+                    "received": True,
+                    "routed_to_marketing": False,
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._load_client_legacy_map = fake_load_client_legacy_map  # type: ignore[method-assign]
+    bridge._load_meeting_legacy_map = fake_load_meeting_legacy_map  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_content_captures("mongo-tenant-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-capture-id"
+    assert docs[0]["client_id"] == "mongo-client-id"
+    assert docs[0]["meeting_id"] == "mongo-meeting-id"
+    assert docs[0]["received"] is True
+
+
+def test_upsert_content_capture_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("content_captures", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_resolve_target_meeting_id(_: str, __: str):
+        return "supabase-meeting-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "capture-row-id",
+                "legacy_source_id": "mongo-capture-id",
+                "tenant_id": "supabase-tenant-id",
+                "client_id": "supabase-client-id",
+                "meeting_id": "supabase-meeting-id",
+                "type": "quote",
+                "content": "Customer loved the fast turnaround.",
+                "received": True,
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge.resolve_target_meeting_id = fake_resolve_target_meeting_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_content_capture(
+            "mongo-tenant-id",
+            {
+                "_id": "mongo-capture-id",
+                "client_id": "mongo-client-id",
+                "meeting_id": "mongo-meeting-id",
+                "type": "quote",
+                "content": "Customer loved the fast turnaround.",
+                "received": True,
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-capture-id"
+    assert captured[0]["relation"] == "content_captures"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["client_id"] == "supabase-client-id"
+    assert captured[0]["payload"]["meeting_id"] == "supabase-meeting-id"
+
+
+def test_soft_delete_content_capture_marks_row_deleted():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("content_captures",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_content_capture_id(_: str, __: str):
+        return "supabase-capture-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "params": kwargs.get("params"), "payload": kwargs.get("payload")})
+        return {}
+
+    bridge.resolve_target_content_capture_id = fake_resolve_target_content_capture_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    ok = asyncio.run(bridge.soft_delete_content_capture("mongo-tenant-id", "mongo-capture-id"))
+
+    assert ok is True
+    assert captured[0]["relation"] == "content_captures"
+    assert captured[0]["params"] == {"id": "eq.supabase-capture-id"}
+    assert captured[0]["payload"] == {"is_deleted": True}
+
+
+def test_runtime_bridge_settings_allow_ticket_and_qa_domains(monkeypatch):
+    monkeypatch.setenv("SUPABASE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-secret")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_DOMAINS", "clients,meetings,tickets,qa_scorecards")
+    reset_supabase_settings_cache()
+
+    settings = get_runtime_bridge_settings()
+
+    assert settings["domains"] == ("clients", "meetings", "qa_scorecards", "tickets")
+    assert "tickets" in settings["supported_domains"]
+    assert "qa_scorecards" in settings["supported_domains"]
+    reset_supabase_settings_cache()
+
+
+def test_list_tickets_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tickets", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_load_client_legacy_map(client_ids):
+        assert client_ids == ["supabase-client-id"]
+        return {"supabase-client-id": "mongo-client-id"}
+
+    async def fake_load_meeting_legacy_map(meeting_ids):
+        assert meeting_ids == ["supabase-meeting-id"]
+        return {"supabase-meeting-id": "mongo-meeting-id"}
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tickets":
+            return [
+                {
+                    "id": "ticket-row-id",
+                    "legacy_source_id": "mongo-ticket-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "meeting_id": "supabase-meeting-id",
+                    "department": "Operations",
+                    "title": "Send recap assets",
+                    "priority": "high",
+                    "status": "open",
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._load_client_legacy_map = fake_load_client_legacy_map  # type: ignore[method-assign]
+    bridge._load_meeting_legacy_map = fake_load_meeting_legacy_map  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_tickets("mongo-tenant-id", meeting_legacy_id="mongo-meeting-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-ticket-id"
+    assert docs[0]["client_id"] == "mongo-client-id"
+    assert docs[0]["meeting_id"] == "mongo-meeting-id"
+    assert docs[0]["department"] == "Operations"
+
+
+def test_upsert_ticket_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tickets", "clients", "meetings"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_client_id(_: str, __: str):
+        return "supabase-client-id"
+
+    async def fake_resolve_target_meeting_id(_: str, __: str):
+        return "supabase-meeting-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "ticket-row-id",
+                "legacy_source_id": "mongo-ticket-id",
+                "tenant_id": "supabase-tenant-id",
+                "client_id": "supabase-client-id",
+                "meeting_id": "supabase-meeting-id",
+                "department": "Operations",
+                "title": "Send recap assets",
+                "priority": "high",
+                "status": "open",
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_client_id = fake_resolve_target_client_id  # type: ignore[method-assign]
+    bridge.resolve_target_meeting_id = fake_resolve_target_meeting_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.upsert_ticket(
+            "mongo-tenant-id",
+            {
+                "_id": "mongo-ticket-id",
+                "client_id": "mongo-client-id",
+                "meeting_id": "mongo-meeting-id",
+                "department": "Operations",
+                "title": "Send recap assets",
+                "priority": "high",
+                "status": "open",
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-ticket-id"
+    assert captured[0]["relation"] == "tickets"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["meeting_id"] == "supabase-meeting-id"
+
+
+def test_get_latest_qa_scorecard_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("qa_scorecards", "clients", "meetings", "profiles"),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_resolve_target_meeting_id(_: str, __: str):
+        return "supabase-meeting-id"
+
+    async def fake_load_client_legacy_map(client_ids):
+        assert client_ids == ["supabase-client-id"]
+        return {"supabase-client-id": "mongo-client-id"}
+
+    async def fake_load_meeting_legacy_map(meeting_ids):
+        assert meeting_ids == ["supabase-meeting-id"]
+        return {"supabase-meeting-id": "mongo-meeting-id"}
+
+    async def fake_load_user_legacy_map(user_ids):
+        assert user_ids == ["supabase-user-id"]
+        return {"supabase-user-id": "mongo-user-id"}
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "qa_scorecards":
+            return [
+                {
+                    "id": "qa-row-id",
+                    "legacy_source_id": "mongo-qa-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "client_id": "supabase-client-id",
+                    "meeting_id": "supabase-meeting-id",
+                    "account_manager_user_id": "supabase-user-id",
+                    "account_manager_name": "Casey",
+                    "total_score": 88,
+                    "dimensions": {"communication": 9},
+                    "feedback": "Strong follow-up",
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge.resolve_target_meeting_id = fake_resolve_target_meeting_id  # type: ignore[method-assign]
+    bridge._load_client_legacy_map = fake_load_client_legacy_map  # type: ignore[method-assign]
+    bridge._load_meeting_legacy_map = fake_load_meeting_legacy_map  # type: ignore[method-assign]
+    bridge._load_user_legacy_map = fake_load_user_legacy_map  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    doc = asyncio.run(bridge.get_latest_qa_scorecard("mongo-tenant-id", "mongo-meeting-id"))
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-qa-id"
+    assert doc["meeting_id"] == "mongo-meeting-id"
+    assert doc["client_id"] == "mongo-client-id"
+    assert doc["account_manager_id"] == "mongo-user-id"
+    assert doc["total_score"] == 88
+
+
+def test_runtime_bridge_settings_allow_tenant_files_domain(monkeypatch):
+    monkeypatch.setenv("SUPABASE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-secret")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_RUNTIME_BRIDGE_DOMAINS", "tenant_files")
+    reset_supabase_settings_cache()
+
+    settings = get_runtime_bridge_settings()
+
+    assert settings["domains"] == ("tenant_files",)
+    assert "tenant_files" in settings["supported_domains"]
+    reset_supabase_settings_cache()
+
+
+def test_list_tenant_files_preserves_legacy_shape():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tenant_files",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_select(relation: str, **kwargs):
+        if relation == "tenant_files":
+            return [
+                {
+                    "id": "tenant-file-row-id",
+                    "legacy_source_id": "mongo-file-id",
+                    "tenant_id": "supabase-tenant-id",
+                    "purpose": "documentation",
+                    "filename": "playbook.pdf",
+                    "mime_type": "application/pdf",
+                    "size_bytes": 1024,
+                    "storage": {"provider": "local", "path": "d:/tmp/playbook.pdf"},
+                    "extracted_text": "hello world",
+                    "extracted_chars": 11,
+                }
+            ]
+        return []
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._safe_select = fake_select  # type: ignore[method-assign]
+
+    docs = asyncio.run(bridge.list_tenant_files("mongo-tenant-id", limit=10))
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "mongo-file-id"
+    assert docs[0]["tenant_id"] == "mongo-tenant-id"
+    assert docs[0]["filename"] == "playbook.pdf"
+    assert docs[0]["extracted_chars"] == 11
+
+
+def test_create_tenant_file_posts_supabase_payload():
+    bridge = RuntimeBridge(
+        {
+            "service_configured": True,
+            "domains": ("tenant_files",),
+            "timeout_seconds": 5,
+            "url": "https://example.supabase.co",
+            "service_role_key": "test",
+            "db_schema": "public",
+        }
+    )
+
+    captured = []
+
+    async def fake_resolve_target_tenant_id(_: str):
+        return "supabase-tenant-id"
+
+    async def fake_request(method: str, relation: str, **kwargs):
+        captured.append({"method": method, "relation": relation, "payload": kwargs.get("payload")})
+        return [
+            {
+                "id": "tenant-file-row-id",
+                "legacy_source_id": "mongo-file-id",
+                "tenant_id": "supabase-tenant-id",
+                "purpose": "documentation",
+                "filename": "playbook.pdf",
+                "mime_type": "application/pdf",
+                "size_bytes": 1024,
+                "storage": {"provider": "local", "path": "d:/tmp/playbook.pdf"},
+                "extracted_text": "hello world",
+                "extracted_chars": 11,
+            }
+        ]
+
+    bridge.resolve_target_tenant_id = fake_resolve_target_tenant_id  # type: ignore[method-assign]
+    bridge._request = fake_request  # type: ignore[method-assign]
+
+    doc = asyncio.run(
+        bridge.create_tenant_file(
+            "mongo-tenant-id",
+            {
+                "_id": "mongo-file-id",
+                "purpose": "documentation",
+                "filename": "playbook.pdf",
+                "mime_type": "application/pdf",
+                "size_bytes": 1024,
+                "storage": {"provider": "local", "path": "d:/tmp/playbook.pdf"},
+                "extracted_text": "hello world",
+                "extracted_chars": 11,
+            },
+        )
+    )
+
+    assert doc is not None
+    assert doc["_id"] == "mongo-file-id"
+    assert captured[0]["relation"] == "tenant_files"
+    assert captured[0]["payload"]["tenant_id"] == "supabase-tenant-id"
+    assert captured[0]["payload"]["filename"] == "playbook.pdf"
+
+
 def test_runtime_bridge_settings_allow_ai_visibility_domain(monkeypatch):
     monkeypatch.setenv("SUPABASE_ENABLED", "true")
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
