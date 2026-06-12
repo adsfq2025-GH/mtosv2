@@ -20,6 +20,7 @@ from oauth_runtime import (
     clear_google_oauth_token,
     decode_google_oauth_state,
     decode_inline_oauth_connection_ref,
+    get_google_oauth_runtime_doc,
     write_google_oauth_token,
 )
 
@@ -172,21 +173,16 @@ def test_inline_oauth_connection_ref_round_trip():
 
 
 def test_get_google_refresh_token_prefers_bridge(monkeypatch):
-    bridge_doc = {
+    runtime_doc = {
         "oauth_connection_ref": build_inline_oauth_connection_ref("bridge-refresh-token")
     }
-    async def fake_bridge_doc(tenant_id: str, user_id: str, platform: str):
+    async def fake_runtime_doc(tenant_id: str, user_id: str, platform: str):
         assert tenant_id == "tenant-123"
         assert user_id == "user-456"
         assert platform == "google_calendar"
-        return bridge_doc
+        return runtime_doc
 
-    monkeypatch.setattr(connectors, "get_google_oauth_bridge_account", fake_bridge_doc)
-    monkeypatch.setattr(
-        connectors,
-        "db",
-        SimpleNamespace(user_oauth_tokens=_FakeTokenCollection({"refresh_token_encrypted": "should-not-be-used"})),
-    )
+    monkeypatch.setattr(connectors, "get_google_oauth_runtime_doc", fake_runtime_doc)
 
     token = asyncio.run(connectors.get_google_refresh_token("tenant-123", "user-456", "google_calendar"))
 
@@ -194,19 +190,10 @@ def test_get_google_refresh_token_prefers_bridge(monkeypatch):
 
 
 def test_get_google_refresh_token_falls_back_to_mongo(monkeypatch):
-    async def fake_bridge_doc(tenant_id: str, user_id: str, platform: str):
-        return None
+    async def fake_runtime_doc(tenant_id: str, user_id: str, platform: str):
+        return {"oauth_connection_ref": build_inline_oauth_connection_ref("mongo-refresh-token")}
 
-    monkeypatch.setattr(connectors, "get_google_oauth_bridge_account", fake_bridge_doc)
-    monkeypatch.setattr(
-        connectors,
-        "db",
-        SimpleNamespace(
-            user_oauth_tokens=_FakeTokenCollection(
-                {"refresh_token_encrypted": encrypt_secret("mongo-refresh-token")}
-            )
-        ),
-    )
+    monkeypatch.setattr(connectors, "get_google_oauth_runtime_doc", fake_runtime_doc)
 
     token = asyncio.run(connectors.get_google_refresh_token("tenant-123", "user-456", "google_calendar"))
 
@@ -214,19 +201,10 @@ def test_get_google_refresh_token_falls_back_to_mongo(monkeypatch):
 
 
 def test_get_google_refresh_token_treats_empty_bridge_ref_as_authoritative_disconnect(monkeypatch):
-    async def fake_bridge_doc(tenant_id: str, user_id: str, platform: str):
+    async def fake_runtime_doc(tenant_id: str, user_id: str, platform: str):
         return {"oauth_connection_ref": ""}
 
-    monkeypatch.setattr(connectors, "get_google_oauth_bridge_account", fake_bridge_doc)
-    monkeypatch.setattr(
-        connectors,
-        "db",
-        SimpleNamespace(
-            user_oauth_tokens=_FakeTokenCollection(
-                {"refresh_token_encrypted": encrypt_secret("mongo-refresh-token")}
-            )
-        ),
-    )
+    monkeypatch.setattr(connectors, "get_google_oauth_runtime_doc", fake_runtime_doc)
 
     token = asyncio.run(connectors.get_google_refresh_token("tenant-123", "user-456", "google_calendar"))
 
@@ -234,21 +212,51 @@ def test_get_google_refresh_token_treats_empty_bridge_ref_as_authoritative_disco
 
 
 def test_get_google_refresh_token_skips_mongo_when_no_mongo_reads_enabled(monkeypatch):
-    async def fake_bridge_doc(tenant_id: str, user_id: str, platform: str):
+    async def fake_runtime_doc(tenant_id: str, user_id: str, platform: str):
         return None
 
-    monkeypatch.setattr(connectors, "get_google_oauth_bridge_account", fake_bridge_doc)
-    monkeypatch.setattr(connectors, "is_no_mongo_oauth_token_read_enabled", lambda: True)
-    mongo_collection = _FakeTokenCollection({"refresh_token_encrypted": encrypt_secret("mongo-refresh-token")})
-    monkeypatch.setattr(
-        connectors,
-        "db",
-        SimpleNamespace(user_oauth_tokens=mongo_collection),
-    )
+    monkeypatch.setattr(connectors, "get_google_oauth_runtime_doc", fake_runtime_doc)
 
     token = asyncio.run(connectors.get_google_refresh_token("tenant-123", "user-456", "google_calendar"))
 
     assert token == ""
+
+
+def test_get_google_oauth_runtime_doc_falls_back_to_mongo(monkeypatch):
+    async def fake_bridge_doc(tenant_id: str, user_id: str, platform: str):
+        return None
+
+    monkeypatch.setattr(oauth_runtime, "get_google_oauth_bridge_account", fake_bridge_doc)
+    monkeypatch.setattr(oauth_runtime, "is_no_mongo_oauth_token_read_enabled", lambda: False)
+    monkeypatch.setattr(oauth_runtime, "is_mongo_configured", lambda: True)
+    monkeypatch.setattr(
+        oauth_runtime,
+        "db",
+        SimpleNamespace(
+            user_oauth_tokens=_FakeTokenCollection(
+                {
+                    "_id": "mongo-token-id",
+                    "tenant_id": "tenant-123",
+                    "user_id": "user-456",
+                    "provider": "google",
+                    "platform": "google_calendar",
+                    "refresh_token_encrypted": encrypt_secret("mongo-refresh-token"),
+                    "scopes": ["calendar.readonly"],
+                    "account_email": "owner@example.com",
+                    "updated_at": "2026-01-02T00:00:00+00:00",
+                }
+            )
+        ),
+    )
+
+    doc = asyncio.run(get_google_oauth_runtime_doc("tenant-123", "user-456", "google_calendar"))
+
+    assert doc is not None
+    assert doc["provider"] == "google"
+    assert doc["platform"] == "google_calendar"
+    assert doc["account_email"] == "owner@example.com"
+    assert doc["scopes"] == ["calendar.readonly"]
+    assert decode_inline_oauth_connection_ref(doc["oauth_connection_ref"]) == "mongo-refresh-token"
 
 
 def test_write_google_oauth_token_uses_supabase_primary_with_mongo_mirror(monkeypatch):
@@ -340,6 +348,32 @@ def test_clear_google_oauth_token_clears_supabase_then_deletes_mongo(monkeypatch
     assert len(collection.deletes) == 1
 
 
+def test_clear_google_oauth_token_succeeds_without_mongo_when_supabase_is_available(monkeypatch):
+    bridge = _FakeBridge(mirror_ok=True)
+    monkeypatch.setattr(
+        oauth_runtime,
+        "get_oauth_token_store_settings",
+        lambda: {"supabase_primary_enabled": True, "mongo_mirror_enabled": False},
+    )
+    monkeypatch.setattr(oauth_runtime, "get_runtime_bridge", lambda: bridge)
+    monkeypatch.setattr(oauth_runtime, "is_mongo_configured", lambda: False)
+
+    result = asyncio.run(
+        clear_google_oauth_token(
+            "tenant-123",
+            "user-456",
+            "google_calendar",
+            account_email="owner@example.com",
+            scopes=["calendar.readonly"],
+            updated_at="2026-01-03T00:00:00+00:00",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["effective_store"] == "supabase"
+    assert result["mongo"]["reason"] == "mongo_not_configured"
+
+
 def test_backfill_google_oauth_tokens_from_mongo_mirrors_active_tokens(monkeypatch):
     encrypted = encrypt_secret("mongo-refresh-token")
     token_collection = _FakeBackfillTokenCollection(
@@ -408,3 +442,12 @@ def test_backfill_google_oauth_tokens_from_mongo_reports_failures(monkeypatch):
     assert result["mirrored"] == 0
     assert result["failed"] == 1
     assert result["sample_failures"][0]["tenant_id"] == "tenant-123"
+
+
+def test_backfill_google_oauth_tokens_from_mongo_reports_when_mongo_is_not_configured(monkeypatch):
+    monkeypatch.setattr(oauth_runtime, "is_mongo_configured", lambda: False)
+
+    result = asyncio.run(backfill_google_oauth_tokens_from_mongo())
+
+    assert result["ok"] is False
+    assert result["reason"] == "mongo_not_configured"

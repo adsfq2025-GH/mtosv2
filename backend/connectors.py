@@ -13,8 +13,7 @@ from fastapi import HTTPException
 from db import db, decrypt_secret, encrypt_secret, is_mongo_configured
 from oauth_runtime import (
     decode_inline_oauth_connection_ref,
-    get_google_oauth_bridge_account,
-    is_no_mongo_oauth_token_read_enabled,
+    get_google_oauth_runtime_doc,
 )
 from runtime_bridge import get_runtime_bridge
 
@@ -75,20 +74,8 @@ def _clean_oauth_str(v: Any) -> str:
 
 
 async def get_google_refresh_token(tenant_id: str, user_id: str, platform: str) -> str:
-    bridge_doc = await get_google_oauth_bridge_account(tenant_id, user_id, platform)
-    bridge_token = decode_inline_oauth_connection_ref((bridge_doc or {}).get("oauth_connection_ref"))
-    if bridge_token:
-        return bridge_token
-    if bridge_doc is not None:
-        return ""
-    if is_no_mongo_oauth_token_read_enabled() or not is_mongo_configured():
-        return ""
-    doc = await db.user_oauth_tokens.find_one(
-        {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform}
-    )
-    if not doc:
-        return ""
-    return decrypt_secret(doc.get("refresh_token_encrypted") or "")
+    runtime_doc = await get_google_oauth_runtime_doc(tenant_id, user_id, platform)
+    return decode_inline_oauth_connection_ref((runtime_doc or {}).get("oauth_connection_ref"))
 
 
 async def get_client_binding(tenant_id: str, client_id: str, platform: str) -> Optional[dict]:

@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 import jwt
 
-from db import db, decrypt_secret, encrypt_secret, new_id
+from db import db, decrypt_secret, encrypt_secret, is_mongo_configured, new_id
 from runtime_bridge import get_runtime_bridge
 from supabase_config import get_oauth_token_store_settings
 
@@ -80,6 +80,54 @@ async def get_google_oauth_bridge_account(tenant_id: str, user_id: str, platform
     return await get_runtime_bridge().get_user_oauth_account(tenant_id, user_id, "google", platform)
 
 
+def _normalize_scopes(scopes: Any) -> list[str]:
+    return [str(scope).strip() for scope in (scopes or []) if str(scope).strip()]
+
+
+def _mongo_google_oauth_doc_to_runtime_doc(doc: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not doc:
+        return None
+    encrypted_refresh_token = str((doc or {}).get("refresh_token_encrypted") or "").strip()
+    refresh_token = ""
+    if encrypted_refresh_token:
+        try:
+            refresh_token = decrypt_secret(encrypted_refresh_token)
+        except Exception:
+            refresh_token = ""
+    normalized_platform = str((doc or {}).get("platform") or "").strip()
+    normalized_provider = str((doc or {}).get("provider") or "google").strip() or "google"
+    return {
+        "_id": str((doc or {}).get("_id") or f"{normalized_provider}:{normalized_platform}"),
+        "tenant_id": str((doc or {}).get("tenant_id") or "").strip(),
+        "user_id": str((doc or {}).get("user_id") or "").strip(),
+        "provider": normalized_provider,
+        "platform": normalized_platform,
+        "account_email": str((doc or {}).get("account_email") or "").strip() or None,
+        "scopes": _normalize_scopes((doc or {}).get("scopes") or []),
+        "updated_at": (doc or {}).get("updated_at"),
+        "created_at": (doc or {}).get("created_at"),
+        "last_synced_at": (doc or {}).get("updated_at") or (doc or {}).get("created_at"),
+        "oauth_connection_ref": build_inline_oauth_connection_ref(refresh_token) if str(refresh_token or "").strip() else "",
+    }
+
+
+async def get_google_oauth_runtime_doc(tenant_id: str, user_id: str, platform: str) -> Optional[dict[str, Any]]:
+    bridge_doc = await get_google_oauth_bridge_account(tenant_id, user_id, platform)
+    if bridge_doc is not None:
+        return bridge_doc
+    if is_no_mongo_oauth_token_read_enabled() or not is_mongo_configured():
+        return None
+    mongo_doc = await db.user_oauth_tokens.find_one(
+        {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform}
+    )
+    return _mongo_google_oauth_doc_to_runtime_doc(mongo_doc)
+
+
+async def get_google_refresh_token(tenant_id: str, user_id: str, platform: str) -> str:
+    runtime_doc = await get_google_oauth_runtime_doc(tenant_id, user_id, platform)
+    return decode_inline_oauth_connection_ref((runtime_doc or {}).get("oauth_connection_ref"))
+
+
 def is_supabase_primary_oauth_token_write_enabled() -> bool:
     return bool(get_oauth_token_store_settings().get("supabase_primary_enabled"))
 
@@ -93,7 +141,7 @@ def is_no_mongo_oauth_token_read_enabled() -> bool:
 
 
 async def has_google_oauth_connection(tenant_id: str, user_id: str, platform: str) -> bool:
-    return bool(await get_google_refresh_token_from_bridge(tenant_id, user_id, platform))
+    return bool(await get_google_refresh_token(tenant_id, user_id, platform))
 
 
 async def pick_google_oauth_user_id(
@@ -117,6 +165,8 @@ async def _upsert_mongo_google_oauth_token(
     account_email: Optional[str] = None,
     updated_at: Optional[str] = None,
 ) -> dict[str, Any]:
+    if not is_mongo_configured():
+        return {"attempted": False, "ok": False, "reason": "mongo_not_configured"}
     now = str(updated_at or datetime.now(timezone.utc).isoformat())
     result = await db.user_oauth_tokens.update_one(
         {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform},
@@ -142,6 +192,8 @@ async def _upsert_mongo_google_oauth_token(
 
 
 async def _delete_mongo_google_oauth_token(tenant_id: str, user_id: str, platform: str) -> dict[str, Any]:
+    if not is_mongo_configured():
+        return {"attempted": False, "ok": False, "reason": "mongo_not_configured", "deleted_count": 0}
     result = await db.user_oauth_tokens.delete_one(
         {"tenant_id": tenant_id, "user_id": user_id, "provider": "google", "platform": platform}
     )
@@ -174,21 +226,28 @@ async def write_google_oauth_token(
     }
     primary_supabase = is_supabase_primary_oauth_token_write_enabled()
     mongo_mirror_enabled = is_mongo_oauth_token_mirror_enabled()
+    mongo_available = is_mongo_configured()
+    bridge_enabled = bridge.is_mirror_enabled_for("oauth_accounts")
 
-    if primary_supabase:
+    if primary_supabase or not mongo_available:
+        if not bridge_enabled:
+            return {
+                "ok": False,
+                "primary_store": "supabase",
+                "effective_store": None,
+                "degraded": False,
+                "bridge": {"attempted": False, "ok": False, "reason": "disabled"},
+                "mongo": {"attempted": False, "ok": False, "reason": "mongo_not_configured" if not mongo_available else "disabled"},
+            }
         bridge_result = await bridge.safe_mirror_user_oauth_account(
             tenant_id,
             user_id,
             bridge_payload,
             reason="oauth_token_primary_write",
-        ) if bridge.is_mirror_enabled_for("oauth_accounts") else {
-            "attempted": False,
-            "ok": False,
-            "reason": "disabled",
-        }
+        )
         mongo_result = None
         degraded = False
-        if mongo_mirror_enabled:
+        if mongo_mirror_enabled and mongo_available:
             mongo_result = await _upsert_mongo_google_oauth_token(
                 tenant_id,
                 user_id,
@@ -199,6 +258,8 @@ async def write_google_oauth_token(
                 updated_at=now,
             )
             degraded = not bool(bridge_result.get("ok"))
+        elif mongo_mirror_enabled:
+            mongo_result = {"attempted": False, "ok": False, "reason": "mongo_not_configured"}
         return {
             "ok": bool(bridge_result.get("ok")) or bool(mongo_result and mongo_result.get("ok")),
             "primary_store": "supabase",
@@ -222,7 +283,7 @@ async def write_google_oauth_token(
         user_id,
         bridge_payload,
         reason="oauth_token_mirror_write",
-    ) if bridge.is_mirror_enabled_for("oauth_accounts") else {
+    ) if bridge_enabled else {
         "attempted": False,
         "ok": False,
         "reason": "disabled",
@@ -231,7 +292,7 @@ async def write_google_oauth_token(
         "ok": bool(mongo_result.get("ok")),
         "primary_store": "mongo",
         "effective_store": "mongo",
-        "degraded": bool(bridge.is_mirror_enabled_for("oauth_accounts") and not bridge_result.get("ok")),
+        "degraded": bool(bridge_enabled and not bridge_result.get("ok")),
         "bridge": bridge_result,
         "mongo": mongo_result,
     }
@@ -249,6 +310,7 @@ async def clear_google_oauth_token(
     bridge = get_runtime_bridge()
     now = str(updated_at or datetime.now(timezone.utc).isoformat())
     bridge_enabled = bridge.is_mirror_enabled_for("oauth_accounts")
+    mongo_available = is_mongo_configured()
     bridge_result: Optional[dict[str, Any]] = None
 
     if bridge_enabled:
@@ -275,9 +337,14 @@ async def clear_google_oauth_token(
                 "mongo": None,
             }
 
-    mongo_result = await _delete_mongo_google_oauth_token(tenant_id, user_id, platform)
+    mongo_result = await _delete_mongo_google_oauth_token(tenant_id, user_id, platform) if mongo_available else {
+        "attempted": False,
+        "ok": False,
+        "reason": "mongo_not_configured",
+        "deleted_count": 0,
+    }
     return {
-        "ok": bool(mongo_result.get("ok")),
+        "ok": bool((bridge_result or {}).get("ok")) if bridge_enabled else bool(mongo_result.get("ok")),
         "primary_store": "supabase" if is_supabase_primary_oauth_token_write_enabled() and bridge_enabled else "mongo",
         "effective_store": "supabase" if bridge_enabled else "mongo",
         "degraded": False,
@@ -290,6 +357,8 @@ async def _resolve_oauth_account_email(user_id: str, fallback_email: Optional[st
     candidate = str(fallback_email or "").strip()
     if candidate:
         return candidate
+    if not is_mongo_configured():
+        return None
     user_doc = await db.users.find_one({"_id": str(user_id or "").strip()})
     email = str((user_doc or {}).get("email") or "").strip()
     return email or None
@@ -303,6 +372,24 @@ async def backfill_google_oauth_tokens_from_mongo(
     limit: Optional[int] = None,
 ) -> dict[str, Any]:
     bridge = get_runtime_bridge()
+    if not is_mongo_configured():
+        return {
+            "ok": False,
+            "reason": "mongo_not_configured",
+            "filters": {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "platform": platform,
+                "limit": limit,
+            },
+            "scanned": 0,
+            "eligible": 0,
+            "mirrored": 0,
+            "failed": 0,
+            "skipped_missing_fields": 0,
+            "skipped_empty_refresh_token": 0,
+            "sample_failures": [],
+        }
     if not bridge.is_mirror_enabled_for("oauth_accounts"):
         return {
             "ok": False,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -8,7 +8,7 @@ import httpx
 import ai
 import connectors
 from db import db, is_mongo_configured, utcnow
-from models import ActionItem, Client, Meeting, User
+from models import ActionItem, Client, Meeting, ReviewMonthlySnapshot, User
 from runtime_bridge import get_runtime_bridge
 
 
@@ -35,6 +35,260 @@ async def _list_active_client_docs() -> List[dict]:
     if not is_mongo_configured():
         return []
     return await db.clients.find({"status": "active"}).to_list(1000)
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _parse_dateish(value: Optional[str]) -> Optional[datetime]:
+    txt = str(value or "").strip()
+    if not txt:
+        return None
+    try:
+        return datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(txt[:10])
+    except Exception:
+        return None
+
+
+def _month_key(value: Optional[str]) -> str:
+    dt = _parse_dateish(value)
+    base = dt.date().isoformat() if dt else utcnow().date().isoformat()
+    return base[:7]
+
+
+def merge_brief_extra_context(base: Optional[str], addition: Optional[str]) -> Optional[str]:
+    parts = [str(p).strip() for p in (base, addition) if str(p or "").strip()]
+    return "\n\n".join(parts) if parts else None
+
+
+def _prepend_unique_text(items: Any, text: str) -> List[str]:
+    out = [str(text).strip()] if str(text).strip() else []
+    for item in items or []:
+        item_txt = str(item or "").strip()
+        if item_txt and item_txt.lower() not in {x.lower() for x in out}:
+            out.append(item_txt)
+    return out
+
+
+def _prepend_unique_talking_point(items: Any, topic: str, angle: str) -> List[Dict[str, str]]:
+    new_topic = str(topic or "").strip()
+    new_angle = str(angle or "").strip()
+    out: List[Dict[str, str]] = []
+    if new_topic and new_angle:
+        out.append({"topic": new_topic, "angle": new_angle})
+    existing_topics = {new_topic.lower()} if new_topic else set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        topic_txt = str(item.get("topic") or "").strip()
+        angle_txt = str(item.get("angle") or "").strip()
+        if not topic_txt or not angle_txt:
+            continue
+        if topic_txt.lower() in existing_topics:
+            continue
+        existing_topics.add(topic_txt.lower())
+        out.append({"topic": topic_txt, "angle": angle_txt})
+    return out
+
+
+async def _list_client_meeting_docs(tenant_id: str, client_id: str, *, limit: int = 1000) -> List[dict]:
+    bridge = get_runtime_bridge()
+    if bridge.is_enabled_for("meetings"):
+        docs = await bridge.list_meetings(tenant_id, limit=limit)
+        return [doc for doc in docs if str((doc or {}).get("client_id") or "") == str(client_id)]
+    if not is_mongo_configured():
+        return []
+    return await db.meetings.find({"$and": [{"client_id": str(client_id)}, _tenant_scope(tenant_id)]}).to_list(limit)
+
+
+async def _count_monthly_touch_meetings(tenant_id: str, client_id: str) -> int:
+    docs = await _list_client_meeting_docs(tenant_id, client_id, limit=1000)
+    return sum(1 for doc in docs if str((doc or {}).get("title") or "").startswith("Monthly Touch"))
+
+
+async def _get_previous_review_snapshot(tenant_id: str, client_id: str, current_month: str) -> Optional[dict]:
+    if not is_mongo_configured():
+        return None
+    docs = await db.review_monthly_snapshots.find({"client_id": str(client_id), **_tenant_scope(tenant_id)}).sort("month", -1).to_list(24)
+    for doc in docs or []:
+        if str((doc or {}).get("month") or "") != current_month:
+            return doc
+    return None
+
+
+async def upsert_review_snapshot_from_kpi(tenant_id: str, client_id: str, kpi: Dict[str, Any]) -> None:
+    if not is_mongo_configured():
+        return
+    try:
+        gbp = (kpi or {}).get("google_business_profile") or {}
+        nr = gbp.get("new_reviews") or {}
+        received = _safe_int(nr.get("value"), 0)
+        avg_rating = _safe_float(nr.get("avg_rating"))
+        period = (kpi or {}).get("_period") or {}
+        cur_end = ((period.get("current") or {}).get("end") or "")[:10]
+        month = _month_key(cur_end or utcnow().date().isoformat())
+        snap = ReviewMonthlySnapshot(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            month=month,
+            received=max(0, int(received)),
+            avg_rating=avg_rating,
+            source="gbp",
+            kpi_period_kind=str(period.get("kind") or ""),
+            kpi_period_current_end=cur_end or None,
+        )
+        await db.review_monthly_snapshots.update_one(
+            {"client_id": client_id, "month": month, **_tenant_scope(tenant_id)},
+            {"$set": snap.to_mongo(), "$setOnInsert": {"_id": snap.id}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
+async def build_first_90_day_brief_support(
+    tenant_id: str,
+    client_doc: Dict[str, Any],
+    kpi_snapshot: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    client_id = str((client_doc or {}).get("_id") or "")
+    if not client_id:
+        return None
+
+    touch_number = await _count_monthly_touch_meetings(tenant_id, client_id)
+    onboarding_dt = _parse_dateish((client_doc or {}).get("onboarding_date"))
+    days_since_onboarding: Optional[int] = None
+    weeks_since_onboarding: Optional[int] = None
+    if onboarding_dt:
+        ref = onboarding_dt
+        if ref.tzinfo is None:
+            ref = ref.replace(tzinfo=timezone.utc)
+        days_since_onboarding = max(0, (utcnow().replace(tzinfo=timezone.utc) - ref).days)
+        weeks_since_onboarding = max(1, round(days_since_onboarding / 7.0))
+
+    is_first_90_days = touch_number in (1, 2, 3)
+    if days_since_onboarding is not None:
+        is_first_90_days = is_first_90_days or days_since_onboarding <= 95
+    if not is_first_90_days:
+        return None
+
+    gbp = (kpi_snapshot or {}).get("google_business_profile") or {}
+    reviews = gbp.get("new_reviews") or {}
+    map_checkins = (kpi_snapshot or {}).get("map_checkins") or {}
+    current_reviews = _safe_int(reviews.get("value"), 0)
+    avg_rating = _safe_float(reviews.get("avg_rating"))
+    photo_views = _safe_int((gbp.get("photo_views") or {}).get("value"), 0)
+    photo_views_prev = _safe_int((gbp.get("photo_views") or {}).get("previous"), 0)
+    field_checkins = _safe_int(map_checkins.get("field_checkins"), 0)
+    avg_grid_rank = _safe_float((map_checkins.get("avg_grid_rank") or {}).get("value"))
+    avg_grid_rank_prev = _safe_float((map_checkins.get("avg_grid_rank") or {}).get("previous"))
+    top_3_pct = _safe_float((map_checkins.get("top_3_pct") or {}).get("value"))
+    top_3_pct_prev = _safe_float((map_checkins.get("top_3_pct") or {}).get("previous"))
+
+    period = (kpi_snapshot or {}).get("_period") or {}
+    current_end = ((period.get("current") or {}).get("end") or "")[:10]
+    previous_snapshot = await _get_previous_review_snapshot(tenant_id, client_id, _month_key(current_end))
+    previous_reviews = _safe_int((previous_snapshot or {}).get("received"), 0) if previous_snapshot else None
+    review_compare_text = (
+        f"{current_reviews} new reviews this period versus {previous_reviews} last tracked period"
+        if previous_reviews is not None
+        else f"{current_reviews} new reviews this period"
+    )
+
+    weeks_phrase = f"about {weeks_since_onboarding} weeks" if weeks_since_onboarding else "the first 90 days"
+    touch_label = touch_number if touch_number in (1, 2, 3) else min(max((((weeks_since_onboarding or 12) - 1) // 4) + 1, 1), 3)
+    photo_compare = (
+        f"Photo views are {photo_views} versus {photo_views_prev} last period."
+        if photo_views_prev
+        else f"Photo views are currently {photo_views}."
+    )
+    checkin_compare_parts = []
+    if field_checkins:
+        checkin_compare_parts.append(f"field check-ins logged: {field_checkins}")
+    if avg_grid_rank is not None:
+        if avg_grid_rank_prev is not None:
+            checkin_compare_parts.append(f"average grid rank {avg_grid_rank} versus {avg_grid_rank_prev} last period")
+        else:
+            checkin_compare_parts.append(f"average grid rank {avg_grid_rank}")
+    if top_3_pct is not None:
+        if top_3_pct_prev is not None:
+            checkin_compare_parts.append(f"top 3 visibility {top_3_pct}% versus {top_3_pct_prev}% last period")
+        else:
+            checkin_compare_parts.append(f"top 3 visibility {top_3_pct}%")
+    checkins_text = "; ".join(checkin_compare_parts) if checkin_compare_parts else "map check-in progress should be reviewed if available"
+    rating_text = f" Average rating is {avg_rating}." if avg_rating is not None else ""
+
+    extra_context = (
+        f"This client is still in the first 90 days of onboarding and this is monthly touch #{touch_label}. "
+        f"In the brief, explicitly remind the client that early momentum depends on their participation. "
+        f"Ask about the reviews we requested, any fresh team or jobsite images we still need, and map check-ins or local activity updates. "
+        f"Use only supported metrics. Review progress: {review_compare_text}.{rating_text} {photo_compare} "
+        f"Map check-in context: {checkins_text}. "
+        f"Include at least one talking point, one suggested question, and one prep reminder tied to this 90-day roadmap."
+    )
+
+    review_question = (
+        f"It has been {weeks_phrase} since we started together. Were you able to help us bring in the reviews we need? "
+        f"We are seeing {review_compare_text}; what can we do together before the next monthly touch to increase that?"
+    )
+    asset_question = (
+        "Can we line up fresh jobsite or team images and keep the local check-in activity moving so we can strengthen visibility during these first 90 days?"
+    )
+    talking_angle = (
+        f"Reinforce that this is monthly touch #{touch_label} of the first 90 days, review {review_compare_text}, "
+        f"and align on the client actions needed next: reviews, fresh images, and check-ins."
+    )
+    prep_item = "Review first-90-days roadmap progress: requested reviews, fresh images, and map check-ins before the client call."
+    recommendation = (
+        "Keep the 90-day onboarding roadmap active by assigning clear asks for reviews, fresh photos, and local check-ins before the next meeting."
+    )
+    return {
+        "extra_context": extra_context,
+        "talking_point": {"topic": "First 90 Days Progress", "angle": talking_angle},
+        "suggested_questions": [review_question, asset_question],
+        "prep_checklist": [prep_item],
+        "strategic_recommendation": recommendation,
+    }
+
+
+def apply_first_90_day_brief_support(brief: Dict[str, Any], support: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not support:
+        return brief
+    next_brief = dict(brief or {})
+    tp = support.get("talking_point") or {}
+    next_brief["talking_points"] = _prepend_unique_talking_point(
+        next_brief.get("talking_points") or [],
+        str(tp.get("topic") or ""),
+        str(tp.get("angle") or ""),
+    )
+    next_brief["suggested_questions"] = list(next_brief.get("suggested_questions") or [])
+    for question in reversed(list(support.get("suggested_questions") or [])):
+        next_brief["suggested_questions"] = _prepend_unique_text(next_brief.get("suggested_questions") or [], question)
+    next_brief["prep_checklist"] = list(next_brief.get("prep_checklist") or [])
+    for item in reversed(list(support.get("prep_checklist") or [])):
+        next_brief["prep_checklist"] = _prepend_unique_text(next_brief.get("prep_checklist") or [], item)
+    recommendation = str(support.get("strategic_recommendation") or "").strip()
+    if recommendation:
+        next_brief["strategic_recommendations"] = _prepend_unique_text(
+            next_brief.get("strategic_recommendations") or [],
+            recommendation,
+        )
+    return next_brief
 
 
 async def _ensure_meeting_for_client(tenant_id: str, client: Client, user: Optional[User]) -> Meeting:
@@ -230,13 +484,15 @@ async def generate_for_client(
     meeting = await _ensure_meeting_for_client(tenant_id, client, user)
 
     kpi = await connectors.build_kpi_snapshot(tenant_id, client_id, client.company, user_id=(user.id if user else None))
+    onboarding_support = await build_first_90_day_brief_support(tenant_id, client.to_mongo(), kpi)
     brief = await ai.generate_meeting_brief(
         client=client.model_dump(),
         kpi_snapshot=kpi,
-        extra_context=extra_context,
+        extra_context=merge_brief_extra_context(extra_context, (onboarding_support or {}).get("extra_context")),
         model_key=model_key or ai.DEFAULT_MODEL,
         session_id=f"monthly-touch-{meeting.id}",
     )
+    brief = apply_first_90_day_brief_support(brief, onboarding_support)
 
     update = {
         "wins": brief["wins"],
@@ -268,6 +524,8 @@ async def generate_for_client(
         await db.meetings.update_one({"_id": meeting.id, **_tenant_scope(tenant_id)}, {"$set": update})
         m_doc = await db.meetings.find_one({"_id": meeting.id, **_tenant_scope(tenant_id)})
         meeting = Meeting.from_mongo(m_doc) if m_doc else meeting
+
+    await upsert_review_snapshot_from_kpi(tenant_id, client.id, kpi)
 
     owner = meeting.account_manager_name or meeting.account_manager_id
     created_items: List[ActionItem] = []

@@ -11,7 +11,6 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from db import db, is_mongo_configured
 from models import Tenant, TenantMembership, User, UserPublic
 from runtime_bridge import get_runtime_bridge
 from supabase_config import get_supabase_settings, is_supabase_service_configured
@@ -36,10 +35,6 @@ def _norm_host(host: str) -> str:
     if ":" in h:
         h = h.split(":", 1)[0]
     return h
-
-
-def _mongo_available() -> bool:
-    return is_mongo_configured()
 
 
 def _bridge_membership_to_model(doc: Optional[dict[str, Any]]) -> Optional[TenantMembership]:
@@ -301,20 +296,7 @@ async def resolve_tenant_id_from_host(host: str) -> Optional[str]:
         return bridge_tenant_id
     if is_supabase_service_configured():
         return None
-
-    base_domain = os.environ.get("BASE_DOMAIN", "mapranking.com").strip().lower()
-    if _mongo_available() and base_domain and h.endswith("." + base_domain):
-        slug = h[: -(len(base_domain) + 1)].split(".", 1)[0].strip()
-        if slug:
-            doc = await db.tenants.find_one({"slug": slug, "status": "active"})
-            if doc:
-                return str(doc.get("_id"))
-
-    if _mongo_available():
-        doc = await db.tenant_domains.find_one({"domain": h})
-        if doc:
-            return str(doc.get("tenant_id"))
-    return None
+    raise RuntimeError("Supabase service configuration is required for tenant host resolution")
 
 
 def hash_password(plain: str) -> str:
@@ -374,10 +356,6 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
     bridged_user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
     if bridged_user:
         return bridged_user
-    if _mongo_available() and not is_supabase_service_configured():
-        doc = await db.users.find_one({"_id": user_id})
-        if doc:
-            return User.from_mongo(doc)
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
 
@@ -400,14 +378,7 @@ async def ensure_default_tenant() -> str:
             _DEFAULT_TENANT_ID = str(doc.get("_id") or doc.get("id") or "default")
             return _DEFAULT_TENANT_ID
         raise RuntimeError("Unable to resolve default tenant from Supabase")
-    doc = await db.tenants.find_one({"slug": "default"})
-    if not doc:
-        t = Tenant(slug="default", name="Default")
-        await db.tenants.insert_one(t.to_mongo())
-        _DEFAULT_TENANT_ID = t.id
-        return _DEFAULT_TENANT_ID
-    _DEFAULT_TENANT_ID = doc.get("_id")
-    return _DEFAULT_TENANT_ID
+    raise RuntimeError("Supabase service configuration is required for tenant bootstrap")
 
 
 async def ensure_internal_wiki_tenant_id() -> str:
@@ -424,14 +395,7 @@ async def ensure_internal_wiki_tenant_id() -> str:
             _INTERNAL_WIKI_TENANT_ID = str(doc.get("_id") or doc.get("id") or slug)
             return _INTERNAL_WIKI_TENANT_ID
         raise RuntimeError("Unable to resolve internal wiki tenant from Supabase")
-    doc = await db.tenants.find_one({"slug": slug})
-    if not doc:
-        t = Tenant(slug=slug, name="Internal")
-        await db.tenants.insert_one(t.to_mongo())
-        _INTERNAL_WIKI_TENANT_ID = t.id
-        return _INTERNAL_WIKI_TENANT_ID
-    _INTERNAL_WIKI_TENANT_ID = str(doc.get("_id"))
-    return _INTERNAL_WIKI_TENANT_ID
+    raise RuntimeError("Supabase service configuration is required for tenant bootstrap")
 
 
 async def ensure_membership_for_tenant(user: User, tenant_id: str, role_if_create: Optional[str] = None) -> TenantMembership:
@@ -447,13 +411,7 @@ async def ensure_membership_for_tenant(user: User, tenant_id: str, role_if_creat
         if membership:
             return membership
         raise RuntimeError("Unable to resolve tenant membership from Supabase")
-    doc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(tenant_id), "status": "active"})
-    if doc:
-        return TenantMembership.from_mongo(doc)
-    role = role_if_create or ("owner" if user.role == "admin" else "member")
-    m = TenantMembership(tenant_id=str(tenant_id), user_id=user.id, role=role, status="active")
-    await db.tenant_memberships.insert_one(m.to_mongo())
-    return m
+    raise RuntimeError("Supabase service configuration is required for tenant membership resolution")
 
 
 async def ensure_membership(user: User) -> TenantMembership:
@@ -477,14 +435,7 @@ async def ensure_membership(user: User) -> TenantMembership:
         if membership:
             return membership
         raise RuntimeError("Unable to create default tenant membership from Supabase")
-    doc = await db.tenant_memberships.find_one({"user_id": user.id, "status": "active"})
-    if doc:
-        return TenantMembership.from_mongo(doc)
-    tenant_id = await ensure_default_tenant()
-    role = "owner" if user.role == "admin" else "member"
-    m = TenantMembership(tenant_id=tenant_id, user_id=user.id, role=role, status="active")
-    await db.tenant_memberships.insert_one(m.to_mongo())
-    return m
+    raise RuntimeError("Supabase service configuration is required for tenant membership resolution")
 
 
 async def get_current_context(request: Request, creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer)) -> RequestContext:
@@ -496,9 +447,6 @@ async def get_current_context(request: Request, creds: Optional[HTTPAuthorizatio
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
-    if not user and _mongo_available() and not is_supabase_service_configured():
-        doc = await db.users.find_one({"_id": user_id})
-        user = User.from_mongo(doc) if doc else None
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     tenant_id = payload.get("tenant_id")
@@ -508,9 +456,6 @@ async def get_current_context(request: Request, creds: Optional[HTTPAuthorizatio
         m = None
         if is_supabase_service_configured():
             m = _bridge_membership_to_model(await get_runtime_bridge().get_user_membership(str(host_tenant_id), user.id))
-        if not m and _mongo_available() and not is_supabase_service_configured():
-            mdoc = await db.tenant_memberships.find_one({"user_id": user.id, "tenant_id": str(host_tenant_id), "status": "active"})
-            m = TenantMembership.from_mongo(mdoc) if mdoc else None
         if not m:
             raise HTTPException(status_code=403, detail="Not a member of this tenant")
         tenant_id = m.tenant_id
@@ -551,13 +496,4 @@ async def bootstrap_admin():
             auth_provider="local",
         )
         return
-    existing = await db.users.find_one({"email": normalized_email})
-    if existing:
-        return
-    user = User(
-        email=normalized_email,
-        name="System Admin",
-        role="admin",
-        password_hash=hash_password(pw),
-    )
-    await db.users.insert_one(user.to_mongo())
+    raise RuntimeError("Supabase service configuration is required for admin bootstrap")
