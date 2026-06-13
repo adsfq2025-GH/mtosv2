@@ -186,16 +186,13 @@ export function Integrations() {
       const credentials = {}; const metadata = {};
       edit.fields.forEach((f) => { if (form[f.key]) { if (f.secret) credentials[f.key] = form[f.key]; else metadata[f.key] = form[f.key]; } });
       await integrations.configure(edit.platform, { credentials, metadata });
-      const clickupHasOAuthConfig =
-        edit.platform === "clickup" &&
-        !!(metadata.client_id && metadata.redirect_uri && (credentials.client_secret || (edit.configured_field_keys || []).includes("client_secret")));
       const clickupHasDirectToken =
         edit.platform === "clickup" &&
         !!(credentials.api_token || (edit.configured_field_keys || []).includes("api_token") || (edit.configured_field_keys || []).includes("access_token"));
       if (edit.platform !== "clickup" || clickupHasDirectToken) {
         await integrations.test(edit.platform);
-      } else if (clickupHasOAuthConfig) {
-        alert("ClickUp OAuth settings saved. Next, click Connect ClickUp to authorize the workspace.");
+      } else if (edit.platform === "clickup") {
+        alert("ClickUp settings saved. Use Connect ClickUp to authorize with the backend OAuth env vars, or add a personal API token.");
       }
       setEdit(null); load();
     } catch (err) { alert(err?.response?.data?.detail || "Failed"); }
@@ -472,7 +469,7 @@ export function Integrations() {
             {edit.platform === "clickup" && (
               <div className="card-flat p-4 bg-white/[0.02] border border-white/5 mt-4">
                 <div className="label mb-1">Connect ClickUp</div>
-                <div className="text-xs text-slate-400">Use either a personal API token or save your ClickUp OAuth app settings here and then connect the workspace.</div>
+                <div className="text-xs text-slate-400">Use a personal API token or connect with the ClickUp OAuth app already configured on the backend.</div>
                 <div className="flex items-center gap-2 mt-3">
                   <button type="button" className="btn-primary flex-1" onClick={connectClickup} disabled={oauthBusy}>
                     {oauthBusy ? "Connecting…" : "Connect ClickUp"}
