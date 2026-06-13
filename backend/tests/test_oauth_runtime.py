@@ -13,9 +13,11 @@ from oauth_runtime import (
     OAUTH_STATE_ALG,
     OAUTH_STATE_SECRET,
     backfill_google_oauth_tokens_from_mongo,
+    build_clickup_oauth_state,
     build_google_oauth_state,
     build_inline_oauth_connection_ref,
     clear_google_oauth_token,
+    decode_clickup_oauth_state,
     decode_google_oauth_state,
     decode_inline_oauth_connection_ref,
     get_google_oauth_runtime_doc,
@@ -89,11 +91,55 @@ def test_google_oauth_state_rejects_wrong_provider():
         raise AssertionError("Expected decode_google_oauth_state to reject non-google providers")
 
 
+def test_clickup_oauth_state_round_trip_preserves_context():
+    state = build_clickup_oauth_state(
+        tenant_id="tenant-123",
+        user_id="user-456",
+    )
+
+    payload = decode_clickup_oauth_state(state)
+
+    assert payload["provider"] == "clickup"
+    assert payload["tenant_id"] == "tenant-123"
+    assert payload["user_id"] == "user-456"
+
+
+def test_clickup_oauth_state_rejects_wrong_provider():
+    state = jwt.encode(
+        {
+            "provider": "google",
+            "tenant_id": "tenant-123",
+            "user_id": "user-456",
+        },
+        OAUTH_STATE_SECRET,
+        algorithm=OAUTH_STATE_ALG,
+    )
+
+    try:
+        decode_clickup_oauth_state(state)
+    except jwt.InvalidTokenError as exc:
+        assert str(exc) == "invalid_provider"
+    else:
+        raise AssertionError("Expected decode_clickup_oauth_state to reject non-clickup providers")
+
+
 def test_inline_oauth_connection_ref_round_trip():
     ref = build_inline_oauth_connection_ref("refresh-token-123")
 
     assert ref.startswith("enc-v1:")
     assert decode_inline_oauth_connection_ref(ref) == "refresh-token-123"
+
+
+def test_clickup_token_from_creds_prefers_access_token():
+    token = connectors._clickup_token_from_creds({"api_token": "pk_direct", "access_token": "oauth_token"})
+
+    assert token == "oauth_token"
+
+
+def test_clickup_token_from_creds_falls_back_to_personal_token():
+    token = connectors._clickup_token_from_creds({"api_token": "pk_direct"})
+
+    assert token == "pk_direct"
 
 
 def test_get_google_refresh_token_prefers_bridge(monkeypatch):

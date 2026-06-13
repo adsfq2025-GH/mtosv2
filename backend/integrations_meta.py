@@ -20,7 +20,10 @@ INTEGRATIONS: Dict[str, Dict[str, Any]] = {
         "icon": "ClipboardText",
         "description": "Pull account activity, overdue tasks, ticket SLAs. Push action items.",
         "fields": [
-            {"key": "api_token", "label": "API Token", "secret": True, "help": "ClickUp → Settings → Apps → Generate"},
+            {"key": "api_token", "label": "Personal API Token", "secret": True, "help": "Optional. ClickUp Settings -> Apps -> API Token."},
+            {"key": "client_id", "label": "OAuth Client ID", "secret": False, "help": "Optional. Use with Connect ClickUp for app-based auth."},
+            {"key": "client_secret", "label": "OAuth Client Secret", "secret": True, "help": "Optional. Stored encrypted."},
+            {"key": "redirect_uri", "label": "OAuth Redirect URI", "secret": False, "help": "Required for Connect ClickUp when using client_id/client_secret."},
             {"key": "team_id", "label": "Workspace / Team ID", "secret": False, "help": "Optional"},
             {"key": "client_health_tracker_list_id", "label": "Client Health Tracker List ID", "secret": False, "help": "Optional. Overrides auto-discovery for ClickUp client sync."},
         ],

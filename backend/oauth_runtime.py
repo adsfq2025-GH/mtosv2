@@ -38,6 +38,23 @@ def build_google_oauth_state(
     return jwt.encode(payload, OAUTH_STATE_SECRET, algorithm=OAUTH_STATE_ALG)
 
 
+def build_clickup_oauth_state(
+    *,
+    tenant_id: str,
+    user_id: str,
+) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "jti": new_id(),
+        "provider": "clickup",
+        "tenant_id": str(tenant_id or "").strip(),
+        "user_id": str(user_id or "").strip(),
+        "iat": now,
+        "exp": now + timedelta(seconds=OAUTH_STATE_TTL_SECONDS),
+    }
+    return jwt.encode(payload, OAUTH_STATE_SECRET, algorithm=OAUTH_STATE_ALG)
+
+
 def decode_google_oauth_state(state: str) -> dict[str, Any]:
     payload = jwt.decode(str(state or ""), OAUTH_STATE_SECRET, algorithms=[OAUTH_STATE_ALG])
     if str(payload.get("provider") or "").strip().lower() != "google":
@@ -49,6 +66,17 @@ def decode_google_oauth_state(state: str) -> dict[str, Any]:
     if not str(payload.get("platform") or "").strip():
         raise jwt.InvalidTokenError("missing_platform")
     payload["scopes"] = [str(scope).strip() for scope in (payload.get("scopes") or []) if str(scope).strip()]
+    return payload
+
+
+def decode_clickup_oauth_state(state: str) -> dict[str, Any]:
+    payload = jwt.decode(str(state or ""), OAUTH_STATE_SECRET, algorithms=[OAUTH_STATE_ALG])
+    if str(payload.get("provider") or "").strip().lower() != "clickup":
+        raise jwt.InvalidTokenError("invalid_provider")
+    if not str(payload.get("tenant_id") or "").strip():
+        raise jwt.InvalidTokenError("missing_tenant_id")
+    if not str(payload.get("user_id") or "").strip():
+        raise jwt.InvalidTokenError("missing_user_id")
     return payload
 
 

@@ -142,7 +142,7 @@ export function Integrations() {
   }, [user?.role]);
   useEffect(() => {
     const onMsg = (ev) => {
-      if (ev?.data?.type === "google_oauth_success") {
+      if (ev?.data?.type === "google_oauth_success" || ev?.data?.type === "clickup_oauth_success") {
         setEdit(null);
         load();
       }
@@ -186,7 +186,17 @@ export function Integrations() {
       const credentials = {}; const metadata = {};
       edit.fields.forEach((f) => { if (form[f.key]) { if (f.secret) credentials[f.key] = form[f.key]; else metadata[f.key] = form[f.key]; } });
       await integrations.configure(edit.platform, { credentials, metadata });
-      await integrations.test(edit.platform);
+      const clickupHasOAuthConfig =
+        edit.platform === "clickup" &&
+        !!(metadata.client_id && metadata.redirect_uri && (credentials.client_secret || (edit.configured_field_keys || []).includes("client_secret")));
+      const clickupHasDirectToken =
+        edit.platform === "clickup" &&
+        !!(credentials.api_token || (edit.configured_field_keys || []).includes("api_token") || (edit.configured_field_keys || []).includes("access_token"));
+      if (edit.platform !== "clickup" || clickupHasDirectToken) {
+        await integrations.test(edit.platform);
+      } else if (clickupHasOAuthConfig) {
+        alert("ClickUp OAuth settings saved. Next, click Connect ClickUp to authorize the workspace.");
+      }
       setEdit(null); load();
     } catch (err) { alert(err?.response?.data?.detail || "Failed"); }
     finally { setBusy(false); }
@@ -236,6 +246,59 @@ export function Integrations() {
     setOauthBusy(true);
     try {
       await integrations.oauthGoogleDisconnect(platform);
+      await load();
+      setEdit(null);
+    } catch (err) {
+      alert(err?.response?.data?.detail || "Failed");
+    } finally {
+      setOauthBusy(false);
+    }
+  };
+
+  const connectClickup = async () => {
+    setOauthBusy(true);
+    try {
+      const res = await integrations.oauthClickupStart();
+      const url = res?.url;
+      if (!url) throw new Error("Missing OAuth URL");
+      const popup = window.open(url, "clickup_oauth", "width=520,height=720");
+      const startedAt = Date.now();
+      const poll = async () => {
+        try {
+          const st = await integrations.oauthClickupStatus();
+          if (st?.connected) {
+            setEdit(null);
+            load();
+            try { popup?.close(); } catch { }
+            return true;
+          }
+        } catch { }
+        return false;
+      };
+      const timer = window.setInterval(async () => {
+        if (Date.now() - startedAt > 90_000) {
+          window.clearInterval(timer);
+          setOauthBusy(false);
+          alert("ClickUp connection timed out. If the popup finished successfully, close it and refresh Integrations.");
+          return;
+        }
+        const done = await poll();
+        if (done) {
+          window.clearInterval(timer);
+          setOauthBusy(false);
+        }
+      }, 1200);
+    } catch (err) {
+      alert(err?.response?.data?.detail || err?.message || "Failed to start ClickUp OAuth");
+      setOauthBusy(false);
+    }
+  };
+
+  const disconnectClickup = async () => {
+    if (!window.confirm("Disconnect ClickUp for this tenant?")) return;
+    setOauthBusy(true);
+    try {
+      await integrations.oauthClickupDisconnect();
       await load();
       setEdit(null);
     } catch (err) {
@@ -399,6 +462,23 @@ export function Integrations() {
                   </button>
                   {edit.status === "connected" && (
                     <button type="button" className="btn-danger" onClick={() => disconnectGoogle(edit.platform)} disabled={oauthBusy} data-testid="google-disconnect-btn">
+                      Disconnect
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {edit.platform === "clickup" && (
+              <div className="card-flat p-4 bg-white/[0.02] border border-white/5 mt-4">
+                <div className="label mb-1">Connect ClickUp</div>
+                <div className="text-xs text-slate-400">Use either a personal API token or save your ClickUp OAuth app settings here and then connect the workspace.</div>
+                <div className="flex items-center gap-2 mt-3">
+                  <button type="button" className="btn-primary flex-1" onClick={connectClickup} disabled={oauthBusy}>
+                    {oauthBusy ? "Connecting…" : "Connect ClickUp"}
+                  </button>
+                  {edit.status === "connected" && (
+                    <button type="button" className="btn-danger" onClick={disconnectClickup} disabled={oauthBusy}>
                       Disconnect
                     </button>
                   )}

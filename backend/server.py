@@ -62,6 +62,9 @@ def _dbg_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict] 
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 GOOGLE_OAUTH_REDIRECT_URI = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+CLICKUP_OAUTH_CLIENT_ID = str(os.environ.get("CLICKUP_OAUTH_CLIENT_ID") or os.environ.get("CLICKUP_CLIENT_ID") or "").strip()
+CLICKUP_OAUTH_CLIENT_SECRET = str(os.environ.get("CLICKUP_OAUTH_CLIENT_SECRET") or os.environ.get("CLICKUP_CLIENT_SECRET") or "").strip()
+CLICKUP_OAUTH_REDIRECT_URI = str(os.environ.get("CLICKUP_OAUTH_REDIRECT_URI") or os.environ.get("CLICKUP_REDIRECT_URI") or "").strip()
 
 
 def _clean_oauth_str(v: Any) -> str:
@@ -91,6 +94,30 @@ async def _google_oauth_config(tenant_id: str) -> Dict[str, str]:
     }
     try:
         doc = await _get_integration_runtime_doc(tenant_id, "google_oauth")
+        if doc:
+            meta = doc.get("metadata") or {}
+            enc = doc.get("credentials_encrypted") or {}
+            mid = _clean_oauth_str(meta.get("client_id"))
+            mru = _clean_oauth_str(meta.get("redirect_uri"))
+            if mid:
+                out["client_id"] = mid
+            if mru:
+                out["redirect_uri"] = mru
+            if str(enc.get("client_secret") or "").strip():
+                out["client_secret"] = _clean_oauth_str(decrypt_secret(enc.get("client_secret")))
+    except Exception:
+        return out
+    return out
+
+
+async def _clickup_oauth_config(tenant_id: str) -> Dict[str, str]:
+    out = {
+        "client_id": _clean_oauth_str(CLICKUP_OAUTH_CLIENT_ID),
+        "client_secret": _clean_oauth_str(CLICKUP_OAUTH_CLIENT_SECRET),
+        "redirect_uri": _clean_oauth_str(CLICKUP_OAUTH_REDIRECT_URI),
+    }
+    try:
+        doc = await _get_integration_runtime_doc(tenant_id, "clickup")
         if doc:
             meta = doc.get("metadata") or {}
             enc = doc.get("credentials_encrypted") or {}
@@ -183,8 +210,10 @@ from models import (  # noqa: E402
 from integrations_meta import INTEGRATIONS, list_integrations
 from docs_content import DOCS, get_categories, get_doc, get_docs_summary
 from oauth_runtime import (
+    build_clickup_oauth_state,
     build_google_oauth_state,
     clear_google_oauth_token,
+    decode_clickup_oauth_state,
     decode_google_oauth_state,
     get_google_oauth_runtime_doc,
     write_google_oauth_token,
@@ -1028,6 +1057,154 @@ window.close();
 </script>
 <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 20px;">
   Connected. You can close this window.
+</div>
+</body></html>"""
+    return Response(content=html, media_type="text/html")
+
+
+@api.get("/oauth/clickup/start")
+async def oauth_clickup_start(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    cfg = await _clickup_oauth_config(ctx.tenant_id)
+    if not cfg.get("client_id") or not cfg.get("client_secret") or not cfg.get("redirect_uri"):
+        raise HTTPException(
+            500,
+            "ClickUp OAuth is not configured. Add ClickUp client_id, client_secret, and redirect_uri in Integrations -> ClickUp or backend env vars.",
+        )
+    state = build_clickup_oauth_state(tenant_id=ctx.tenant_id, user_id=ctx.user.id)
+    params = {
+        "client_id": cfg.get("client_id"),
+        "redirect_uri": cfg.get("redirect_uri"),
+        "state": state,
+    }
+    url = "https://app.clickup.com/api?" + urlencode(params)
+    return {"ok": True, "url": url}
+
+
+@api.get("/oauth/clickup/status")
+async def oauth_clickup_status(ctx=Depends(get_current_context)):
+    token = await connectors.get_clickup_access_token(ctx.tenant_id)
+    doc = await _get_integration_runtime_doc(ctx.tenant_id, "clickup")
+    return {
+        "ok": True,
+        "connected": bool(token),
+        "updated_at": (doc or {}).get("updated_at"),
+        "last_synced_at": (doc or {}).get("last_synced_at"),
+    }
+
+
+@api.post("/oauth/clickup/disconnect")
+async def oauth_clickup_disconnect(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    await db.integrations.delete_one({"$and": [{"platform": "clickup"}, tenant_scope(ctx.tenant_id)]})
+    await _soft_delete_tenant_integration_doc(ctx.tenant_id, "clickup", reason="disconnect_clickup_oauth")
+    return {"ok": True}
+
+
+@api.get("/oauth/clickup/callback")
+async def oauth_clickup_callback(code: str = Query(...), state: str = Query(...)):
+    try:
+        st = decode_clickup_oauth_state(state)
+    except jwt.PyJWTError:
+        raise HTTPException(400, "Invalid OAuth state")
+
+    tenant_id = str(st.get("tenant_id") or "").strip()
+    user_id = str(st.get("user_id") or "").strip()
+    cfg = await _clickup_oauth_config(tenant_id)
+    if not cfg.get("client_id") or not cfg.get("client_secret") or not cfg.get("redirect_uri"):
+        raise HTTPException(
+            500,
+            "ClickUp OAuth is not configured. Add ClickUp client_id, client_secret, and redirect_uri in Integrations -> ClickUp or backend env vars.",
+        )
+
+    payload = {
+        "client_id": cfg.get("client_id"),
+        "client_secret": cfg.get("client_secret"),
+        "code": code,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post("https://api.clickup.com/api/v2/oauth/token", json=payload)
+    if resp.status_code != 200:
+        detail = _safe_err_detail(resp)
+        raise HTTPException(400, f"clickup_oauth_http_{resp.status_code}: {detail}")
+
+    data = resp.json() or {}
+    access_token = str(data.get("access_token") or "").strip()
+    if not access_token:
+        raise HTTPException(400, "ClickUp did not return an access_token.")
+
+    now = utcnow().isoformat()
+    existing = await db.integrations.find_one({"$and": [{"platform": "clickup"}, tenant_scope(tenant_id)]})
+    if existing:
+        merged_creds = {
+            **dict(existing.get("credentials_encrypted") or {}),
+            "access_token": encrypt_secret(access_token),
+        }
+        merged_metadata = {
+            **dict(existing.get("metadata") or {}),
+            "client_id": cfg.get("client_id"),
+            "redirect_uri": cfg.get("redirect_uri"),
+            "oauth_connected_by_user_id": user_id,
+        }
+        await db.integrations.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {
+                "credentials_encrypted": merged_creds,
+                "metadata": merged_metadata,
+                "status": "connected",
+                "last_error": None,
+                "last_synced_at": now,
+                "updated_at": now,
+            }},
+        )
+        mirror_doc = {
+            "platform": "clickup",
+            "label": existing.get("label") or INTEGRATIONS["clickup"]["label"],
+            "status": "connected",
+            "last_synced_at": now,
+            "last_error": None,
+            "metadata": merged_metadata,
+        }
+    else:
+        integration = Integration(
+            tenant_id=tenant_id,
+            platform="clickup",
+            label=INTEGRATIONS["clickup"]["label"],
+            status="connected",
+            last_synced_at=now,
+            last_error=None,
+            credentials_encrypted={"access_token": encrypt_secret(access_token)},
+            metadata={
+                "client_id": cfg.get("client_id"),
+                "redirect_uri": cfg.get("redirect_uri"),
+                "oauth_connected_by_user_id": user_id,
+            },
+        )
+        await db.integrations.insert_one(integration.to_mongo())
+        mirror_doc = {
+            "platform": "clickup",
+            "label": integration.label,
+            "status": "connected",
+            "last_synced_at": now,
+            "last_error": None,
+            "metadata": integration.metadata,
+        }
+
+    await _mirror_tenant_integration_doc(tenant_id, mirror_doc, reason="clickup_oauth_callback")
+
+    html = """<!doctype html><html><head><meta charset="utf-8"></head>
+<body><script>
+try {
+  if (window.opener) {
+    window.opener.postMessage({ type: "clickup_oauth_success", platform: "clickup" }, "*");
+  }
+} catch (e) {}
+window.close();
+</script>
+<div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; padding: 20px;">
+  ClickUp connected. You can close this window.
 </div>
 </body></html>"""
     return Response(content=html, media_type="text/html")
@@ -4516,7 +4693,10 @@ async def configure_integration(platform: str, data: IntegrationConfigureIn, ctx
     if existing:
         merged_creds = {**(existing.get("credentials_encrypted") or {}), **enc}
         merged_metadata = {**(existing.get("metadata") or {}), **(data.metadata or {})}
-        status_value = "connected" if merged_creds else "not_connected"
+        if platform == "clickup":
+            status_value = "connected" if (merged_creds.get("api_token") or merged_creds.get("access_token")) else "not_connected"
+        else:
+            status_value = "connected" if merged_creds else "not_connected"
         await db.integrations.update_one(
             {"_id": existing["_id"]},
             {"$set": {
@@ -4540,7 +4720,12 @@ async def configure_integration(platform: str, data: IntegrationConfigureIn, ctx
             tenant_id=ctx.tenant_id,
             platform=platform,
             label=INTEGRATIONS[platform]["label"],
-            status="connected" if enc else "not_connected",
+            status=(
+                "connected"
+                if (platform != "clickup" and bool(enc))
+                or (platform == "clickup" and bool(enc.get("api_token") or enc.get("access_token")))
+                else "not_connected"
+            ),
             credentials_encrypted=enc,
             metadata=data.metadata or {},
         )
@@ -4595,6 +4780,9 @@ async def test_integration(platform: str, ctx=Depends(get_current_context)):
         if bad_keys:
             detail = f"{detail} Undecryptable fields: {', '.join(sorted(set(bad_keys)))}"
         raise HTTPException(400, detail)
+
+    if platform == "clickup" and not connectors._clickup_token_from_creds(creds):
+        raise HTTPException(400, "ClickUp OAuth app saved. Finish Connect ClickUp or add a personal API token before testing.")
 
     if platform == "clickup":
         res = await connectors.test_clickup(ctx.tenant_id)

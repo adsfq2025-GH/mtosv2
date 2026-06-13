@@ -40,6 +40,14 @@ async def get_credentials(tenant_id: str, platform: str) -> Dict[str, str]:
     return {**meta, **dec}
 
 
+def _clickup_token_from_creds(creds: Dict[str, str]) -> str:
+    return _strip_bearer((creds or {}).get("api_token") or (creds or {}).get("access_token") or "")
+
+
+async def get_clickup_access_token(tenant_id: str) -> str:
+    return _clickup_token_from_creds(await get_credentials(tenant_id, "clickup"))
+
+
 def _clean_oauth_str(v: Any) -> str:
     s = str(v or "").strip()
     if not s:
@@ -530,7 +538,7 @@ async def build_kpi_snapshot(
 
     clickup_creds = await get_credentials(tenant_id, "clickup")
     clickup_binding = await get_client_binding(tenant_id, client_id, "clickup")
-    if (clickup_creds or {}).get("api_token"):
+    if _clickup_token_from_creds(clickup_creds):
         folder_id = ((clickup_binding or {}).get("external_ids") or {}).get("folder_id") or ((clickup_binding or {}).get("config") or {}).get("folder_id")
         if clickup_binding and folder_id:
             try:
@@ -595,9 +603,9 @@ async def build_kpi_snapshot(
 
 async def test_clickup(tenant_id: str) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
-        return {"ok": False, "error": "missing_api_token"}
+        return {"ok": False, "error": "missing_clickup_token"}
     headers = {"Authorization": token, "Accept": "application/json"}
     url = "https://api.clickup.com/api/v2/user"
     async with httpx.AsyncClient(timeout=30) as client:
@@ -838,9 +846,9 @@ async def sync_google_meet_transcript_to_meeting(tenant_id: str, user_id: str, m
 
 async def list_clickup_workspaces(tenant_id: str) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
-        return {"ok": False, "error": "missing_api_token"}
+        return {"ok": False, "error": "missing_clickup_token"}
     headers = {"Authorization": token, "Accept": "application/json"}
     url = "https://api.clickup.com/api/v2/team"
     async with httpx.AsyncClient(timeout=30) as client:
@@ -854,9 +862,9 @@ async def list_clickup_workspaces(tenant_id: str) -> Dict[str, Any]:
 
 async def list_clickup_folders(tenant_id: str, team_id: str) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
-        return {"ok": False, "error": "missing_api_token"}
+        return {"ok": False, "error": "missing_clickup_token"}
     if not team_id:
         return {"ok": False, "error": "missing_team_id"}
     headers = {"Authorization": token, "Accept": "application/json"}
@@ -891,9 +899,9 @@ async def list_clickup_folders(tenant_id: str, team_id: str) -> Dict[str, Any]:
 
 async def list_clickup_lists(tenant_id: str, team_id: str) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
-        return {"ok": False, "error": "missing_api_token"}
+        return {"ok": False, "error": "missing_clickup_token"}
     if not team_id:
         return {"ok": False, "error": "missing_team_id"}
     headers = {"Authorization": token, "Accept": "application/json"}
@@ -942,7 +950,7 @@ def _norm_clickup_name(s: str) -> str:
 
 async def _clickup_client_book_list_id(tenant_id: str, client_id: str) -> str:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
         return ""
     binding = await get_client_binding(tenant_id, client_id, "clickup")
@@ -990,7 +998,7 @@ async def _clickup_client_book_list_id(tenant_id: str, client_id: str) -> str:
 
 async def _clickup_department_tickets_list_id(tenant_id: str, client_id: str) -> str:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
         return ""
     binding = await get_client_binding(tenant_id, client_id, "clickup")
@@ -1069,9 +1077,9 @@ def _fmt_bullets(items):
 
 async def publish_clickup_meeting_brief(tenant_id: str, meeting: dict, client: dict) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
-        return {"ok": False, "error": "missing_api_token"}
+        return {"ok": False, "error": "missing_clickup_token"}
     client_id = str((meeting or {}).get("client_id") or "").strip()
     if not client_id:
         return {"ok": False, "error": "missing_client_id"}
@@ -1111,9 +1119,9 @@ async def publish_clickup_meeting_brief(tenant_id: str, meeting: dict, client: d
 
 async def publish_clickup_meeting_summary(tenant_id: str, meeting: dict, client: dict, actions: list, tickets: list) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
-        return {"ok": False, "error": "missing_api_token"}
+        return {"ok": False, "error": "missing_clickup_token"}
     client_id = str((meeting or {}).get("client_id") or "").strip()
     if not client_id:
         return {"ok": False, "error": "missing_client_id"}
@@ -1157,9 +1165,9 @@ async def publish_clickup_meeting_summary(tenant_id: str, meeting: dict, client:
 
 async def publish_clickup_department_tickets(tenant_id: str, meeting: dict, tickets: list) -> Dict[str, Any]:
     creds = await get_credentials(tenant_id, "clickup")
-    token = _strip_bearer((creds or {}).get("api_token", ""))
+    token = _clickup_token_from_creds(creds)
     if not token:
-        return {"ok": False, "error": "missing_api_token"}
+        return {"ok": False, "error": "missing_clickup_token"}
     client_id = str((meeting or {}).get("client_id") or "").strip()
     if not client_id:
         return {"ok": False, "error": "missing_client_id"}

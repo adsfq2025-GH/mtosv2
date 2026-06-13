@@ -407,14 +407,14 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
             {"running": True, "started_at": started_at, "last_run_id": run_id, "updated_at": started_at},
         )
         creds = await connectors.get_credentials(tenant_id, "clickup")
-        token = connectors._strip_bearer(str((creds or {}).get("api_token") or ""))
+        token = connectors._clickup_token_from_creds(creds)
         team_id = str((creds or {}).get("team_id") or "").strip()
         await _dbg_emit("H4", "clickup_client_sync:sync_assigned_clients_for_user", "creds:loaded", {"has_token": bool(token), "team_id": team_id})
         if not token:
-            raise ValueError("ClickUp is not connected (missing api_token).")
+            raise ValueError("ClickUp is not connected (missing personal token or OAuth access token).")
         if not team_id:
             teams_res = await connectors.list_clickup_workspaces(tenant_id)
-            teams = teams_res.get("teams") or []
+            teams = teams_res.get("workspaces") or teams_res.get("teams") or []
             team_id = str((teams[0] or {}).get("id") or "").strip() if teams else ""
         if not team_id:
             raise ValueError("Missing ClickUp team_id. Set it in Integrations → ClickUp.")
