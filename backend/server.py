@@ -352,7 +352,9 @@ def _merge_runtime_integration_docs(mongo_doc: Optional[dict[str, Any]], bridge_
 
 async def _get_integration_runtime_doc(tenant_id: str, platform: str) -> Optional[dict[str, Any]]:
     bridge = get_runtime_bridge()
-    return await bridge.get_tenant_integration(tenant_id, platform) if bridge.is_enabled_for("integrations") else None
+    bridge_doc = await bridge.get_tenant_integration(tenant_id, platform) if bridge.is_enabled_for("integrations") else None
+    mongo_doc = await db.integrations.find_one({"$and": [{"platform": str(platform or "").strip().lower()}, tenant_scope(tenant_id)]})
+    return _merge_runtime_integration_docs(mongo_doc, bridge_doc)
 
 
 async def _mirror_tenant_integration_doc(tenant_id: str, doc: dict[str, Any], *, reason: str) -> dict[str, Any]:

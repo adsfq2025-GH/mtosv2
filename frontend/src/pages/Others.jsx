@@ -188,7 +188,7 @@ export function Integrations() {
       await integrations.configure(edit.platform, { credentials, metadata });
       const clickupHasDirectToken =
         edit.platform === "clickup" &&
-        !!(credentials.api_token || (edit.configured_field_keys || []).includes("api_token") || (edit.configured_field_keys || []).includes("access_token"));
+        !!credentials.api_token;
       if (edit.platform !== "clickup" || clickupHasDirectToken) {
         await integrations.test(edit.platform);
       } else if (edit.platform === "clickup") {
