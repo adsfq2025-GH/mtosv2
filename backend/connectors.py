@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 from fastapi import HTTPException
 
-from db import decrypt_secret, encrypt_secret
+from db import db, decrypt_secret, encrypt_secret
 from oauth_runtime import (
     decode_inline_oauth_connection_ref,
     get_google_oauth_runtime_doc,
@@ -27,7 +27,20 @@ def _tenant_scope(tenant_id: str) -> dict:
 
 
 async def _get_integration_doc(tenant_id: str, platform: str) -> Optional[dict]:
-    return await get_runtime_bridge().get_tenant_integration(tenant_id, platform)
+    normalized_platform = str(platform or "").strip().lower()
+    bridge_doc = await get_runtime_bridge().get_tenant_integration(tenant_id, normalized_platform)
+    mongo_doc = await db.integrations.find_one({"platform": normalized_platform, **_tenant_scope(tenant_id)})
+    if bridge_doc and mongo_doc:
+        return {
+            **dict(mongo_doc or {}),
+            **dict(bridge_doc or {}),
+            "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or {}),
+            "metadata": {
+                **dict((mongo_doc or {}).get("metadata") or {}),
+                **dict((bridge_doc or {}).get("metadata") or {}),
+            },
+        }
+    return bridge_doc or mongo_doc
 
 
 async def get_credentials(tenant_id: str, platform: str) -> Dict[str, str]:
