@@ -338,13 +338,30 @@ def _merge_runtime_integration_docs(mongo_doc: Optional[dict[str, Any]], bridge_
     if not mongo_doc and not bridge_doc:
         return None
     if mongo_doc and bridge_doc:
+        mongo_updated = str((mongo_doc or {}).get("updated_at") or "").strip()
+        bridge_updated = str((bridge_doc or {}).get("updated_at") or "").strip()
+        try:
+            if mongo_updated.endswith("Z"):
+                mongo_updated = mongo_updated[:-1] + "+00:00"
+            if bridge_updated.endswith("Z"):
+                bridge_updated = bridge_updated[:-1] + "+00:00"
+            mongo_dt = datetime.fromisoformat(mongo_updated) if mongo_updated else None
+            bridge_dt = datetime.fromisoformat(bridge_updated) if bridge_updated else None
+        except Exception:
+            mongo_dt = None
+            bridge_dt = None
+        prefer_mongo = bool(mongo_dt and bridge_dt and mongo_dt >= bridge_dt) or bool(mongo_dt and not bridge_dt)
+        primary = mongo_doc if prefer_mongo else bridge_doc
+        secondary = bridge_doc if prefer_mongo else mongo_doc
+        primary_meta = dict((primary or {}).get("metadata") or {})
+        secondary_meta = dict((secondary or {}).get("metadata") or {})
         return {
-            **dict(mongo_doc or {}),
-            **dict(bridge_doc or {}),
-            "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or {}),
+            **dict(secondary or {}),
+            **dict(primary or {}),
+            "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or (bridge_doc or {}).get("credentials_encrypted") or {}),
             "metadata": {
-                **dict((mongo_doc or {}).get("metadata") or {}),
-                **dict((bridge_doc or {}).get("metadata") or {}),
+                **secondary_meta,
+                **primary_meta,
             },
         }
     return dict(bridge_doc or mongo_doc or {})
@@ -4521,16 +4538,10 @@ async def integrations_catalog(_: User = Depends(get_current_user)):
 
 @api.get("/integrations")
 async def integrations_status(ctx=Depends(get_current_context)):
-    bridge = get_runtime_bridge()
-    if bridge.is_enabled_for("integrations"):
-        docs = await bridge.list_tenant_integrations(ctx.tenant_id, limit=100)
-    else:
-        docs = []
-    by_platform = {d["platform"]: d for d in docs}
     out = []
     for cat in list_integrations():
         plat = cat["platform"]
-        stored = by_platform.get(plat)
+        stored = await _get_integration_runtime_doc(ctx.tenant_id, plat)
         user_tok = None
         has_refresh_token = False
         if plat in GOOGLE_OAUTH_PLATFORMS:
