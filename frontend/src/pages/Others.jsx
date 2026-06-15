@@ -119,6 +119,7 @@ export function Integrations() {
   const [tiSettings, setTiSettings] = useState(null);
   const [tiForm, setTiForm] = useState({ scanFrequencyHours: 24, maxPrompts: 60 });
   const [tiBusy, setTiBusy] = useState(false);
+  const [disconnectBusy, setDisconnectBusy] = useState("");
   const [ghlLocs, setGhlLocs] = useState([]);
   const [ghlTokenLocId, setGhlTokenLocId] = useState("");
   const [ghlTokenValue, setGhlTokenValue] = useState("");
@@ -307,7 +308,16 @@ export function Integrations() {
 
   const disconnect = async (platform) => {
     if (!window.confirm("Disconnect this integration?")) return;
-    await integrations.disconnect(platform); load();
+    setDisconnectBusy(platform);
+    try {
+      await integrations.disconnect(platform);
+      await load();
+      setEdit(null);
+    } catch (err) {
+      alert(err?.response?.data?.detail || err?.message || "Failed");
+    } finally {
+      setDisconnectBusy("");
+    }
   };
 
   const STATUS_CHIP = (s) => s === "connected" ? "chip-success" : s === "error" ? "chip-danger" : "chip-muted";
@@ -351,8 +361,8 @@ export function Integrations() {
               )}
               {i.status === "connected" && (
                 GOOGLE_OAUTH.has(i.platform)
-                  ? <button className="btn-danger text-xs" onClick={() => disconnectGoogle(i.platform)}>Disconnect</button>
-                  : <button className="btn-danger text-xs" onClick={() => disconnect(i.platform)}>Disconnect</button>
+                  ? <button className="btn-danger text-xs" disabled={oauthBusy} onClick={() => disconnectGoogle(i.platform)}>{oauthBusy ? "Disconnecting…" : "Disconnect"}</button>
+                  : <button className="btn-danger text-xs" disabled={disconnectBusy === i.platform} onClick={() => disconnect(i.platform)}>{disconnectBusy === i.platform ? "Disconnecting…" : "Disconnect"}</button>
               )}
             </div>
             {i.last_synced_at && <div className="text-[10px] mono text-slate-500 mt-2">Last sync · {new Date(i.last_synced_at).toLocaleString()}</div>}
