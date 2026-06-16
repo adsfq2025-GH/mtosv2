@@ -163,6 +163,29 @@ export function Integrations() {
     "google_lsa",
     "google_ads",
   ]);
+  const labelByPlatform = Object.fromEntries(toArray(list).map((item) => [item.platform, item.label]));
+
+  const googleConnectionSummary = (item) => {
+    const connected = toArray(item?.google_account_connected_platforms).map((platform) => labelByPlatform[platform] || platform);
+    if (!connected.length) return "No Google account connected";
+    if (connected.length === 1) return `Google account connected for ${connected[0]}`;
+    return `Google account connected for ${connected.length} integrations`;
+  };
+
+  const cardStatusLabel = (item) => {
+    if (item.platform === "google_oauth") return item.app_configured ? "configured" : "not configured";
+    return item.status;
+  };
+
+  const cardStatusChip = (item) => {
+    if (item.platform === "google_oauth") return item.app_configured ? "chip-info" : "chip-muted";
+    return item.status === "connected" ? "chip-success" : item.status === "error" ? "chip-danger" : "chip-muted";
+  };
+
+  const configureLabel = (item) => {
+    if (item.platform === "google_oauth") return item.app_configured ? "Reconfigure App" : "Configure App";
+    return item.status === "connected" ? "Reconfigure" : "Configure";
+  };
 
   const openConfig = (i) => {
     setEdit(i);
@@ -307,7 +330,10 @@ export function Integrations() {
   };
 
   const disconnect = async (platform) => {
-    if (!window.confirm("Disconnect this integration?")) return;
+    const message = platform === "google_oauth"
+      ? "Clear the saved Google OAuth app configuration? This does not disconnect existing per-user Google account connections."
+      : "Disconnect this integration?";
+    if (!window.confirm(message)) return;
     setDisconnectBusy(platform);
     try {
       await integrations.disconnect(platform);
@@ -320,8 +346,6 @@ export function Integrations() {
     }
   };
 
-  const STATUS_CHIP = (s) => s === "connected" ? "chip-success" : s === "error" ? "chip-danger" : "chip-muted";
-
   return (
     <div>
       <PageHead title="Integrations" subtitle="13 platforms ready to plug in. Connect to power the meeting brief and KPI snapshots." />
@@ -333,11 +357,21 @@ export function Integrations() {
                 <div className="font-semibold">{i.label}</div>
                 <div className="text-xs text-slate-500 mt-0.5">{i.category}</div>
               </div>
-              <span className={`chip ${STATUS_CHIP(i.status)}`}>{i.status === "connected" ? <CheckCircle size={11} weight="fill" /> : <Plugs size={11} />} {i.status}</span>
+              <span className={`chip ${cardStatusChip(i)}`}>{cardStatusLabel(i) === "configured" || cardStatusLabel(i) === "connected" ? <CheckCircle size={11} weight="fill" /> : <Plugs size={11} />} {cardStatusLabel(i)}</span>
             </div>
             <p className="text-xs text-slate-400 mt-3 min-h-[40px]">{i.description}</p>
+            {i.platform === "google_oauth" && (
+              <div className="mt-3 space-y-1">
+                <div className={`text-[11px] ${i.app_configured ? "text-sky-300" : "text-slate-500"}`}>
+                  OAuth app: {i.app_configured ? "configured" : "not configured"}
+                </div>
+                <div className={`text-[11px] ${i.google_account_connected ? "text-emerald-300" : "text-slate-500"}`}>
+                  {googleConnectionSummary(i)}
+                </div>
+              </div>
+            )}
             <div className="flex items-center gap-2 mt-3">
-              <button className="btn-ghost text-xs !py-1.5 !px-2.5 flex-1" onClick={() => openConfig(i)} data-testid={`configure-${i.platform}`}>{i.status === "connected" ? "Reconfigure" : "Configure"}</button>
+              <button className="btn-ghost text-xs !py-1.5 !px-2.5 flex-1" onClick={() => openConfig(i)} data-testid={`configure-${i.platform}`}>{configureLabel(i)}</button>
               {user?.role === "admin" && (
                 <button
                   className="btn-secondary text-xs"
@@ -359,10 +393,10 @@ export function Integrations() {
                   {testBusy === i.platform ? "Testing…" : "Test"}
                 </button>
               )}
-              {i.status === "connected" && (
+              {((i.platform === "google_oauth" && i.app_configured) || (i.platform !== "google_oauth" && i.status === "connected")) && (
                 GOOGLE_OAUTH.has(i.platform)
                   ? <button className="btn-danger text-xs" disabled={oauthBusy} onClick={() => disconnectGoogle(i.platform)}>{oauthBusy ? "Disconnecting…" : "Disconnect"}</button>
-                  : <button className="btn-danger text-xs" disabled={disconnectBusy === i.platform} onClick={() => disconnect(i.platform)}>{disconnectBusy === i.platform ? "Disconnecting…" : "Disconnect"}</button>
+                  : <button className="btn-danger text-xs" disabled={disconnectBusy === i.platform} onClick={() => disconnect(i.platform)}>{disconnectBusy === i.platform ? "Clearing…" : i.platform === "google_oauth" ? "Clear App Config" : "Disconnect"}</button>
               )}
             </div>
             {i.last_synced_at && <div className="text-[10px] mono text-slate-500 mt-2">Last sync · {new Date(i.last_synced_at).toLocaleString()}</div>}
@@ -459,6 +493,14 @@ export function Integrations() {
           <form onClick={(e) => e.stopPropagation()} onSubmit={save} className="card-flat p-6 w-full max-w-lg" data-testid="integration-config-form">
             <div className="flex items-center justify-between mb-1"><h3 className="text-lg font-semibold">Configure {edit.label}</h3><button type="button" className="btn-ghost !p-2" onClick={() => setEdit(null)}><X size={14} /></button></div>
             <p className="text-xs text-slate-400 mb-4">{edit.description}</p>
+            {edit.platform === "google_oauth" && (
+              <div className="card-flat p-4 bg-white/[0.02] border border-white/5 mb-4">
+                <div className="label mb-1">Google OAuth States</div>
+                <div className="text-xs text-slate-400">OAuth app: {edit.app_configured ? "configured" : "not configured"}.</div>
+                <div className="text-xs text-slate-400 mt-1">{googleConnectionSummary(edit)}.</div>
+                <div className="text-xs text-slate-500 mt-2">This form manages the shared OAuth app credentials only. Use Disconnect on the Google Ads, GBP, GA4, Drive, Gmail, Meet, or Search Console cards to disconnect your Google account.</div>
+              </div>
+            )}
             {GOOGLE_OAUTH.has(edit.platform) && (
               <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
                 <div className="label mb-1">Connect Google</div>

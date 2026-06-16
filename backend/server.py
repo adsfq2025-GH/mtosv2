@@ -4538,6 +4538,18 @@ async def integrations_catalog(_: User = Depends(get_current_user)):
 
 @api.get("/integrations")
 async def integrations_status(ctx=Depends(get_current_context)):
+    google_oauth_cfg = await _google_oauth_config(ctx.tenant_id)
+    google_oauth_app_configured = all(
+        bool(str(google_oauth_cfg.get(key) or "").strip())
+        for key in ("client_id", "client_secret", "redirect_uri")
+    )
+    google_user_connections: dict[str, dict[str, Any]] = {}
+    for google_platform in GOOGLE_OAUTH_PLATFORMS:
+        runtime_doc = await _get_user_oauth_runtime_doc(ctx.tenant_id, ctx.user.id, "google", google_platform)
+        google_user_connections[google_platform] = {
+            "runtime_doc": runtime_doc,
+            "has_refresh_token": bool(await connectors.get_google_refresh_token(ctx.tenant_id, ctx.user.id, google_platform)),
+        }
     out = []
     for cat in list_integrations():
         plat = cat["platform"]
@@ -4545,8 +4557,9 @@ async def integrations_status(ctx=Depends(get_current_context)):
         user_tok = None
         has_refresh_token = False
         if plat in GOOGLE_OAUTH_PLATFORMS:
-            user_tok = await _get_user_oauth_runtime_doc(ctx.tenant_id, ctx.user.id, "google", plat)
-            has_refresh_token = bool(await connectors.get_google_refresh_token(ctx.tenant_id, ctx.user.id, plat))
+            google_conn = google_user_connections.get(plat) or {}
+            user_tok = google_conn.get("runtime_doc")
+            has_refresh_token = bool(google_conn.get("has_refresh_token"))
         stored_status = (stored or {}).get("status", "not_connected")
         if plat in GOOGLE_OAUTH_PLATFORMS:
             if plat == "google_ads":
@@ -4554,14 +4567,28 @@ async def integrations_status(ctx=Depends(get_current_context)):
                 stored_status = "connected" if (has_dev and has_refresh_token) else "not_connected"
             else:
                 stored_status = "connected" if has_refresh_token else "not_connected"
-        out.append({
+        row = {
             **cat,
             "status": stored_status,
             "last_synced_at": (stored or {}).get("last_synced_at") or (user_tok or {}).get("updated_at"),
             "last_error": (stored or {}).get("last_error"),
             "metadata": (stored or {}).get("metadata", {}),
             "configured_field_keys": list(((stored or {}).get("credentials_encrypted") or {}).keys()),
-        })
+        }
+        if plat == "google_oauth":
+            connected_google_platforms = sorted(
+                platform
+                for platform, conn in google_user_connections.items()
+                if conn.get("has_refresh_token")
+            )
+            row.update(
+                {
+                    "app_configured": google_oauth_app_configured,
+                    "google_account_connected": bool(connected_google_platforms),
+                    "google_account_connected_platforms": connected_google_platforms,
+                }
+            )
+        out.append(row)
     return out
 
 
