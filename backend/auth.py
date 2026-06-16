@@ -161,6 +161,18 @@ async def _supabase_admin_update_user(
     return dict(result.get("user") or result or {})
 
 
+async def _supabase_admin_get_user(user_id: str) -> Optional[dict[str, Any]]:
+    uid = str(user_id or "").strip()
+    if not uid:
+        return None
+    try:
+        result = await _supabase_auth_request("GET", f"/auth/v1/admin/users/{uid}")
+    except Exception:
+        return None
+    user = dict((result or {}).get("user") or result or {})
+    return user or None
+
+
 async def _supabase_password_login(email: str, password: str) -> Optional[dict[str, Any]]:
     try:
         result = await _supabase_auth_request(
@@ -351,11 +363,30 @@ async def get_current_user(creds: Optional[HTTPAuthorizationCredentials] = Depen
     try:
         payload = decode_token(creds.credentials)
         user_id = payload.get("sub")
+        token_role = payload.get("role")
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     bridged_user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
     if bridged_user:
         return bridged_user
+    supabase_user = await _supabase_admin_get_user(str(user_id or ""))
+    if supabase_user:
+        email = str(supabase_user.get("email") or "").strip().lower()
+        meta = dict(supabase_user.get("user_metadata") or {})
+        app_meta = dict(supabase_user.get("app_metadata") or {})
+        name = str(meta.get("name") or meta.get("full_name") or "").strip() or (email.split("@", 1)[0] if email else "User")
+        role = str(token_role or "").strip() or _system_role_to_app_role(app_meta.get("system_role"))
+        provider = str(app_meta.get("provider") or "").strip().lower()
+        return User(
+            _id=str(user_id or ""),
+            email=email,
+            name=name,
+            role=role,
+            password_hash="",
+            avatar_url=meta.get("avatar_url") or meta.get("picture"),
+            active=True,
+            auth_provider="google" if provider == "google" else "local",
+        )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
 
@@ -444,9 +475,29 @@ async def get_current_context(request: Request, creds: Optional[HTTPAuthorizatio
     try:
         payload = decode_token(creds.credentials)
         user_id = payload.get("sub")
+        token_role = payload.get("role")
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     user = _runtime_profile_to_user(await get_runtime_bridge().get_user_profile(str(user_id or "")))
+    if not user:
+        supabase_user = await _supabase_admin_get_user(str(user_id or ""))
+        if supabase_user:
+            email = str(supabase_user.get("email") or "").strip().lower()
+            meta = dict(supabase_user.get("user_metadata") or {})
+            app_meta = dict(supabase_user.get("app_metadata") or {})
+            name = str(meta.get("name") or meta.get("full_name") or "").strip() or (email.split("@", 1)[0] if email else "User")
+            role = str(token_role or "").strip() or _system_role_to_app_role(app_meta.get("system_role"))
+            provider = str(app_meta.get("provider") or "").strip().lower()
+            user = User(
+                _id=str(user_id or ""),
+                email=email,
+                name=name,
+                role=role,
+                password_hash="",
+                avatar_url=meta.get("avatar_url") or meta.get("picture"),
+                active=True,
+                auth_provider="google" if provider == "google" else "local",
+            )
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     tenant_id = payload.get("tenant_id")
