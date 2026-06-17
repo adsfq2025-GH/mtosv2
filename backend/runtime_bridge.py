@@ -1064,6 +1064,7 @@ class RuntimeBridge:
             "tenant_id": target_tenant_id,
             "name": str((doc or {}).get("name") or "").strip(),
             "company": str((doc or {}).get("company") or "").strip(),
+            "external_ref": str((doc or {}).get("external_ref") or "").strip() or None,
             "industry": (doc or {}).get("industry"),
             "primary_contact": (doc or {}).get("primary_contact"),
             "email": (doc or {}).get("email"),

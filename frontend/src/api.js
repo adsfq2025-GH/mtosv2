@@ -14,6 +14,16 @@ const pickArray = (v, keys = []) => {
   return [];
 };
 
+const requestOrThrow = async (request) => {
+  try {
+    const response = await request();
+    return response.data;
+  } catch (err) {
+    const detail = err?.response?.data?.detail || err?.response?.data?.error || err?.message || "Request failed";
+    throw new Error(detail);
+  }
+};
+
 api.interceptors.request.use((config) => {
   const t = localStorage.getItem("mtos_token");
   if (t) config.headers.Authorization = `Bearer ${t}`;
@@ -195,6 +205,14 @@ export const integrations = {
   gohighlevelDeleteLocationToken: (locationId) => api.delete(`/integrations/gohighlevel/location-tokens?location_id=${encodeURIComponent(locationId)}`).then((r) => r.data),
   googleAdsCustomers: () => api.get("/integrations/google_ads/customers").then((r) => r.data),
   gbpLocations: () => api.get("/integrations/google_business_profile/locations").then((r) => r.data),
+  clickupStatusV1: () => requestOrThrow(() => api.get("/v1/integrations/clickup/status")),
+  clickupPingV1: () => requestOrThrow(() => api.post("/v1/integrations/clickup/ping")),
+};
+
+export const ownership = {
+  summary: () => requestOrThrow(() => api.get("/v1/ownership/summary")),
+  exceptions: (limit = 50) => requestOrThrow(() => api.get(`/v1/ownership/exceptions?limit=${encodeURIComponent(limit)}`)),
+  sync: () => requestOrThrow(() => api.post("/v1/ownership/sync")),
 };
 
 export const settings = {

@@ -21,8 +21,9 @@ INTEGRATIONS: Dict[str, Dict[str, Any]] = {
         "description": "Pull account activity, overdue tasks, ticket SLAs. Push action items. OAuth app settings are loaded from backend env vars.",
         "fields": [
             {"key": "api_token", "label": "Personal API Token", "secret": True, "help": "Optional. ClickUp Settings -> Apps -> API Token."},
-            {"key": "team_id", "label": "Workspace / Team ID", "secret": False, "help": "Optional"},
-            {"key": "client_health_tracker_list_id", "label": "Client Health Tracker List ID", "secret": False, "help": "Optional. Overrides auto-discovery for ClickUp client sync."},
+            {"key": "team_id", "label": "Workspace / Team ID", "secret": False, "help": "Optional. Raw numeric ClickUp team/workspace id."},
+            {"key": "client_health_tracker_list_id", "label": "Client Health Tracker List ID", "secret": False, "help": "Optional. Use the raw numeric list id only, not the composite browser segment."},
+            {"key": "account_manager_custom_field_id", "label": "Account Manager Field ID", "secret": False, "help": "Optional. Raw custom field id only; if omitted, sync falls back to the first ClickUp assignee."},
         ],
     },
     "gohighlevel": {

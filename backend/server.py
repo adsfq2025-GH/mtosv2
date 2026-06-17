@@ -226,6 +226,7 @@ import ai_territory_intelligence
 import connectors
 import monthly_touch
 import clickup_client_sync
+import ownership_sync
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("mtos")
@@ -2339,6 +2340,60 @@ async def clickup_client_sync_all(ctx=Depends(get_current_context)):
     if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
         raise HTTPException(403, "Admin only")
     return await clickup_client_sync.sync_assigned_clients_for_all_users(tenant_id=ctx.tenant_id)
+
+
+@api.get("/v1/integrations/clickup/status")
+async def clickup_status_v1(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    config = await ownership_sync._get_clickup_config(ctx.tenant_id)
+    summary = await ownership_sync.get_ownership_summary(ctx.tenant_id)
+    return {
+        "ok": True,
+        **ownership_sync.get_clickup_status_payload(config),
+        "ownership_summary": summary,
+    }
+
+
+@api.post("/v1/integrations/clickup/ping")
+async def clickup_ping_v1(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    result = await ownership_sync.ping_clickup(ctx.tenant_id)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("detail") or "ClickUp ping failed")
+    return result
+
+
+@api.get("/v1/ownership/summary")
+async def ownership_summary_v1(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    return {"ok": True, **(await ownership_sync.get_ownership_summary(ctx.tenant_id))}
+
+
+@api.get("/v1/ownership/exceptions")
+async def ownership_exceptions_v1(limit: int = Query(default=50), ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    capped_limit = max(1, min(int(limit or 50), 50))
+    rows = await ownership_sync.list_open_exceptions(ctx.tenant_id, limit=capped_limit)
+    return {"ok": True, "items": rows, "count": len(rows)}
+
+
+@api.post("/v1/ownership/sync")
+async def ownership_sync_v1(ctx=Depends(get_current_context)):
+    if ctx.user.role != "admin" and ctx.tenant_role not in ("owner", "admin"):
+        raise HTTPException(403, "Admin only")
+    result = await ownership_sync.run_clickup_ownership_sync(ctx.tenant_id, ctx.user.id)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("detail") or "Ownership sync failed")
+    return result
+
+
+@api.post("/v1/integrations/clickup/ownership-sync")
+async def ownership_sync_alias_v1(ctx=Depends(get_current_context)):
+    return await ownership_sync_v1(ctx)
 
 
 def _client_comms_html(client: dict, ghl_msgs: List[dict], gmail_msgs: List[dict]) -> str:

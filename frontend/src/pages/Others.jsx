@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs, prompts, aiTerritory } from "../api";
+import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs, prompts, aiTerritory, ownership } from "../api";
 import { PageHead } from "../Layout";
 import { useAuth } from "../auth";
 import {
@@ -124,11 +124,33 @@ export function Integrations() {
   const [ghlTokenLocId, setGhlTokenLocId] = useState("");
   const [ghlTokenValue, setGhlTokenValue] = useState("");
   const [ghlTokenSavedIds, setGhlTokenSavedIds] = useState([]);
+  const [clickupStatusV1, setClickupStatusV1] = useState(null);
+  const [ownershipSummary, setOwnershipSummary] = useState(null);
+  const [ownershipExceptions, setOwnershipExceptions] = useState([]);
+  const [ownershipBusy, setOwnershipBusy] = useState(false);
+  const [ownershipPingBusy, setOwnershipPingBusy] = useState(false);
   const load = () => integrations.status().then((r) => {
     setList(toArray(r));
   }).catch(() => {
     setList([]);
   });
+  const loadOwnership = useCallback(async () => {
+    if (user?.role !== "admin") return;
+    try {
+      const [statusRes, summaryRes, exceptionsRes] = await Promise.all([
+        integrations.clickupStatusV1(),
+        ownership.summary(),
+        ownership.exceptions(50),
+      ]);
+      setClickupStatusV1(statusRes);
+      setOwnershipSummary(summaryRes);
+      setOwnershipExceptions(toArray(exceptionsRes?.items));
+    } catch (e) {
+      setClickupStatusV1(null);
+      setOwnershipSummary(null);
+      setOwnershipExceptions([]);
+    }
+  }, [user?.role]);
   useEffect(() => { load(); }, []);
   useEffect(() => {
     if (user?.role !== "admin") return;
@@ -141,6 +163,10 @@ export function Integrations() {
     if (user?.role !== "admin") return;
     prompts.get("monthly_touch_analysis").then((r) => setMtPrompt(String(r?.text || ""))).catch(() => {});
   }, [user?.role]);
+  useEffect(() => {
+    if (user?.role !== "admin") return;
+    loadOwnership();
+  }, [user?.role, loadOwnership]);
   useEffect(() => {
     const onMsg = (ev) => {
       if (ev?.data?.type === "google_oauth_success" || ev?.data?.type === "clickup_oauth_success") {
@@ -448,6 +474,137 @@ export function Integrations() {
               Active: every {tiSettings.scan_frequency_hours || 24}h · max {tiSettings.max_prompts || 60} prompts
             </div>
           )}
+        </div>
+      )}
+
+      {user?.role === "admin" && (
+        <div className="card-flat p-5 mt-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="font-semibold">Ownership Sync</div>
+              <div className="text-xs text-slate-400 mt-0.5">Run ClickUp-based client ownership sync, review matches, and inspect unresolved account-manager exceptions.</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                className="btn-secondary text-xs"
+                disabled={ownershipBusy || ownershipPingBusy}
+                onClick={async () => {
+                  setOwnershipBusy(true);
+                  try {
+                    await loadOwnership();
+                  } finally {
+                    setOwnershipBusy(false);
+                  }
+                }}
+              >
+                {ownershipBusy ? "Refreshing…" : "Refresh"}
+              </button>
+              <button
+                className="btn-secondary text-xs"
+                disabled={ownershipBusy || ownershipPingBusy}
+                onClick={async () => {
+                  setOwnershipPingBusy(true);
+                  try {
+                    const result = await integrations.clickupPingV1();
+                    await loadOwnership();
+                    alert(`ClickUp ping OK.${result?.task_count_sample != null ? ` Sample tasks: ${result.task_count_sample}` : ""}`);
+                  } catch (e) {
+                    alert(e?.message || "ClickUp ping failed");
+                  } finally {
+                    setOwnershipPingBusy(false);
+                  }
+                }}
+              >
+                {ownershipPingBusy ? "Pinging…" : "Ping ClickUp"}
+              </button>
+              <button
+                className="btn-primary text-xs"
+                disabled={ownershipBusy || ownershipPingBusy || !clickupStatusV1?.configured}
+                onClick={async () => {
+                  setOwnershipBusy(true);
+                  try {
+                    const result = await ownership.sync();
+                    await loadOwnership();
+                    await load();
+                    alert(`Ownership sync completed.\n\nMatched: ${result?.matched_clients || 0}\nUnmatched: ${result?.unmatched_clients || 0}\nProcessed tasks: ${result?.processed_tasks || 0}`);
+                  } catch (e) {
+                    alert(e?.message || "Ownership sync failed");
+                  } finally {
+                    setOwnershipBusy(false);
+                  }
+                }}
+              >
+                {ownershipBusy ? "Running…" : "Run Sync"}
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mt-4">
+            <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
+              <div className="text-xs text-slate-400">Provider</div>
+              <div className="text-sm mt-1">ClickUp</div>
+            </div>
+            <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
+              <div className="text-xs text-slate-400">Configured</div>
+              <div className={`text-sm mt-1 ${clickupStatusV1?.configured ? "text-emerald-300" : "text-rose-300"}`}>{clickupStatusV1?.configured ? "Yes" : "No"}</div>
+            </div>
+            <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
+              <div className="text-xs text-slate-400">Last Run</div>
+              <div className="text-sm mt-1">{ownershipSummary?.last_run?.status || "—"}</div>
+              <div className="text-[10px] text-slate-500 mt-1">{ownershipSummary?.last_run?.finished_at ? new Date(ownershipSummary.last_run.finished_at).toLocaleString() : "No completed run yet"}</div>
+            </div>
+            <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
+              <div className="text-xs text-slate-400">Open Exceptions</div>
+              <div className="text-sm mt-1">{ownershipSummary?.open_exceptions_count ?? 0}</div>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+            <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
+              <div className="label mb-2">ClickUp Config</div>
+              <div className="text-xs text-slate-400">Base URL</div>
+              <div className="text-sm mt-1 break-all">{clickupStatusV1?.base_url || "—"}</div>
+              <div className="text-xs text-slate-400 mt-3">Workspace / Team ID</div>
+              <div className="text-sm mt-1">{clickupStatusV1?.team_id || "—"}</div>
+              <div className="text-xs text-slate-400 mt-3">Client Health Tracker List ID</div>
+              <div className="text-sm mt-1">{clickupStatusV1?.list_id || "—"}</div>
+              <div className="text-xs text-slate-400 mt-3">AM Custom Field ID</div>
+              <div className="text-sm mt-1">{clickupStatusV1?.am_custom_field_id || "Not set (fallback to assignee)"}</div>
+            </div>
+            <div className="card-flat p-4 bg-white/[0.02] border border-white/5">
+              <div className="label mb-2">Latest Summary</div>
+              <div className="text-xs text-slate-400">Matched clients</div>
+              <div className="text-sm mt-1">{ownershipSummary?.last_run?.matched_clients ?? "—"}</div>
+              <div className="text-xs text-slate-400 mt-3">Unmatched clients</div>
+              <div className="text-sm mt-1">{ownershipSummary?.last_run?.unmatched_clients ?? "—"}</div>
+              <div className="text-xs text-slate-400 mt-3">Processed tasks</div>
+              <div className="text-sm mt-1">{ownershipSummary?.last_run?.metadata_json?.processed_tasks ?? "—"}</div>
+            </div>
+          </div>
+          <div className="card-flat p-4 bg-white/[0.02] border border-white/5 mt-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="label">Open Exceptions</div>
+                <div className="text-xs text-slate-500 mt-1">Showing up to 50 unresolved clients/account-manager mismatches.</div>
+              </div>
+            </div>
+            {!ownershipExceptions.length && (
+              <div className="text-sm text-slate-400 mt-3">No open exceptions.</div>
+            )}
+            {!!ownershipExceptions.length && (
+              <div className="mt-3 space-y-2">
+                {ownershipExceptions.map((item) => (
+                  <div key={item.id} className="rounded-lg border border-white/5 bg-black/10 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{item.client_name}</div>
+                      <div className="text-[10px] text-slate-500">{item.last_seen_at ? new Date(item.last_seen_at).toLocaleString() : "—"}</div>
+                    </div>
+                    <div className="text-xs text-slate-400 mt-1">External AM: {item.external_account_manager || "—"}</div>
+                    <div className="text-xs text-slate-400 mt-1">Suggested user: {item.suggested_user_name || "—"}</div>
+                    <div className="text-xs text-rose-300 mt-1">Reason: {item.reason}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

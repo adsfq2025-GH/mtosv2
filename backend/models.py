@@ -87,6 +87,7 @@ class Client(BaseDocument):
     tenant_id: Optional[str] = None
     name: str
     company: str
+    external_ref: Optional[str] = None
     industry: Optional[str] = None
     primary_contact: Optional[str] = None
     email: Optional[str] = None
@@ -128,6 +129,7 @@ class Client(BaseDocument):
 class ClientIn(BaseModel):
     name: str
     company: str
+    external_ref: Optional[str] = None
     industry: Optional[str] = None
     primary_contact: Optional[str] = None
     email: Optional[str] = None
