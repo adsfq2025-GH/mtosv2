@@ -289,7 +289,7 @@ class RuntimeBridge:
     async def resolve_target_user_id(self, user_legacy_id: str) -> Optional[str]:
         if not self.service_configured:
             return None
-        filters = {"email": "not.is.null"}
+        filters: dict[str, str] = {}
         if _is_uuid(user_legacy_id):
             filters["or"] = f"(legacy_source_id.eq.{user_legacy_id},id.eq.{user_legacy_id})"
         else:

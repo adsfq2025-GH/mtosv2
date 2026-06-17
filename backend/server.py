@@ -2025,7 +2025,6 @@ async def list_clients(ctx=Depends(get_current_context)):
                 doc
                 for doc in docs
                 if str((doc or {}).get("account_manager_id") or "") == str(ctx.user.id)
-                and str((doc or {}).get("status") or "") == "active"
             ]
         return [Client.from_mongo(d).model_dump() for d in docs]
     return []
