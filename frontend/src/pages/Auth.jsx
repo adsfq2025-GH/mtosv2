@@ -1,37 +1,25 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../auth";
 import { Brand } from "../Layout";
 import { Sparkle, ArrowRight } from "@phosphor-icons/react";
 
-export function Login() {
-  const { login, loginWithGoogle } = useAuth();
+function GoogleAuthButton({ mode, setErr }) {
+  const { loginWithGoogle } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(false);
   const [googleReady, setGoogleReady] = useState(false);
-  const googleClientId = String(process.env.REACT_APP_GOOGLE_CLIENT_ID || "").replace(/^["'`]+|["'`]+$/g, "").trim();
-
-  const submit = async (e) => {
-    e.preventDefault(); setErr(""); setLoading(true);
-    try { await login(email, password); navigate("/"); }
-    catch (e) {
-      const detail = e?.response?.data?.detail;
-      const status = e?.response?.status;
-      if (detail) setErr(String(detail));
-      else if (status) setErr(`Login failed (HTTP ${status})`);
-      else setErr(`Login failed (${e?.message || "Network error"})`);
-    }
-    finally { setLoading(false); }
-  };
+  const googleClientId = useMemo(
+    () => String(process.env.REACT_APP_GOOGLE_CLIENT_ID || "").replace(/^["'`]+|["'`]+$/g, "").trim(),
+    [],
+  );
+  const buttonId = mode === "register" ? "googleRegisterDiv" : "googleSignInDiv";
 
   useEffect(() => {
     const cid = googleClientId;
     if (!cid) return;
     const id = "google-gsi";
-    if (!document.getElementById(id)) {
+    const existing = document.getElementById(id);
+    if (!existing) {
       const s = document.createElement("script");
       s.id = id;
       s.src = "https://accounts.google.com/gsi/client";
@@ -39,8 +27,17 @@ export function Login() {
       s.defer = true;
       s.onload = () => setGoogleReady(true);
       document.body.appendChild(s);
-    } else {
-      setGoogleReady(true);
+      return;
+    }
+    if (window.google?.accounts?.id) setGoogleReady(true);
+    else {
+      const onReady = window.setInterval(() => {
+        if (window.google?.accounts?.id) {
+          window.clearInterval(onReady);
+          setGoogleReady(true);
+        }
+      }, 200);
+      return () => window.clearInterval(onReady);
     }
   }, [googleClientId]);
 
@@ -60,16 +57,22 @@ export function Login() {
           } catch (e) {
             const detail = e?.response?.data?.detail;
             const status = e?.response?.status;
+            const prefix = mode === "register" ? "Google sign-up failed" : "Google sign-in failed";
             if (detail) setErr(String(detail));
-            else if (status) setErr(`Google sign-in failed (HTTP ${status})`);
-            else setErr(`Google sign-in failed (${e?.message || "Network/CORS error"})`);
+            else if (status) setErr(`${prefix} (HTTP ${status})`);
+            else setErr(`${prefix} (${e?.message || "Network/CORS error"})`);
           }
         },
       });
-      const el = document.getElementById("googleSignInDiv");
+      const el = document.getElementById(buttonId);
       if (el) {
         el.innerHTML = "";
-        window.google.accounts.id.renderButton(el, { theme: "outline", size: "large", width: 360 });
+        window.google.accounts.id.renderButton(el, {
+          theme: "outline",
+          size: "large",
+          width: 360,
+          text: mode === "register" ? "signup_with" : "signin_with",
+        });
       }
       return true;
     };
@@ -90,7 +93,37 @@ export function Login() {
       if (pollId) window.clearInterval(pollId);
       if (timeoutId) window.clearTimeout(timeoutId);
     };
-  }, [googleClientId, googleReady, loginWithGoogle, navigate]);
+  }, [buttonId, googleClientId, googleReady, loginWithGoogle, mode, navigate, setErr]);
+
+  if (!googleClientId) return null;
+  return (
+    <>
+      <div className="divider my-5" />
+      <div className="flex justify-center" id={buttonId} data-testid={mode === "register" ? "google-register-btn" : "google-login-btn"} />
+    </>
+  );
+}
+
+export function Login() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault(); setErr(""); setLoading(true);
+    try { await login(email, password); navigate("/"); }
+    catch (e) {
+      const detail = e?.response?.data?.detail;
+      const status = e?.response?.status;
+      if (detail) setErr(String(detail));
+      else if (status) setErr(`Login failed (HTTP ${status})`);
+      else setErr(`Login failed (${e?.message || "Network error"})`);
+    }
+    finally { setLoading(false); }
+  };
 
   return (
     <div className="app-bg min-h-screen grid lg:grid-cols-2">
@@ -122,12 +155,7 @@ export function Login() {
           <button type="submit" className="btn-primary w-full mt-4 flex items-center justify-center gap-2" disabled={loading} data-testid="login-submit-btn">
             {loading ? "Signing in…" : "Sign in"} <ArrowRight size={16} weight="bold" />
           </button>
-          {googleClientId && (
-            <>
-              <div className="divider my-5" />
-              <div className="flex justify-center" id="googleSignInDiv" data-testid="google-login-btn" />
-            </>
-          )}
+          <GoogleAuthButton mode="login" setErr={setErr} />
           <div className="text-center mt-5 text-sm text-slate-400">
             New to the team? <Link className="text-[#3FA9F5] hover:underline" to="/register" data-testid="go-register-link">Create an account</Link>
           </div>
@@ -169,6 +197,7 @@ export function Register() {
         </select>
         {err && <div className="text-red-400 text-sm" data-testid="register-error">{err}</div>}
         <button type="submit" className="btn-primary w-full mt-4" disabled={loading} data-testid="register-submit-btn">{loading ? "Creating…" : "Create account"}</button>
+        <GoogleAuthButton mode="register" setErr={setErr} />
         <div className="text-center mt-5 text-sm text-slate-400">
           Already have an account? <Link className="text-[#3FA9F5] hover:underline" to="/login" data-testid="go-login-link">Sign in</Link>
         </div>
