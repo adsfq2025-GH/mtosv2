@@ -521,13 +521,14 @@ async def generate_meeting_brief(
     extra_context: Optional[str],
     model_key: str = DEFAULT_MODEL,
     session_id: Optional[str] = None,
+    system_prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     user_text = BRIEF_USER_TEMPLATE.format(
         client_json=json.dumps(client, default=str),
         kpi_json=json.dumps(kpi_snapshot, default=str, indent=2),
         extra=extra_context or "(none)",
     )
-    raw = await run_chat(BRIEF_SYSTEM, user_text, model_key, session_id)
+    raw = await run_chat((system_prompt_override or "").strip() or BRIEF_SYSTEM, user_text, model_key, session_id)
     data = await _extract_or_repair_json(raw, model_key, session_id)
 
     issues = data.get("issues") or []
@@ -561,15 +562,22 @@ async def generate_meeting_brief(
             iss["solutions"] = [sols]
         elif not isinstance(sols, list):
             iss["solutions"] = []
+        if not str(iss.get("action_plan") or "").strip():
+            if iss["solutions"]:
+                iss["action_plan"] = str(iss["solutions"][0] or "").strip()
+            elif str(iss.get("description") or "").strip():
+                iss["action_plan"] = f"Active monitoring and follow-up on: {str(iss.get('description') or '').strip()}"
 
     campaign_recommendations = _validate_factual_items(campaign_recommendations, kpi_snapshot)
 
     issues_library = _validate_factual_items(data.get("issues_library") or issues, kpi_snapshot)
+    primary_wins = wins[:3]
+    primary_issues = issues[:2]
 
     return {
-        "wins":                      wins,
+        "wins":                      primary_wins,
         "wins_library":              wins_library,
-        "issues":                    issues,
+        "issues":                    primary_issues,
         "issues_library":            issues_library,
         "talking_points":            data.get("talking_points") or [],
         "talking_points_library":    data.get("talking_points_library") or [],
@@ -824,6 +832,7 @@ async def generate_recap(
     actions: List[Dict[str, Any]],
     model_key: str = DEFAULT_MODEL,
     session_id: Optional[str] = None,
+    system_prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     user_text = RECAP_USER_TEMPLATE.format(
         client_name=client_name,
@@ -833,7 +842,7 @@ async def generate_recap(
         issues=json.dumps(issues, default=str),
         actions=json.dumps(actions, default=str),
     )
-    raw = await run_chat(RECAP_SYSTEM, user_text, model_key, session_id)
+    raw = await run_chat((system_prompt_override or "").strip() or RECAP_SYSTEM, user_text, model_key, session_id)
     data = await _extract_or_repair_json(raw, model_key, session_id)
     if not data:
         return {"subject": f"Recap — {title}", "html": f"<pre>{raw}</pre>", "plain": raw}
@@ -885,6 +894,7 @@ async def generate_meeting_workflow(
     transcript: str,
     model_key: str = DEFAULT_MODEL,
     session_id: Optional[str] = None,
+    system_prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     user_text = WORKFLOW_USER_TEMPLATE.format(
         client_name=client_name or "Client",
@@ -892,7 +902,7 @@ async def generate_meeting_workflow(
         title=title or "Monthly Touch",
         transcript=(transcript or "")[:18_000],
     )
-    raw = await run_chat(WORKFLOW_SYSTEM, user_text, model_key, session_id)
+    raw = await run_chat((system_prompt_override or "").strip() or WORKFLOW_SYSTEM, user_text, model_key, session_id)
     data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
         "meeting_summary": data.get("meeting_summary", ""),
@@ -949,6 +959,7 @@ async def score_meeting_qa(
     checklist: Dict[str, Any],
     model_key: str = DEFAULT_MODEL,
     session_id: Optional[str] = None,
+    system_prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     user_text = QA_USER_TEMPLATE.format(
         am_name=am_name or "Account Manager",
@@ -958,7 +969,7 @@ async def score_meeting_qa(
         transcript=(transcript or "")[:18_000],
         checklist_json=json.dumps(checklist or {}, default=str),
     )
-    raw = await run_chat(QA_SYSTEM, user_text, model_key, session_id)
+    raw = await run_chat((system_prompt_override or "").strip() or QA_SYSTEM, user_text, model_key, session_id)
     data = await _extract_or_repair_json(raw, model_key, session_id)
     return {
         "total_score": int(data.get("total_score") or 0),

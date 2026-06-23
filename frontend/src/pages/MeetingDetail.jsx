@@ -249,6 +249,13 @@ export default function MeetingDetail() {
   const [savingFeedback, setSavingFeedback] = useState(false);
   const [healthDraft, setHealthDraft] = useState({ nps_score: "", sentiment_classification: "", health_notes: "" });
   const [savingHealth, setSavingHealth] = useState(false);
+  const [captureDraft, setCaptureDraft] = useState({
+    type: "quote",
+    content: "",
+    notes: "",
+    requested: true,
+    routed_to_marketing: true,
+  });
 
   const reload = useCallback(
     () => Promise.all([
@@ -533,6 +540,47 @@ export default function MeetingDetail() {
     }
   };
 
+  const saveManualCapture = async () => {
+    if (!String(captureDraft.content || "").trim()) return;
+    setBusy("capture");
+    try {
+      await contentCaptures.create({
+        meeting_id: id,
+        client_id: m.client_id,
+        type: captureDraft.type,
+        content: String(captureDraft.content || "").trim(),
+        notes: String(captureDraft.notes || "").trim(),
+        requested: !!captureDraft.requested,
+        received: true,
+        routed_to_marketing: !!captureDraft.routed_to_marketing,
+      });
+      setCaptureDraft({
+        type: "quote",
+        content: "",
+        notes: "",
+        requested: true,
+        routed_to_marketing: true,
+      });
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to save content capture");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const toggleContentRoute = async (item, routed) => {
+    setBusy(`route_${item.id}`);
+    try {
+      await contentCaptures.update(item.id, { routed_to_marketing: routed });
+      await reload().catch(() => {});
+    } catch (e) {
+      alert(e?.response?.data?.detail || "Failed to update marketing route");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const CHECKLIST_ITEMS = [
     ["wins", "Review wins"],
     ["issues", "Review issues & next steps"],
@@ -544,6 +592,31 @@ export default function MeetingDetail() {
     ["actions", "Named action items with owners + dates"],
     ["nextmeeting", "Next meeting date confirmed"],
     ["sentiment", "Log client sentiment"],
+  ];
+  const prepSignals = [
+    { label: "Brief generated", ready: !!m?.brief_generated_at },
+    { label: "Wins and issues prepared", ready: (m?.wins || []).length >= 3 && (m?.issues || []).length >= 2 },
+    { label: "Prep checklist reviewed", ready: (m?.prep_checklist || []).length > 0 },
+    { label: "Client continuity reviewed", ready: actions.length > 0 || !!m?.health_notes || !!m?.sentiment_summary || !!client },
+    { label: "Strategic recommendation prepared", ready: (m?.campaign_recommendations || []).length > 0 || (m?.strategic_recommendations || []).length > 0 },
+    { label: "Testimonial / content angle assessed", ready: !!m?.testimonial_opportunity || content.length > 0 },
+  ];
+  const prepReadyCount = prepSignals.filter((item) => item.ready).length;
+  const prepReadinessPct = Math.round((prepReadyCount / prepSignals.length) * 100);
+  const closingSignals = [
+    { label: "Action items confirmed", ready: !!checklist.actions || actions.length > 0 },
+    { label: "Testimonial / content assessed", ready: !!checklist.testimonial || !!m?.testimonial_opportunity || content.length > 0 },
+    { label: "Client sentiment logged", ready: !!checklist.sentiment || !!healthDraft.sentiment_classification },
+    { label: "Next 30-day plan agreed", ready: !!checklist.next30 },
+    { label: "Next meeting confirmed", ready: !!checklist.nextmeeting },
+    { label: "Recap generated", ready: !!recap || !!m?.recap_html },
+  ];
+  const closingReadyCount = closingSignals.filter((item) => item.ready).length;
+  const closingReadinessPct = Math.round((closingReadyCount / closingSignals.length) * 100);
+  const testimonialQuestions = [
+    "What result are you happiest about right now?",
+    "What changed most before vs after working with us?",
+    "What would you tell another business considering Map Ranking?",
   ];
 
   if (!m) return <div className="text-slate-400">Loading…</div>;
@@ -872,6 +945,23 @@ export default function MeetingDetail() {
       {tab === "brief" && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
           <div className="lg:col-span-2 space-y-5">
+            <section className="card-flat p-5">
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div>
+                  <div className="flex items-center gap-2"><CheckCircle size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">Prep Readiness</h3></div>
+                  <div className="text-xs text-slate-400 mt-1">Quick gate before the Monthly Touch starts.</div>
+                </div>
+                <span className={`chip ${prepReadinessPct >= 85 ? "chip-success" : prepReadinessPct >= 60 ? "chip-warn" : "chip-danger"}`}>{prepReadinessPct}% ready</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {prepSignals.map((item) => (
+                  <div key={item.label} className="p-3 rounded-md border border-white/5 bg-white/[0.02] flex items-center justify-between gap-3">
+                    <div className="text-sm text-slate-200">{item.label}</div>
+                    <span className={`chip ${item.ready ? "chip-success" : "chip-warn"}`}>{item.ready ? "ready" : "needs review"}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
             <section className="card-flat p-5">
               <div className="flex items-center gap-2 mb-3"><Trophy size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">Wins</h3></div>
               {(m.wins || []).length === 0 && <EmptyHint label="Generate the brief to populate wins from your KPI snapshot." />}
@@ -1246,6 +1336,12 @@ export default function MeetingDetail() {
                 <Link to="/testimonials" className="text-xs text-[#3FA9F5] hover:underline">View all</Link>
               </div>
               <div className="text-sm text-slate-300 leading-relaxed">{m.testimonial_opportunity || "—"}</div>
+              <div className="mt-4 p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                <div className="label mb-2">Suggested Ask Angles</div>
+                <ul className="list-disc pl-5 text-sm text-slate-300 space-y-1">
+                  {testimonialQuestions.map((q) => <li key={q}>{q}</li>)}
+                </ul>
+              </div>
             </section>
             <section className="card-flat p-5">
               <div className="flex items-center justify-between mb-3">
@@ -1287,11 +1383,63 @@ export default function MeetingDetail() {
               {m.brief_generated_at && <div className="mt-3 text-[11px] text-slate-500 mono">Brief generated · {new Date(m.brief_generated_at).toLocaleString()} · {m.brief_model}</div>}
             </section>
             <section className="card-flat p-5">
+              <div className="flex items-center gap-2 mb-3"><Clock size={18} weight="duotone" color="#3FA9F5" /><h3 className="font-semibold">Client Continuity Snapshot</h3></div>
+              <div className="space-y-3 text-sm">
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="label mb-1">Open Follow-Through</div>
+                  <div className="text-slate-300">{actions.filter((a) => a.status !== "completed").length} open action items tied to this meeting.</div>
+                </div>
+                <div className="p-3 rounded-md border border-white/5 bg-white/[0.02]">
+                  <div className="label mb-1">Health / Continuity Notes</div>
+                  <div className="text-slate-300 whitespace-pre-wrap">{healthDraft.health_notes || m.sentiment_summary || "No continuity notes saved yet."}</div>
+                </div>
+              </div>
+            </section>
+            <section className="card-flat p-5">
               <div className="label mb-2">KPI Snapshot</div>
               <details className="text-xs text-slate-300">
                 <summary className="cursor-pointer text-[#3FA9F5]">View raw snapshot</summary>
                 <pre className="mt-2 max-h-72 overflow-auto p-3 bg-black/40 rounded mono text-[11px]">{JSON.stringify(m.kpi_snapshot || {}, null, 2)}</pre>
               </details>
+            </section>
+            <section className="card-flat p-5">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-2"><Megaphone size={18} weight="duotone" color="#2FE0C2" /><h3 className="font-semibold">Manual Content Capture</h3></div>
+                <span className="chip chip-info">For live meeting use</span>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <div className="label mb-1">Capture Type</div>
+                  <select className="input" value={captureDraft.type} onChange={(e) => setCaptureDraft((p) => ({ ...p, type: e.target.value }))}>
+                    <option value="quote">Quote</option>
+                    <option value="testimonial_written">Written Testimonial</option>
+                    <option value="testimonial_video">Video Testimonial</option>
+                    <option value="case_study_lead">Case Study Lead</option>
+                    <option value="clip">Video Clip</option>
+                  </select>
+                </div>
+                <div>
+                  <div className="label mb-1">Exact Quote or Moment</div>
+                  <textarea className="input !min-h-[90px]" value={captureDraft.content} onChange={(e) => setCaptureDraft((p) => ({ ...p, content: e.target.value }))} placeholder="Capture the client quote, testimonial angle, or marketing-worthy moment here…" />
+                </div>
+                <div>
+                  <div className="label mb-1">Context / Follow-Up Notes</div>
+                  <textarea className="input !min-h-[75px]" value={captureDraft.notes} onChange={(e) => setCaptureDraft((p) => ({ ...p, notes: e.target.value }))} placeholder="Why this matters, permission status, or what marketing should know…" />
+                </div>
+                <div className="flex items-center gap-4 text-xs text-slate-400">
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={!!captureDraft.requested} onChange={(e) => setCaptureDraft((p) => ({ ...p, requested: e.target.checked }))} />
+                    testimonial ask made
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={!!captureDraft.routed_to_marketing} onChange={(e) => setCaptureDraft((p) => ({ ...p, routed_to_marketing: e.target.checked }))} />
+                    route to marketing
+                  </label>
+                </div>
+                <button className="btn-primary w-full" type="button" onClick={saveManualCapture} disabled={busy === "capture" || !String(captureDraft.content || "").trim()}>
+                  {busy === "capture" ? "Saving…" : "Save Content Capture"}
+                </button>
+              </div>
             </section>
           </div>
         </div>
@@ -1443,7 +1591,15 @@ export default function MeetingDetail() {
                   <div className="space-y-2">
                     {content.map((c) => (
                       <div key={c.id} className="p-3 rounded-md border border-[#2FE0C2]/20 bg-[#2FE0C2]/5">
-                        <div className="flex items-center justify-between"><span className="chip chip-success">{c.type}</span><span className="text-[10px] text-slate-500">→ Marketing queue</span></div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="chip chip-success">{c.type}</span>
+                            <span className={`chip ${c.routed_to_marketing ? "chip-info" : "chip-warn"}`}>{c.routed_to_marketing ? "routed" : "not routed"}</span>
+                          </div>
+                          <button className="btn-ghost text-xs" type="button" disabled={busy === `route_${c.id}`} onClick={() => toggleContentRoute(c, !c.routed_to_marketing)}>
+                            {busy === `route_${c.id}` ? "Saving…" : (c.routed_to_marketing ? "Remove Route" : "Route to Marketing")}
+                          </button>
+                        </div>
                         <div className="text-sm text-slate-200 mt-2 italic">"{c.content}"</div>
                         {c.notes && <div className="text-xs text-slate-400 mt-2">Why strong: {c.notes}</div>}
                       </div>
@@ -1559,6 +1715,29 @@ export default function MeetingDetail() {
                   <button className="btn-primary" type="button" onClick={saveFeedback} disabled={savingFeedback}>
                     {savingFeedback ? "Saving…" : "Save Feedback"}
                   </button>
+                </div>
+              </div>
+              <div className="card-flat p-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="font-semibold">Meeting Close Control</h3>
+                    <div className="text-xs text-slate-400 mt-1">Use this final gate before you consider the Monthly Touch complete.</div>
+                  </div>
+                  <span className={`chip ${closingReadinessPct >= 85 ? "chip-success" : closingReadinessPct >= 60 ? "chip-warn" : "chip-danger"}`}>{closingReadinessPct}% complete</span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-4">
+                  {closingSignals.map((item) => (
+                    <div key={item.label} className="p-3 rounded-md border border-white/5 bg-white/[0.02] flex items-center justify-between gap-3">
+                      <div className="text-sm text-slate-200">{item.label}</div>
+                      <span className={`chip ${item.ready ? "chip-success" : "chip-warn"}`}>{item.ready ? "done" : "pending"}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="divider my-4" />
+                <div className="text-sm text-slate-300 space-y-1">
+                  <div>1. Restate the three wins and two biggest issues in plain language.</div>
+                  <div>2. Confirm every owner and due date before closing the call.</div>
+                  <div>3. Confirm the next 30-day plan and next meeting date before you leave.</div>
                 </div>
               </div>
               <div className="card-flat p-5">

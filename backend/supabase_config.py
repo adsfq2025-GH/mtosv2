@@ -66,14 +66,19 @@ def get_supabase_settings() -> dict[str, Any]:
     enabled = _to_bool(os.environ.get("SUPABASE_ENABLED", "false"))
     url = str(os.environ.get("SUPABASE_URL", "")).strip()
     service_role_key = str(os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")).strip()
+    anon_key = str(os.environ.get("SUPABASE_ANON_KEY", "")).strip()
     db_schema = str(os.environ.get("SUPABASE_DB_SCHEMA", "public")).strip() or "public"
+    native_only_mode = _to_bool(os.environ.get("SUPABASE_NATIVE_ONLY_MODE", "false"))
 
     return {
         "enabled": enabled,
         "url": url,
         "service_role_key": service_role_key,
+        "anon_key": anon_key,
         "db_schema": db_schema,
         "service_configured": bool(enabled and url and service_role_key),
+        "native_only_mode": native_only_mode,
+        "native_user_scoped_configured": bool(enabled and url and service_role_key and anon_key),
     }
 
 
@@ -156,6 +161,10 @@ def get_runtime_bridge_env_summary() -> dict[str, Any]:
 
 def is_supabase_service_configured() -> bool:
     return bool(get_supabase_settings()["service_configured"])
+
+
+def is_supabase_native_only_mode() -> bool:
+    return bool(get_supabase_settings().get("native_only_mode"))
 
 
 def reset_supabase_settings_cache() -> None:

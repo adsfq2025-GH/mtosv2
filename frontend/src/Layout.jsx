@@ -8,6 +8,7 @@ import {
 import { useAuth } from "./auth";
 import { clients as clientsApi, meetings as meetingsApi, docs as docsApi } from "./api";
 import { applyDisplayMode, getSavedDisplayMode } from "./displayMode";
+import { canManageAdminSurfaces } from "./rbac";
 
 export function Brand() {
   return (
@@ -44,13 +45,14 @@ export default function Layout({ children }) {
   const navigate = useNavigate();
   const nav = React.useMemo(() => {
     const base = [...NAV_BASE];
-    if (user?.role === "admin") {
+    if (canManageAdminSurfaces(user)) {
       const idx = base.findIndex((x) => x.to === "/integrations");
       const insertAt = idx === -1 ? base.length : idx;
       base.splice(insertAt, 0, { to: "/ai-visibility", label: "AI Visibility", icon: MagnifyingGlass, testid: "nav-ai-visibility" });
+      base.splice(insertAt + 1, 0, { to: "/prompt-center", label: "Prompt Center", icon: Sparkle, testid: "nav-prompt-center" });
     }
     return base;
-  }, [user?.role]);
+  }, [user]);
   const [displayMode, setDisplayMode] = React.useState("dark");
   const [displayOpen, setDisplayOpen] = React.useState(false);
   const displayRef = React.useRef(null);

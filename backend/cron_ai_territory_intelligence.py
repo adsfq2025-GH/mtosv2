@@ -2,11 +2,11 @@ import asyncio
 
 from models import TenantSettings
 import ai_territory_intelligence
-from runtime_bridge import get_runtime_bridge
+from supabase_store import get_store
 
 
 async def main() -> None:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     tenants = await bridge.list_tenants(status="active", limit=5000) if bridge.is_enabled_for("tenants") else []
     for t in tenants or []:
         tenant_id = str(t.get("_id") or "").strip()

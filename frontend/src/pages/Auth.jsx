@@ -168,7 +168,7 @@ export function Login() {
 export function Register() {
   const { register } = useAuth();
   const navigate = useNavigate();
-  const [form, setForm] = useState({ name: "", email: "", password: "", role: "manager" });
+  const [form, setForm] = useState({ name: "", email: "", password: "" });
   const [err, setErr] = useState(""); const [loading, setLoading] = useState(false);
 
   const submit = async (e) => {
@@ -183,18 +183,13 @@ export function Register() {
       <form onSubmit={submit} className="w-full max-w-md card-flat p-7" data-testid="register-form">
         <Brand />
         <h1 className="text-2xl font-bold mt-6 mb-1">Create your account</h1>
-        <p className="text-slate-400 text-sm mb-6">First user becomes admin automatically.</p>
+        <p className="text-slate-400 text-sm mb-6">Map Ranking team access only. The first user becomes admin automatically; all other new users start as Account Managers.</p>
         <label className="label">Name</label>
         <input className="input mt-1.5 mb-3" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required data-testid="register-name-input" />
         <label className="label">Email</label>
         <input type="email" className="input mt-1.5 mb-3" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} required data-testid="register-email-input" />
         <label className="label">Password</label>
         <input type="password" className="input mt-1.5 mb-3" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required data-testid="register-password-input" />
-        <label className="label">Role</label>
-        <select className="input mt-1.5 mb-3" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} data-testid="register-role-select">
-          <option value="manager">Account Manager</option>
-          <option value="admin">Admin</option>
-        </select>
         {err && <div className="text-red-400 text-sm" data-testid="register-error">{err}</div>}
         <button type="submit" className="btn-primary w-full mt-4" disabled={loading} data-testid="register-submit-btn">{loading ? "Creating…" : "Create account"}</button>
         <GoogleAuthButton mode="register" setErr={setErr} />

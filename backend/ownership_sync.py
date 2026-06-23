@@ -8,7 +8,7 @@ import httpx
 
 import connectors
 from db import utcnow
-from runtime_bridge import get_runtime_bridge
+from supabase_store import get_store
 
 
 def _norm(value: Any) -> str:
@@ -244,7 +244,7 @@ def _suggest_user_name(external_name: str, full_names: list[str]) -> Optional[st
 
 
 async def _list_tenant_users(tenant_id: str) -> list[dict[str, Any]]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     profiles = await bridge.list_user_profiles(limit=5000) if bridge.is_enabled_for("profiles") else []
     users: list[dict[str, Any]] = []
     for profile in profiles:
@@ -273,7 +273,7 @@ async def _list_tenant_users(tenant_id: str) -> list[dict[str, Any]]:
 
 
 async def _create_sync_run(tenant_id: str, actor_user_id: str, metadata_json: dict[str, Any]) -> Optional[dict[str, Any]]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     target_tenant_id = await bridge.resolve_target_tenant_id(tenant_id)
     target_actor_id = await bridge.resolve_target_user_id(actor_user_id)
     if not target_tenant_id:
@@ -299,7 +299,7 @@ async def _create_sync_run(tenant_id: str, actor_user_id: str, metadata_json: di
 
 
 async def _finalize_sync_run(run_id: str, matched_clients: int, unmatched_clients: int, status: str, metadata_json: dict[str, Any]) -> None:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     await bridge._request(
         "PATCH",
         "ownership_sync_runs",
@@ -316,7 +316,7 @@ async def _finalize_sync_run(run_id: str, matched_clients: int, unmatched_client
 
 
 async def _list_active_ownership_rows(tenant_id: str) -> list[dict[str, Any]]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     target_tenant_id = await bridge.resolve_target_tenant_id(tenant_id)
     if not target_tenant_id:
         return []
@@ -330,7 +330,7 @@ async def _list_active_ownership_rows(tenant_id: str) -> list[dict[str, Any]]:
 
 
 async def _deactivate_ownership_row(row_id: str) -> None:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     await bridge._request(
         "PATCH",
         "client_ownership",
@@ -341,7 +341,7 @@ async def _deactivate_ownership_row(row_id: str) -> None:
 
 
 async def _insert_ownership_row(tenant_id: str, client_id: str, user_id: str, actor_user_id: str, metadata_json: dict[str, Any]) -> None:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     target_tenant_id = await bridge.resolve_target_tenant_id(tenant_id)
     target_client_id = await bridge.resolve_target_client_id(tenant_id, client_id)
     target_user_id = await bridge.resolve_target_user_id(user_id)
@@ -376,7 +376,7 @@ async def _touch_exception(
     reason: str,
     metadata_json: dict[str, Any],
 ) -> None:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     target_tenant_id = await bridge.resolve_target_tenant_id(tenant_id)
     target_actor_id = await bridge.resolve_target_user_id(actor_user_id)
     if not target_tenant_id:
@@ -429,7 +429,7 @@ async def _touch_exception(
 
 
 async def _resolve_open_exceptions(tenant_id: str, actor_user_id: str, client_name: str) -> None:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     target_tenant_id = await bridge.resolve_target_tenant_id(tenant_id)
     target_actor_id = await bridge.resolve_target_user_id(actor_user_id)
     if not target_tenant_id:
@@ -463,7 +463,7 @@ async def _resolve_open_exceptions(tenant_id: str, actor_user_id: str, client_na
 
 
 async def _list_runs(tenant_id: str, *, limit: int = 10) -> list[dict[str, Any]]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     target_tenant_id = await bridge.resolve_target_tenant_id(tenant_id)
     if not target_tenant_id:
         return []
@@ -478,7 +478,7 @@ async def _list_runs(tenant_id: str, *, limit: int = 10) -> list[dict[str, Any]]
 
 
 async def list_open_exceptions(tenant_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     target_tenant_id = await bridge.resolve_target_tenant_id(tenant_id)
     if not target_tenant_id:
         return []
@@ -555,7 +555,7 @@ async def run_clickup_ownership_sync(tenant_id: str, actor_user_id: str) -> dict
         if not task_result.get("ok"):
             raise ValueError(task_result.get("error_detail") or task_result.get("error") or "Failed to fetch ClickUp tasks")
         tasks = list(task_result.get("tasks") or [])
-        clients = await get_runtime_bridge().list_clients(tenant_id, limit=5000)
+        clients = await get_store().list_clients(tenant_id, limit=5000)
         active_ownership_rows = await _list_active_ownership_rows(tenant_id)
         ownership_by_client: dict[str, dict[str, Any]] = {}
         for row in active_ownership_rows:
@@ -646,17 +646,17 @@ async def run_clickup_ownership_sync(tenant_id: str, actor_user_id: str) -> dict
                 "account_manager_name": str((matched_user or {}).get("full_name") or ""),
                 "updated_at": now_iso,
             }
-            await get_runtime_bridge().upsert_client(tenant_id, next_client)
+            await get_store().upsert_client(tenant_id, next_client)
             clients_by_external_ref[task_id] = next_client
             clients_by_name[_normalize_client_name(str(next_client.get("company") or next_client.get("name") or ""))] = next_client
 
-            if current_owner and str((current_owner or {}).get("user_id") or "").strip() == await get_runtime_bridge().resolve_target_user_id(str((matched_user or {}).get("id") or "")):
-                await get_runtime_bridge()._request(
+            if current_owner and str((current_owner or {}).get("user_id") or "").strip() == await get_store().resolve_target_user_id(str((matched_user or {}).get("id") or "")):
+                await get_store()._request(
                     "PATCH",
                     "client_ownership",
                     params={"id": f"eq.{str((current_owner or {}).get('id') or '').strip()}"},
                     payload={"synced_at": now_iso},
-                    headers=get_runtime_bridge()._write_headers(prefer="return=representation"),
+                    headers=get_store()._write_headers(prefer="return=representation"),
                 )
                 updated_ownership += 1
             else:

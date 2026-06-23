@@ -17,13 +17,17 @@ export default function Opportunities() {
         {items.map((c) => (
           <div key={c.id} className="card-flat p-5" data-testid={`opportunity-card-${c.id}`}>
             <div className="flex items-center justify-between mb-2">
-              <span className="chip chip-success"><Megaphone size={11} /> {c.type}</span>
+              <div className="flex items-center gap-2">
+                <span className="chip chip-success"><Megaphone size={11} /> {c.type}</span>
+                <span className={`chip ${c.routed_to_marketing ? "chip-info" : "chip-warn"}`}>{c.routed_to_marketing ? "routed" : "not routed"}</span>
+              </div>
               {c.routed_to_marketing
-                ? <span className="chip chip-info">routed</span>
+                ? <button className="btn-ghost text-xs !py-1 !px-2" onClick={() => route(c.id, false)} data-testid={`unroute-${c.id}`}>Remove route</button>
                 : <button className="btn-primary text-xs !py-1 !px-2" onClick={() => route(c.id, true)} data-testid={`route-${c.id}`}>Route to marketing</button>}
             </div>
             <div className="text-sm text-slate-200 italic">"{c.content}"</div>
             {c.notes && <div className="text-xs text-slate-400 mt-2">{c.notes}</div>}
+            <div className="text-[11px] text-slate-500 mt-2">testimonial ask {c.requested ? "made" : "not logged"} · capture {c.received ? "saved" : "pending"}</div>
             <div className="text-[11px] mono text-slate-500 mt-2">Client {(c.client_id || "").slice(0, 8)} · Meeting {(c.meeting_id || "—").slice(0, 8)}</div>
           </div>
         ))}
@@ -31,4 +35,3 @@ export default function Opportunities() {
     </div>
   );
 }
-

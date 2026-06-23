@@ -221,7 +221,7 @@ def test_write_google_oauth_token_uses_supabase_primary(monkeypatch):
         "get_oauth_token_store_settings",
         lambda: {"supabase_primary_enabled": True, "mongo_mirror_enabled": True},
     )
-    monkeypatch.setattr(oauth_runtime, "get_runtime_bridge", lambda: bridge)
+    monkeypatch.setattr(oauth_runtime, "get_store", lambda: bridge)
 
     result = asyncio.run(
         write_google_oauth_token(
@@ -251,7 +251,7 @@ def test_write_google_oauth_token_fails_when_supabase_primary_fails(monkeypatch)
         "get_oauth_token_store_settings",
         lambda: {"supabase_primary_enabled": True, "mongo_mirror_enabled": True},
     )
-    monkeypatch.setattr(oauth_runtime, "get_runtime_bridge", lambda: bridge)
+    monkeypatch.setattr(oauth_runtime, "get_store", lambda: bridge)
 
     result = asyncio.run(
         write_google_oauth_token(
@@ -277,7 +277,7 @@ def test_clear_google_oauth_token_clears_supabase_only(monkeypatch):
         "get_oauth_token_store_settings",
         lambda: {"supabase_primary_enabled": True, "mongo_mirror_enabled": True},
     )
-    monkeypatch.setattr(oauth_runtime, "get_runtime_bridge", lambda: bridge)
+    monkeypatch.setattr(oauth_runtime, "get_store", lambda: bridge)
 
     result = asyncio.run(
         clear_google_oauth_token(
@@ -304,7 +304,7 @@ def test_clear_google_oauth_token_succeeds_without_mongo_when_supabase_is_availa
         "get_oauth_token_store_settings",
         lambda: {"supabase_primary_enabled": True, "mongo_mirror_enabled": False},
     )
-    monkeypatch.setattr(oauth_runtime, "get_runtime_bridge", lambda: bridge)
+    monkeypatch.setattr(oauth_runtime, "get_store", lambda: bridge)
 
     result = asyncio.run(
         clear_google_oauth_token(

@@ -314,6 +314,134 @@ Every Monthly Touch Meeting must include:
 - Drop into Red → leadership escalation, retention play activated
 """,
     },
+    {
+        "slug": "sop-client-history-review",
+        "category": "SOP",
+        "title": "SOP — Client History & Context Review",
+        "summary": "Required pre-meeting continuity review so account managers do not repeat questions or miss commitments.",
+        "body": """# SOP — Client History & Context Review
+
+## Review Before Every Monthly Touch
+1. Review the previous 2–3 Monthly Touch meetings.
+2. Review open action items and any overdue commitments.
+3. Review unresolved issues, churn-risk indicators, and recent sentiment.
+4. Review strategic recommendations from the last meeting and what actually happened.
+5. Review recent client communications for unanswered questions or friction.
+6. Review seasonal, operational, or growth context that should change this month's conversation.
+
+## Human Checkpoint
+- Confirm you understand what was promised last time.
+- Confirm you can explain current status without asking the client to repeat themselves.
+- Confirm you know which issues are still open, who owns them, and what progress exists.
+""",
+    },
+    {
+        "slug": "sop-meeting-closing",
+        "category": "SOP",
+        "title": "SOP — Monthly Touch Closing Framework",
+        "summary": "How to close with recap, ownership confirmation, confidence reinforcement, and next-meeting continuity.",
+        "body": """# SOP — Monthly Touch Closing Framework
+
+## Required Closing Sequence
+1. Recap the top 3 wins in plain language.
+2. Re-state the 1–2 most important concerns and what is already being done.
+3. Confirm action items with owner, due date, and expected outcome.
+4. Confirm timeline expectations and any client dependencies.
+5. Reinforce confidence: explain why the current plan is the right next move.
+6. Ask for final client questions or blockers.
+7. Schedule the next Monthly Touch before the meeting is considered complete.
+
+## Closing Language
+- "Here are the three biggest things we accomplished this month."
+- "Here is what we are already doing about the two biggest challenges."
+- "Let's confirm who owns each next step so nothing falls through the cracks."
+- "Before we wrap, let's get next month's Monthly Touch on the calendar."
+""",
+    },
+    {
+        "slug": "sop-marketing-content-handoff",
+        "category": "SOP",
+        "title": "SOP — Marketing Content & Testimonial Handoff",
+        "summary": "How captured quotes, testimonials, and case-study moments move from the meeting into marketing follow-through.",
+        "body": """# SOP — Marketing Content & Testimonial Handoff
+
+## Trigger Events
+- Testimonial captured
+- Strong quote captured
+- Video snippet opportunity identified
+- Case study lead identified
+
+## Required Handoff Steps
+1. Mark the meeting content moment inside Monthly Touch OS.
+2. Capture the exact quote or moment description.
+3. Record whether permission is explicit, pending, or not yet requested.
+4. Route the item to marketing / Luisa for review.
+5. Create a follow-up task with transcript context and any timestamps available.
+6. Track whether the content was reviewed, approved, and published.
+
+## Human Oversight
+- Final permission and brand-safe usage always require human confirmation.
+- Client-facing testimonial asks should stay low-pressure and relationship-aware.
+""",
+    },
+    {
+        "slug": "checklist-closing-follow-through",
+        "category": "Checklist",
+        "title": "Meeting Closing & Follow-Through Checklist",
+        "summary": "Required closing controls so Monthly Touch meetings end with accountability and continuity.",
+        "body": """# Meeting Closing & Follow-Through Checklist
+
+- [ ] Top wins summarized clearly
+- [ ] Current issues explained with active remediation plan
+- [ ] Client questions answered
+- [ ] Action items confirmed with owners
+- [ ] Timeline updates confirmed
+- [ ] Expectations aligned
+- [ ] Testimonial / content opportunity assessed
+- [ ] Recap prepared or queued
+- [ ] Follow-up routing confirmed
+- [ ] Next Monthly Touch scheduled
+""",
+    },
+    {
+        "slug": "checklist-content-capture",
+        "category": "Checklist",
+        "title": "Testimonial & Content Capture Checklist",
+        "summary": "Low-pressure checklist for gathering reusable marketing content during or after the meeting.",
+        "body": """# Testimonial & Content Capture Checklist
+
+- [ ] Positive sentiment or strong result identified
+- [ ] Best quote or success moment captured
+- [ ] Follow-up testimonial ask considered
+- [ ] Content type identified (quote, written testimonial, video, case study, clip)
+- [ ] Internal notes added for why the moment matters
+- [ ] Marketing / Luisa routing decision made
+- [ ] Permission status clarified
+- [ ] Follow-up task created if needed
+""",
+    },
+    {
+        "slug": "scorecard-prep-readiness",
+        "category": "Scorecard",
+        "title": "Pre-Meeting Readiness Scorecard",
+        "summary": "Checks whether the account manager is actually ready to lead a strategic Monthly Touch.",
+        "body": """# Pre-Meeting Readiness Scorecard
+
+## Scoring Areas
+- Context reviewed (20)
+- KPI snapshot validated (20)
+- Wins / issues understood (20)
+- Strategic recommendations prepared (15)
+- Client-history continuity covered (15)
+- Closing + next-step plan prepared (10)
+
+## Readiness Bands
+- 90–100: Ready to run
+- 75–89: Ready with light review
+- 60–74: Missing important prep
+- Below 60: Do not run meeting without manager review
+""",
+    },
 
     # ============ AUTOMATION ============
     {
@@ -358,6 +486,91 @@ Every Monthly Touch Meeting must include:
 ## Minimum Software Stack
 **Required**: Monthly Touch OS + AI Provider Key(s) + ClickUp + GHL + Google Workspace.
 **Optional but high-ROI**: Ahrefs, Map Check-ins, Meta Ads.
+""",
+    },
+    {
+        "slug": "automation-workflow-matrix",
+        "category": "Automation",
+        "title": "Workflow Automation Matrix (Categories A-D)",
+        "summary": "Classifies the Monthly Touch lifecycle into fully native, API-assisted, specialized tooling, and human-oversight work.",
+        "body": """# Workflow Automation Matrix
+
+## Category A — Fully Possible Inside Monthly Touch OS
+- Meeting brief generation
+- Win / issue summarization
+- Talking point generation
+- Action item drafting
+- Recap drafting
+- QA scoring
+- Account health scoring
+
+Pros: centralized, fast, low operational overhead.
+Risks: quality still depends on source data quality.
+Human oversight: final review before client-facing send.
+
+## Category B — Possible Through Monthly Touch OS + Existing APIs
+- ClickUp ownership sync and task pushback
+- Google Ads / GBP / GSC / GA4 / Meta / LSA KPI collection
+- Gmail communication retrieval and draft follow-up generation
+- Google Drive / Meet transcript retrieval
+- GoHighLevel pipeline and communication context retrieval
+- Map Check-ins summary generation from API-fed scan data
+
+Pros: preserves existing stack, high leverage, strong automation ROI.
+Risks: auth, rate limits, incomplete mappings, API drift.
+Human oversight: data QA, permission review, strategic sign-off.
+
+## Category C — Requires Specialized Third-Party Infrastructure
+- Native video clipping at scale
+- Real-time meeting recording/transcription beyond existing Google stack
+- Large-scale BI dashboards for non-MTOS reporting audiences
+
+Pros: fills hard platform gaps.
+Risks: cost, vendor sprawl, implementation complexity.
+Human oversight: vendor selection and governance.
+
+## Category D — Recommended Human Oversight
+- Final testimonial ask
+- Permission confirmation for marketing reuse
+- Difficult client conversations
+- Final strategic recommendation framing
+- Final recap send decision
+
+Pros: protects relationship quality and trust.
+Risks: inconsistent execution if unmanaged.
+Human oversight: always required.
+""",
+    },
+    {
+        "slug": "architecture-setup-tiers",
+        "category": "Architecture",
+        "title": "Beginner, Intermediate, and Advanced MTOS Setup",
+        "summary": "Recommended rollout tiers based on operational maturity and integration depth.",
+        "body": """# MTOS Setup Tiers
+
+## Beginner Setup
+- Monthly Touch OS
+- Supabase Auth + database
+- ClickUp ownership sync
+- Manual transcript paste
+- AI brief + recap generation
+
+## Intermediate Setup
+- Google Workspace integration
+- Gmail communication retrieval
+- Google Drive / Meet transcript sync
+- Google Ads, GBP, GSC, GA4 KPI feeds
+- Structured content capture routing
+
+## Advanced Setup
+- Map Check-ins integration
+- GoHighLevel pipeline sync
+- Meta Ads and Ahrefs enrichment
+- Automated marketing-content handoff
+- Multi-source prep context and operational QA workflows
+
+## Recommended Principle
+Start with the smallest stack that preserves meeting quality, then add API-assisted context before adding specialized third-party tooling.
 """,
     },
     {

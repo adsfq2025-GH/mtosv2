@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs, prompts, aiTerritory, ownership } from "../api";
+import { meetings as meetingsApi, actionItems, contentCaptures, integrations, docs, aiTerritory, ownership } from "../api";
 import { PageHead } from "../Layout";
 import { useAuth } from "../auth";
+import { canManageAdminSurfaces } from "../rbac";
 import {
   ArrowRight, CheckCircle, Clock, Megaphone, Plugs, BookOpen, Plus, MagnifyingGlass, Check, X, Sparkle,
 } from "@phosphor-icons/react";
@@ -108,14 +109,13 @@ export function ContentQueue() {
 
 export function Integrations() {
   const { user } = useAuth();
+  const canManage = canManageAdminSurfaces(user);
   const [list, setList] = useState([]);
   const [edit, setEdit] = useState(null);
   const [form, setForm] = useState({});
   const [busy, setBusy] = useState(false);
   const [testBusy, setTestBusy] = useState("");
   const [oauthBusy, setOauthBusy] = useState(false);
-  const [promptBusy, setPromptBusy] = useState(false);
-  const [mtPrompt, setMtPrompt] = useState("");
   const [tiSettings, setTiSettings] = useState(null);
   const [tiForm, setTiForm] = useState({ scanFrequencyHours: 24, maxPrompts: 60 });
   const [tiBusy, setTiBusy] = useState(false);
@@ -135,7 +135,7 @@ export function Integrations() {
     setList([]);
   });
   const loadOwnership = useCallback(async () => {
-    if (user?.role !== "admin") return;
+    if (!canManage) return;
     try {
       const [statusRes, summaryRes, exceptionsRes] = await Promise.all([
         integrations.clickupStatusV1(),
@@ -150,23 +150,19 @@ export function Integrations() {
       setOwnershipSummary(null);
       setOwnershipExceptions([]);
     }
-  }, [user?.role]);
+  }, [canManage]);
   useEffect(() => { load(); }, []);
   useEffect(() => {
-    if (user?.role !== "admin") return;
+    if (!canManage) return;
     aiTerritory.getSettings().then((r) => {
       setTiSettings(r);
       setTiForm({ scanFrequencyHours: Number(r?.scan_frequency_hours || r?.scanFrequencyHours || 24) || 24, maxPrompts: Number(r?.max_prompts || r?.maxPrompts || 60) || 60 });
     }).catch(() => {});
-  }, [user?.role]);
+  }, [canManage]);
   useEffect(() => {
-    if (user?.role !== "admin") return;
-    prompts.get("monthly_touch_analysis").then((r) => setMtPrompt(String(r?.text || ""))).catch(() => {});
-  }, [user?.role]);
-  useEffect(() => {
-    if (user?.role !== "admin") return;
+    if (!canManage) return;
     loadOwnership();
-  }, [user?.role, loadOwnership]);
+  }, [canManage, loadOwnership]);
   useEffect(() => {
     const onMsg = (ev) => {
       if (ev?.data?.type === "google_oauth_success" || ev?.data?.type === "clickup_oauth_success") {
@@ -222,7 +218,7 @@ export function Integrations() {
     setForm(next);
     if (i.platform === "gohighlevel") {
       integrations.gohighlevelLocations().then((r) => setGhlLocs(r?.locations || [])).catch(() => {});
-      if (user?.role === "admin") integrations.gohighlevelLocationTokens().then((r) => setGhlTokenSavedIds(r?.location_ids || [])).catch(() => {});
+      if (canManage) integrations.gohighlevelLocationTokens().then((r) => setGhlTokenSavedIds(r?.location_ids || [])).catch(() => {});
       setGhlTokenLocId("");
       setGhlTokenValue("");
     }
@@ -398,7 +394,7 @@ export function Integrations() {
             )}
             <div className="flex items-center gap-2 mt-3">
               <button className="btn-ghost text-xs !py-1.5 !px-2.5 flex-1" onClick={() => openConfig(i)} data-testid={`configure-${i.platform}`}>{configureLabel(i)}</button>
-              {user?.role === "admin" && (
+              {canManage && (
                 <button
                   className="btn-secondary text-xs"
                   disabled={testBusy === i.platform}
@@ -430,7 +426,7 @@ export function Integrations() {
         ))}
       </div>
 
-      {user?.role === "admin" && (
+      {canManage && (
         <div className="card-flat p-5 mt-5">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -477,7 +473,7 @@ export function Integrations() {
         </div>
       )}
 
-      {user?.role === "admin" && (
+      {canManage && (
         <div className="card-flat p-5 mt-5">
           <div className="flex items-center justify-between gap-3">
             <div>
@@ -608,39 +604,14 @@ export function Integrations() {
         </div>
       )}
 
-      {user?.role === "admin" && (
+      {canManage && (
         <div className="card-flat p-5 mt-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="font-semibold">Prompt Manager</div>
-              <div className="text-xs text-slate-400 mt-0.5">Central prompt templates used by transcript analysis and meeting intelligence.</div>
+              <div className="font-semibold">Prompt Center</div>
+              <div className="text-xs text-slate-400 mt-0.5">Manage brief, audit, ticket, email, QA, coaching, and retention prompts from a dedicated admin workspace.</div>
             </div>
-            <button
-              className="btn-primary text-xs"
-              disabled={promptBusy}
-              onClick={async () => {
-                setPromptBusy(true);
-                try {
-                  await prompts.put("monthly_touch_analysis", { text: mtPrompt || "" });
-                  alert("Prompt saved.");
-                } catch (e) {
-                  alert(e?.response?.data?.detail || e?.message || "Failed to save prompt");
-                } finally {
-                  setPromptBusy(false);
-                }
-              }}
-            >
-              {promptBusy ? "Saving…" : "Save"}
-            </button>
-          </div>
-          <div className="mt-4">
-            <label className="label">Monthly Touch Analysis Prompt</label>
-            <textarea
-              className="input mt-1.5 min-h-[220px] !py-3"
-              value={mtPrompt}
-              onChange={(e) => setMtPrompt(e.target.value)}
-              placeholder="Enter analysis prompt..."
-            />
+            <Link to="/prompt-center" className="btn-primary text-xs">Open Prompt Center</Link>
           </div>
         </div>
       )}
@@ -692,7 +663,7 @@ export function Integrations() {
               </div>
             )}
 
-            {edit.platform === "gohighlevel" && user?.role === "admin" && (
+            {edit.platform === "gohighlevel" && canManage && (
               <div className="card-flat p-4 bg-white/[0.02] border border-white/5 mt-4">
                 <div className="label mb-1">Location Tokens (Admin)</div>
                 <div className="text-xs text-slate-400">Paste a sub-account (location) Private Integration Token for locations that restrict contacts/conversations access. Account managers can import/export without seeing the token.</div>

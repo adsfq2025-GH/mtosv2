@@ -16,12 +16,22 @@ import WinsLibrary from "@/pages/WinsLibrary";
 import IssuesLibrary from "@/pages/IssuesLibrary";
 import WhiteLabel from "@/pages/WhiteLabel";
 import AiVisibility from "@/pages/AiVisibility";
+import PromptCenter from "@/pages/PromptCenter";
 import { applyDisplayMode, getSavedDisplayMode } from "@/displayMode";
+import { canManageAdminSurfaces } from "@/rbac";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="app-bg min-h-screen flex items-center justify-center text-slate-400">Loading…</div>;
   if (!user) return <Navigate to="/login" replace />;
+  return <Layout>{children}</Layout>;
+}
+
+function AdminOnly({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="app-bg min-h-screen flex items-center justify-center text-slate-400">Loading…</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!canManageAdminSurfaces(user)) return <Navigate to="/" replace />;
   return <Layout>{children}</Layout>;
 }
 
@@ -49,10 +59,11 @@ export default function App() {
           <Route path="/wins" element={<Protected><WinsLibrary /></Protected>} />
           <Route path="/issues" element={<Protected><IssuesLibrary /></Protected>} />
           <Route path="/strategy" element={<Protected><Strategy /></Protected>} />
-          <Route path="/white-label" element={<Protected><WhiteLabel /></Protected>} />
-          <Route path="/ai-visibility" element={<Protected><AiVisibility /></Protected>} />
+          <Route path="/white-label" element={<AdminOnly><WhiteLabel /></AdminOnly>} />
+          <Route path="/ai-visibility" element={<AdminOnly><AiVisibility /></AdminOnly>} />
+          <Route path="/prompt-center" element={<AdminOnly><PromptCenter /></AdminOnly>} />
           <Route path="/content" element={<Navigate to="/opportunities" replace />} />
-          <Route path="/integrations" element={<Protected><Integrations /></Protected>} />
+          <Route path="/integrations" element={<AdminOnly><Integrations /></AdminOnly>} />
           <Route path="/docs" element={<Protected><DocsHub /></Protected>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

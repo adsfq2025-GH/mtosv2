@@ -37,6 +37,7 @@ api.interceptors.response.use(
       const path = window.location.pathname;
       if (!path.startsWith("/login") && !path.startsWith("/register")) {
         localStorage.removeItem("mtos_token");
+        localStorage.removeItem("mtos_refresh_token");
         localStorage.removeItem("mtos_user");
         window.location.href = "/login";
       }
@@ -221,6 +222,7 @@ export const settings = {
 };
 
 export const prompts = {
+  list: () => api.get("/prompts").then((r) => r.data),
   get: (key) => api.get(`/prompts/${encodeURIComponent(key)}`).then((r) => r.data),
   put: (key, payload) => api.put(`/prompts/${encodeURIComponent(key)}`, payload).then((r) => r.data),
 };

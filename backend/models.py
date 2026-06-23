@@ -10,7 +10,7 @@ from db import BaseDocument
 class User(BaseDocument):
     email: EmailStr
     name: str
-    role: Literal["admin", "manager"] = "manager"
+    role: str = "account_manager"
     password_hash: str = ""
     avatar_url: Optional[str] = None
     active: bool = True
@@ -30,7 +30,7 @@ class RegisterIn(BaseModel):
     email: EmailStr
     name: str
     password: str
-    role: Optional[Literal["admin", "manager"]] = "manager"
+    role: Optional[str] = "account_manager"
 
 
 class LoginIn(BaseModel):

@@ -10,7 +10,7 @@ import connectors
 from db import new_id, utcnow
 from oauth_runtime import has_google_oauth_connection
 from models import ActionItem
-from runtime_bridge import get_runtime_bridge
+from supabase_store import get_store
 
 
 def _norm(s: str) -> str:
@@ -188,14 +188,14 @@ def _confidence_from_sources(availability: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _get_ai_visibility_config_doc(tenant_id: str, client_id: str) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("ai_visibility"):
         return await bridge.get_ai_visibility_config_for_client(tenant_id, client_id)
     return None
 
 
 async def _upsert_ai_visibility_config_doc(tenant_id: str, doc: dict) -> dict:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("ai_visibility"):
         stored = await bridge.upsert_ai_visibility_config(tenant_id, doc)
         if not stored:
@@ -211,7 +211,7 @@ async def _get_latest_ai_visibility_scan_doc(
     *,
     exclude_scan_id: Optional[str] = None,
 ) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("ai_visibility"):
         return await bridge.get_latest_ai_visibility_scan(
             tenant_id,
@@ -223,7 +223,7 @@ async def _get_latest_ai_visibility_scan_doc(
 
 
 async def _create_ai_visibility_run_doc(tenant_id: str, doc: dict) -> dict:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("ai_visibility"):
         stored = await bridge.create_ai_visibility_run(tenant_id, doc)
         if not stored:
@@ -233,7 +233,7 @@ async def _create_ai_visibility_run_doc(tenant_id: str, doc: dict) -> dict:
 
 
 async def _create_ai_visibility_scan_doc(tenant_id: str, doc: dict) -> dict:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("ai_visibility"):
         stored = await bridge.create_ai_visibility_scan(tenant_id, doc)
         if not stored:
@@ -243,7 +243,7 @@ async def _create_ai_visibility_scan_doc(tenant_id: str, doc: dict) -> dict:
 
 
 async def _apply_ai_territory_client_patch(tenant_id: str, client_doc: dict, territory_payload: dict) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     updated_at = utcnow().isoformat()
     if bridge.is_enabled_for("clients"):
         next_doc = dict(client_doc or {})
@@ -268,7 +268,7 @@ async def _apply_ai_territory_client_patch(tenant_id: str, client_doc: dict, ter
 async def _create_ai_territory_events(tenant_id: str, client_id: str, events: List[dict]) -> List[dict]:
     if not events:
         return []
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("ai_visibility"):
         stored = await bridge.create_ai_territory_events(tenant_id, client_id, events)
         if not stored and events:
@@ -278,7 +278,7 @@ async def _create_ai_territory_events(tenant_id: str, client_id: str, events: Li
 
 
 async def _create_ai_territory_action_item(tenant_id: str, item: ActionItem) -> dict:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("action_items"):
         stored = await bridge.upsert_action_item(tenant_id, item.to_mongo())
         if not stored:
@@ -291,7 +291,7 @@ async def _pick_google_business_profile_user_id(tenant_id: str, preferred_user_i
     if preferred_user_id:
         if await has_google_oauth_connection(tenant_id, str(preferred_user_id), "google_business_profile"):
             return str(preferred_user_id)
-    bridge_docs = await get_runtime_bridge().list_user_oauth_accounts(
+    bridge_docs = await get_store().list_user_oauth_accounts(
         tenant_id,
         provider="google",
         platform="google_business_profile",

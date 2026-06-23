@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { clients, libraries, users } from "../api";
 import { PageHead } from "../Layout";
 import { useAuth } from "../auth";
+import { canManageAdminSurfaces, normalizeRole } from "../rbac";
 
 const isoDate = (d) => {
   try {
@@ -32,7 +33,7 @@ export default function IssuesLibrary() {
   const [clientOptions, setClientOptions] = useState([]);
   const [userOptions, setUserOptions] = useState([]);
 
-  const canFilterByManager = user?.role === "admin";
+  const canFilterByManager = canManageAdminSurfaces(user);
 
   const load = useCallback(async () => {
     setErr("");
@@ -54,7 +55,7 @@ export default function IssuesLibrary() {
 
   useEffect(() => {
     if (!canFilterByManager) return;
-    users.list().then((rows) => setUserOptions((rows || []).filter((u) => u.role === "manager"))).catch(() => setUserOptions([]));
+    users.list().then((rows) => setUserOptions((rows || []).filter((u) => normalizeRole(u.role) === "account_manager"))).catch(() => setUserOptions([]));
   }, [canFilterByManager]);
 
   useEffect(() => { load(); }, [load]);

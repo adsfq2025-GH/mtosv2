@@ -10,37 +10,21 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 from fastapi import HTTPException
 
-from db import db, decrypt_secret, encrypt_secret
+from db import decrypt_secret, encrypt_secret
 from oauth_runtime import (
     decode_inline_oauth_connection_ref,
     get_google_oauth_runtime_doc,
 )
-from runtime_bridge import get_runtime_bridge
+from supabase_store import get_store
 
 
 def _demo_kpi_enabled() -> bool:
     return str(os.environ.get("ENABLE_DEMO_KPI_SNAPSHOT", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _tenant_scope(tenant_id: str) -> dict:
-    return {"tenant_id": tenant_id}
-
-
 async def _get_integration_doc(tenant_id: str, platform: str) -> Optional[dict]:
     normalized_platform = str(platform or "").strip().lower()
-    bridge_doc = await get_runtime_bridge().get_tenant_integration(tenant_id, normalized_platform)
-    mongo_doc = await db.integrations.find_one({"platform": normalized_platform, **_tenant_scope(tenant_id)})
-    if bridge_doc and mongo_doc:
-        return {
-            **dict(mongo_doc or {}),
-            **dict(bridge_doc or {}),
-            "credentials_encrypted": dict((mongo_doc or {}).get("credentials_encrypted") or {}),
-            "metadata": {
-                **dict((mongo_doc or {}).get("metadata") or {}),
-                **dict((bridge_doc or {}).get("metadata") or {}),
-            },
-        }
-    return bridge_doc or mongo_doc
+    return await get_store().get_tenant_integration(tenant_id, normalized_platform)
 
 
 async def get_credentials(tenant_id: str, platform: str) -> Dict[str, str]:
@@ -86,15 +70,15 @@ async def get_google_refresh_token(tenant_id: str, user_id: str, platform: str) 
 
 
 async def get_client_binding(tenant_id: str, client_id: str, platform: str) -> Optional[dict]:
-    bridge_doc = await get_runtime_bridge().get_client_binding(tenant_id, client_id, platform)
+    bridge_doc = await get_store().get_client_binding(tenant_id, client_id, platform)
     if bridge_doc:
         return bridge_doc
     return None
 
 
 async def _save_client_binding(tenant_id: str, client_id: str, doc: dict) -> Optional[dict]:
-    if get_runtime_bridge().is_enabled_for("client_bindings"):
-        return await get_runtime_bridge().upsert_client_binding(tenant_id, client_id, doc)
+    if get_store().is_enabled_for("client_bindings"):
+        return await get_store().upsert_client_binding(tenant_id, client_id, doc)
     return dict(doc or {})
 
 
@@ -144,8 +128,8 @@ async def upsert_gohighlevel_location_token(tenant_id: str, location_id: str, to
     integration_doc["metadata"] = metadata
     integration_doc["status"] = str(integration_doc.get("status") or "connected").strip() or "connected"
     bridge_doc = None
-    if get_runtime_bridge().is_enabled_for("integrations"):
-        bridge_doc = await get_runtime_bridge().upsert_tenant_integration(tenant_id, integration_doc)
+    if get_store().is_enabled_for("integrations"):
+        bridge_doc = await get_store().upsert_tenant_integration(tenant_id, integration_doc)
     return bool(bridge_doc)
 
 
@@ -162,7 +146,7 @@ async def delete_gohighlevel_location_token(tenant_id: str, location_id: str) ->
             location_tokens.pop(lid, None)
             metadata["location_tokens_encrypted"] = location_tokens
             integration_doc["metadata"] = metadata
-            updated_doc = await get_runtime_bridge().upsert_tenant_integration(tenant_id, integration_doc)
+            updated_doc = await get_store().upsert_tenant_integration(tenant_id, integration_doc)
             updated_bridge = updated_doc is not None
     return updated_bridge
 

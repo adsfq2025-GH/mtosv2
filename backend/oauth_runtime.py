@@ -8,7 +8,7 @@ from typing import Any, Optional
 import jwt
 
 from db import decrypt_secret, encrypt_secret, new_id
-from runtime_bridge import get_runtime_bridge
+from supabase_store import get_store
 from supabase_config import get_oauth_token_store_settings
 
 OAUTH_STATE_SECRET = str(os.environ.get("OAUTH_STATE_SECRET") or os.environ["JWT_SECRET"]).strip()
@@ -98,14 +98,14 @@ def decode_inline_oauth_connection_ref(oauth_connection_ref: Any) -> str:
 
 
 async def get_google_refresh_token_from_bridge(tenant_id: str, user_id: str, platform: str) -> str:
-    bridge_doc = await get_runtime_bridge().get_user_oauth_account(tenant_id, user_id, "google", platform)
+    bridge_doc = await get_store().get_user_oauth_account(tenant_id, user_id, "google", platform)
     if not bridge_doc:
         return ""
     return decode_inline_oauth_connection_ref((bridge_doc or {}).get("oauth_connection_ref"))
 
 
 async def get_google_oauth_bridge_account(tenant_id: str, user_id: str, platform: str) -> Optional[dict[str, Any]]:
-    return await get_runtime_bridge().get_user_oauth_account(tenant_id, user_id, "google", platform)
+    return await get_store().get_user_oauth_account(tenant_id, user_id, "google", platform)
 
 
 def _normalize_scopes(scopes: Any) -> list[str]:
@@ -177,7 +177,7 @@ async def write_google_oauth_token(
     account_email: Optional[str] = None,
     updated_at: Optional[str] = None,
 ) -> dict[str, Any]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     now = str(updated_at or datetime.now(timezone.utc).isoformat())
     bridge_payload = {
         "provider": "google",
@@ -224,7 +224,7 @@ async def clear_google_oauth_token(
     scopes: Optional[list[str]] = None,
     updated_at: Optional[str] = None,
 ) -> dict[str, Any]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     now = str(updated_at or datetime.now(timezone.utc).isoformat())
     bridge_enabled = bridge.is_mirror_enabled_for("oauth_accounts")
     bridge_result: Optional[dict[str, Any]] = None
@@ -266,7 +266,7 @@ async def _resolve_oauth_account_email(user_id: str, fallback_email: Optional[st
     candidate = str(fallback_email or "").strip()
     if candidate:
         return candidate
-    user_doc = await get_runtime_bridge().get_user_profile(str(user_id or "").strip())
+    user_doc = await get_store().get_user_profile(str(user_id or "").strip())
     email = str((user_doc or {}).get("email") or "").strip()
     return email or None
 

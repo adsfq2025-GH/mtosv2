@@ -3,6 +3,7 @@ import { PageHead } from "@/Layout";
 import { clients as clientsApi, aiVisibility as aiVisibilityApi } from "@/api";
 import { useAuth } from "@/auth";
 import { ArrowsClockwise, ChartBar, CheckCircle, Lightning, Sparkle, TrendUp, WarningCircle } from "@phosphor-icons/react";
+import { canManageAdminSurfaces } from "@/rbac";
 
 function fmtDate(v) {
   if (!v) return "";
@@ -44,9 +45,9 @@ export default function AiVisibility() {
       const r = await aiVisibilityApi.entitlement();
       setEnt(r);
     } catch {
-      setEnt({ ok: false, enabled: user?.role === "admin", reason: "unknown" });
+      setEnt({ ok: false, enabled: canManageAdminSurfaces(user), reason: "unknown" });
     }
-  }, [user?.role]);
+  }, [user]);
 
   const loadClients = React.useCallback(async () => {
     const r = await clientsApi.list();
@@ -129,7 +130,7 @@ export default function AiVisibility() {
     loadRuns(configId, selectedScanId).catch(() => {}).finally(() => setLoadingRuns(false));
   }, [configId, loadRuns, selectedScanId]);
 
-  const enabled = !!ent?.enabled || user?.role === "admin";
+  const enabled = !!ent?.enabled || canManageAdminSurfaces(user);
 
   const ensureConfig = async () => {
     if (!clientId) return;

@@ -4,6 +4,7 @@ import { clients, meetings, actionItems, integrations, reviews, feedback, health
 import { PageHead } from "../Layout";
 import { Plus, X, ArrowRight, MapPin, Briefcase, EnvelopeSimple, Phone, Trash, Sparkle, Star, TrendUp } from "@phosphor-icons/react";
 import { useAuth } from "../auth";
+import { canManageAdminSurfaces } from "../rbac";
 
 const healthChip = (h) => h >= 80 ? "chip-success" : h >= 60 ? "chip-info" : h >= 40 ? "chip-warn" : "chip-danger";
 const toArray = (v) => (Array.isArray(v) ? v : []);
@@ -17,6 +18,7 @@ export function ClientsList() {
   const [syncLastRun, setSyncLastRun] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const { user } = useAuth();
+  const canManage = canManageAdminSurfaces(user);
   const navigate = useNavigate();
   const load = useCallback(() => clients.list().then((rows) => setList(toArray(rows))).catch(() => setList([])), []);
   useEffect(() => { load(); }, [load]);
@@ -151,7 +153,7 @@ export function ClientsList() {
               >
                 {importBusy ? "Syncing…" : "Sync Now"}
               </button>
-              {user?.role === "admin" && (
+              {canManage && (
                 <button
                   className="btn-ghost"
                   disabled={importBusy}
@@ -254,6 +256,7 @@ export function ClientDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const canManage = canManageAdminSurfaces(user);
   // #region debug-point H1:init-debug-client
   const dbgEmit = useCallback((hypothesisId, location, msg, data = {}) => {
     fetch("http://127.0.0.1:7778/event", {
@@ -603,7 +606,7 @@ export function ClientDetail() {
         subtitle={`${client.name}${client.industry ? ` · ${client.industry}` : ""}${client.location ? ` · ${client.location}` : ""}`}
         actions={
           <>
-            {user?.role === "admin" && (
+            {canManage && (
               <>
                 <button
                   className="btn-ghost flex items-center gap-2"

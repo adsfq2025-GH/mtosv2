@@ -9,18 +9,18 @@ import ai
 import connectors
 from db import utcnow
 from models import ActionItem, Client, Meeting, ReviewMonthlySnapshot, User
-from runtime_bridge import get_runtime_bridge
+from supabase_store import get_store
 
 
 async def _get_client_doc(tenant_id: str, client_id: str) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("clients"):
         return await bridge.get_client(tenant_id, client_id)
     return None
 
 
 async def _list_active_client_docs() -> List[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if not bridge.is_enabled_for("clients"):
         return []
     if bridge.is_enabled_for("tenants"):
@@ -105,11 +105,73 @@ def _prepend_unique_talking_point(items: Any, topic: str, angle: str) -> List[Di
 
 
 async def _list_client_meeting_docs(tenant_id: str, client_id: str, *, limit: int = 1000) -> List[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("meetings"):
         docs = await bridge.list_meetings(tenant_id, limit=limit)
         return [doc for doc in docs if str((doc or {}).get("client_id") or "") == str(client_id)]
     return []
+
+
+async def _list_open_action_item_docs(tenant_id: str, client_id: str, *, limit: int = 1000) -> List[dict]:
+    bridge = get_store()
+    if not bridge.is_enabled_for("action_items"):
+        return []
+    docs = await bridge.list_action_items(tenant_id, limit=limit)
+    return [
+        doc for doc in docs
+        if str((doc or {}).get("client_id") or "") == str(client_id)
+        and not bool((doc or {}).get("is_deleted", False))
+        and str((doc or {}).get("status") or "open").strip().lower() != "done"
+    ]
+
+
+async def _build_advanced_prep_context(tenant_id: str, client: Client, user: Optional[User]) -> str:
+    sections: List[str] = []
+
+    meetings = await _list_client_meeting_docs(tenant_id, client.id, limit=25)
+    meetings = sorted(meetings, key=lambda doc: str((doc or {}).get("scheduled_at") or (doc or {}).get("updated_at") or ""), reverse=True)
+    if meetings:
+        history_lines: List[str] = []
+        for doc in meetings[:3]:
+            history_lines.append(
+                f"- {str((doc or {}).get('title') or 'Monthly Touch').strip()} | "
+                f"when={str((doc or {}).get('scheduled_at') or (doc or {}).get('updated_at') or '').strip() or 'unknown'} | "
+                f"sentiment={str((doc or {}).get('sentiment') or '').strip() or 'unknown'} | "
+                f"health={str((doc or {}).get('health_signal') or '').strip() or 'n/a'} | "
+                f"issues={len((doc or {}).get('issues') or [])}"
+            )
+        sections.append("PREVIOUS MONTHLY TOUCH HISTORY:\n" + "\n".join(history_lines))
+
+    open_actions = await _list_open_action_item_docs(tenant_id, client.id, limit=50)
+    if open_actions:
+        action_lines: List[str] = []
+        for doc in open_actions[:8]:
+            action_lines.append(
+                f"- {str((doc or {}).get('title') or 'Action item').strip()} | "
+                f"owner={str((doc or {}).get('owner') or '').strip() or 'unassigned'} | "
+                f"due={str((doc or {}).get('due_date') or '').strip() or 'unscheduled'} | "
+                f"priority={str((doc or {}).get('priority') or '').strip() or 'n/a'}"
+            )
+        sections.append("OPEN ACTION ITEMS / UNRESOLVED COMMITMENTS:\n" + "\n".join(action_lines))
+
+    client_email = str(getattr(client, "email", "") or "").strip()
+    if user and client_email:
+        try:
+            gmail = await connectors.list_gmail_messages_for_contact(tenant_id, user.id, client_email, max_messages=5)
+        except Exception:
+            gmail = {"ok": False, "messages": []}
+        messages = list((gmail or {}).get("messages") or [])
+        if messages:
+            message_lines: List[str] = []
+            for msg in messages[:5]:
+                message_lines.append(
+                    f"- {str(msg.get('date') or '').strip()[:32]} | "
+                    f"{str(msg.get('subject') or '').strip() or 'No subject'} | "
+                    f"{str(msg.get('snippet') or '').strip()[:180]}"
+                )
+            sections.append("RECENT CLIENT COMMUNICATION HISTORY:\n" + "\n".join(message_lines))
+
+    return "\n\n".join(section for section in sections if section.strip())
 
 
 async def _count_monthly_touch_meetings(tenant_id: str, client_id: str) -> int:
@@ -118,7 +180,7 @@ async def _count_monthly_touch_meetings(tenant_id: str, client_id: str) -> int:
 
 
 async def _get_previous_review_snapshot(tenant_id: str, client_id: str, current_month: str) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("reviews"):
         docs = await bridge.list_review_monthly_snapshots(
             tenant_id,
@@ -151,7 +213,7 @@ async def upsert_review_snapshot_from_kpi(tenant_id: str, client_id: str, kpi: D
             kpi_period_kind=str(period.get("kind") or ""),
             kpi_period_current_end=cur_end or None,
         )
-        bridge = get_runtime_bridge()
+        bridge = get_store()
         if bridge.is_enabled_for("reviews"):
             await bridge.upsert_review_monthly_snapshot(tenant_id, client_id, snap.to_mongo())
             return
@@ -291,7 +353,7 @@ def apply_first_90_day_brief_support(brief: Dict[str, Any], support: Optional[Di
 
 async def _ensure_meeting_for_client(tenant_id: str, client: Client, user: Optional[User]) -> Meeting:
     title = f"Monthly Touch — {utcnow().strftime('%B %Y')}"
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("meetings"):
         meetings = await bridge.list_meetings(tenant_id, limit=500)
         existing = next(
@@ -327,7 +389,7 @@ async def _ensure_meeting_for_client(tenant_id: str, client: Client, user: Optio
 
 
 async def _upsert_action_item(tenant_id: str, client_id: str, meeting_id: str, title: str, description: str, owner: Optional[str]) -> ActionItem:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     due = (utcnow() + timedelta(days=14)).date().isoformat()
     if bridge.is_enabled_for("action_items"):
         existing_items = await bridge.list_action_items(tenant_id, client_legacy_id=client_id, meeting_legacy_id=meeting_id, limit=500)
@@ -423,7 +485,7 @@ async def _push_action_item_to_clickup(tenant_id: str, item: ActionItem, client_
     external_id = data.get("id")
     external_url = data.get("url")
     update: Dict[str, Any] = {"pushed_to": "clickup", "external_id": external_id, "external_url": external_url, "updated_at": utcnow().isoformat()}
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("action_items"):
         stored = await bridge.upsert_action_item(tenant_id, {**item.to_mongo(), **update})
         if stored:
@@ -449,10 +511,14 @@ async def generate_for_client(
 
     kpi = await connectors.build_kpi_snapshot(tenant_id, client_id, client.company, user_id=(user.id if user else None))
     onboarding_support = await build_first_90_day_brief_support(tenant_id, client.to_mongo(), kpi)
+    advanced_context = await _build_advanced_prep_context(tenant_id, client, user)
     brief = await ai.generate_meeting_brief(
         client=client.model_dump(),
         kpi_snapshot=kpi,
-        extra_context=merge_brief_extra_context(extra_context, (onboarding_support or {}).get("extra_context")),
+        extra_context=merge_brief_extra_context(
+            merge_brief_extra_context(extra_context, (onboarding_support or {}).get("extra_context")),
+            advanced_context,
+        ),
         model_key=model_key or ai.DEFAULT_MODEL,
         session_id=f"monthly-touch-{meeting.id}",
     )
@@ -477,7 +543,7 @@ async def generate_for_client(
         "status": "prep",
         "updated_at": utcnow().isoformat(),
     }
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     next_doc = {**meeting.to_mongo(), **update}
     if bridge.is_enabled_for("meetings"):
         m_doc = await bridge.upsert_meeting(tenant_id, next_doc)

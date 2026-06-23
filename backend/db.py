@@ -1,59 +1,49 @@
-"""DB + utility helpers (Mongo, encryption, datetime, ids)."""
+"""Utility helpers (ids, datetime, encryption).
+
+The backend is Supabase-only. MongoDB has been removed completely.
+"""
+from __future__ import annotations
+
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
-import uuid
 
-from bson import ObjectId
 from cryptography.fernet import Fernet
-from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 
-# ---------- Mongo client ----------
-_mongo_url = os.environ.get("MONGO_URL", "").strip()
-_db_name = os.environ.get("DB_NAME", "").strip()
-_mongo_timeout_ms = int(os.environ.get("MONGO_TIMEOUT_MS", "5000"))
+# ---------- ID / datetime helpers ----------
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-class _MissingDB:
-    def __getattr__(self, name: str):
-        raise RuntimeError("MongoDB is not configured. Set MONGO_URL and DB_NAME.")
+def new_id() -> str:
+    return str(uuid.uuid4())
 
 
-if _mongo_url and _db_name:
-    _client = AsyncIOMotorClient(_mongo_url, serverSelectionTimeoutMS=_mongo_timeout_ms)
-    db = _client[_db_name]
-else:
-    db = _MissingDB()
+def _coerce_id(v: Any) -> str:
+    if v is None:
+        return ""
+    return str(v).strip()
 
 
-def is_mongo_configured() -> bool:
-    return bool(_mongo_url and _db_name)
+PyObjectId = Annotated[str, BeforeValidator(_coerce_id)]
 
 
-# ---------- ObjectId support ----------
-def _to_str(v: Any) -> str:
-    if isinstance(v, ObjectId):
-        return str(v)
-    return str(v)
-
-
-PyObjectId = Annotated[str, BeforeValidator(_to_str)]
-
-
+# ---------- Document base ----------
 class BaseDocument(BaseModel):
-    """Common doc base with id <-> _id mapping."""
+    """Common document base (id + timestamps)."""
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True, extra="ignore")
 
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    id: str = Field(default_factory=new_id, alias="_id")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
     def to_mongo(self) -> dict:
-        d = self.model_dump(by_alias=True)
-        # store datetimes as ISO strings for JSON safety
+        """Serialize for storage. Kept as ``to_mongo`` for compatibility."""
+        d = self.model_dump(by_alias=True, mode="json")
         for k, v in list(d.items()):
             if isinstance(v, datetime):
                 d[k] = v.isoformat()
@@ -61,24 +51,18 @@ class BaseDocument(BaseModel):
 
     @classmethod
     def from_mongo(cls, doc: Optional[dict]):
+        """Build from a stored doc. Kept as ``from_mongo`` for compatibility."""
         if not doc:
             return None
         d = dict(doc)
         for k in ("created_at", "updated_at"):
-            if isinstance(d.get(k), str):
+            val = d.get(k)
+            if isinstance(val, str):
                 try:
-                    d[k] = datetime.fromisoformat(d[k])
+                    d[k] = datetime.fromisoformat(val)
                 except Exception:
                     pass
         return cls.model_validate(d)
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def new_id() -> str:
-    return str(uuid.uuid4())
 
 
 # ---------- Encryption for integration credentials ----------
@@ -88,13 +72,13 @@ _fernet = Fernet(os.environ["INTEGRATION_ENCRYPTION_KEY"].encode())
 def encrypt_secret(value: str) -> str:
     if value is None:
         return ""
-    return _fernet.encrypt(value.encode()).decode()
+    return _fernet.encrypt(str(value).encode()).decode()
 
 
 def decrypt_secret(value: str) -> str:
     if not value:
         return ""
     try:
-        return _fernet.decrypt(value.encode()).decode()
+        return _fernet.decrypt(str(value).encode()).decode()
     except Exception:
         return ""

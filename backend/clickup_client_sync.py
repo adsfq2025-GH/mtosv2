@@ -11,7 +11,7 @@ import httpx
 from db import new_id, utcnow
 import connectors
 from models import Client, ClientIntegrationBinding
-from runtime_bridge import get_runtime_bridge
+from supabase_store import get_store
 
 
 # region debug-point C0:clickup-sync-core
@@ -67,14 +67,14 @@ async def _save_clickup_integration_metadata(tenant_id: str, patch: dict[str, An
         else:
             next_meta[key] = value
     next_doc["metadata"] = next_meta
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("integrations"):
         return await bridge.upsert_tenant_integration(tenant_id, next_doc)
     return next_doc
 
 
 async def _write_sync_state(tenant_id: str, user_id: str, patch: dict[str, Any]) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     current = await bridge.get_clickup_client_sync_state(tenant_id, user_id) if bridge.is_enabled_for("clickup_sync") else None
     next_doc = {
         "tenant_id": tenant_id,
@@ -88,28 +88,28 @@ async def _write_sync_state(tenant_id: str, user_id: str, patch: dict[str, Any])
 
 
 async def _write_sync_log(tenant_id: str, user_id: str, doc: dict[str, Any]) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("clickup_sync"):
         return await bridge.create_clickup_client_sync_log(tenant_id, user_id, doc)
     return dict(doc or {})
 
 
 async def _list_clients_for_tenant(tenant_id: str) -> List[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("clients"):
         return await bridge.list_clients(tenant_id, limit=5000)
     return []
 
 
 async def _list_clickup_bindings_for_tenant(tenant_id: str) -> List[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("client_bindings"):
         return await bridge.list_tenant_client_bindings(tenant_id, platform="clickup_client_health_tracker", enabled=True, limit=5000)
     return []
 
 
 async def _upsert_client_doc(tenant_id: str, doc: dict[str, Any]) -> Optional[dict]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("clients"):
         return await bridge.upsert_client(tenant_id, doc)
     return dict(doc or {})
@@ -657,7 +657,7 @@ async def sync_assigned_clients_for_user(tenant_id: str, user_id: str, user_name
 
 
 async def sync_assigned_clients_for_all_users(tenant_id: str) -> Dict[str, Any]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     users: List[dict] = []
     if bridge.is_enabled_for("profiles") and bridge.is_enabled_for("tenants"):
         profiles = await bridge.list_user_profiles(limit=5000)
@@ -681,7 +681,7 @@ async def sync_assigned_clients_for_all_users(tenant_id: str) -> Dict[str, Any]:
 
 
 async def sync_all_tenants() -> Dict[str, Any]:
-    bridge = get_runtime_bridge()
+    bridge = get_store()
     if bridge.is_enabled_for("tenants"):
         tenants = await bridge.list_tenants(status="active", limit=5000)
     else:
